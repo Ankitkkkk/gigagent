@@ -263,6 +263,21 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
                 self.assertIsNotNone(result["floor_id"])
                 self.assertIsNone(self.ws_store.read_identity(agent["agent_id"]))
 
+    def test_history_repair_preserves_unusable_identity_shadows(self):
+        ws = self.ws_store.create("unusable-shadow")
+        for mode in ("none", "literal"):
+            for shadow in ({}, {"token": ""}, {"token": None}, {"token": 42}, []):
+                with self.subTest(mode=mode, shadow=shadow):
+                    agent = self.add_agent(ws, "none", None, state="exited")
+                    path = self.ws_store.identity_path(agent["agent_id"])
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    original = json.dumps(shadow)
+                    path.write_text(original)
+                    result = self.post_history(ws["id"], agent["agent_id"], mode)
+                    self.assertEqual(result["history_mode"], mode)
+                    self.assertEqual(result["floor_id"], 0)
+                    self.assertEqual(path.read_text(), original)
+
     def test_exited_pending_history_can_be_repaired(self):
         ws = self.ws_store.create("stuck")
         agent = self.add_agent(ws, "literal", None, state="exited")

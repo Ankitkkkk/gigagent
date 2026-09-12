@@ -2946,8 +2946,9 @@ async def change_history_mode(ws_id: str, agent_id: str, request: Request):
                 floor_id = (recent[-1]["id"] if recent else -1) + 1
             agent = workspace_store.update_agent(ws_id, agent_id, floor_id=floor_id)
             identity = workspace_store.read_identity(agent_id)
-            if identity is not None:
-                workspace_store.write_identity(ws, agent, identity["token"])
+            token = identity.get("token") if isinstance(identity, dict) else None
+            if isinstance(token, str) and token:
+                workspace_store.write_identity(ws, agent, token)
         return agent
     if agent["history_mode"] != "none":
         return JSONResponse({"error": f"{agent['registry_name']} already read history under "
@@ -2956,8 +2957,9 @@ async def change_history_mode(ws_id: str, agent_id: str, request: Request):
     agent = workspace_store.update_agent(ws_id, agent_id, history_mode="literal", floor_id=0,
                                          history_state="pending")
     identity = workspace_store.read_identity(agent_id)
-    if identity is not None:
-        workspace_store.write_identity(ws, agent, identity["token"])
+    token = identity.get("token") if isinstance(identity, dict) else None
+    if isinstance(token, str) and token:
+        workspace_store.write_identity(ws, agent, token)
     if agent["last_state"] == "running":
         from workspace_launcher import LITERAL_PROMPT
         agents.trigger_sync(agent["registry_name"], message="catch up", channel=ws["channel"],
