@@ -16,6 +16,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+class NameInUse(Exception):
+    """A preferred registry name is taken, reserved, or conflicts with another family."""
+
+    def __init__(self, name: str, reason: str = "name in use"):
+        super().__init__(f"{reason}: {name}")
+        self.name = name
+        self.reason = reason
+
+
 @dataclass
 class Instance:
     """A live agent instance."""
@@ -183,11 +192,17 @@ class RuntimeRegistry:
 
     # --- Registration ---
 
-    def register(self, base: str, label: str | None = None) -> dict | None:
+    def register(self, base: str, label: str | None = None, preferred_name: str | None = None,
+                 allow_reserved: bool = False) -> dict | None:
         """Register a new instance of `base`. Returns slot info or None if unknown base.
 
         When a 2nd instance registers, slot 1 is renamed from 'base' to 'base-1'
         to prevent identity ambiguity. The rename info is returned as '_renamed_slot1'.
+
+        `preferred_name`, if given, must resolve to a free slot (raises `NameInUse`
+        otherwise). A name outside `base`'s own family is registered as a normal slot
+        and then renamed to the custom name. `allow_reserved=True` lets a caller take
+        a name still inside the post-deregister grace reservation.
         """
         with self._lock:
             if base not in self._bases:
@@ -203,9 +218,38 @@ class RuntimeRegistry:
                 if rb == base:
                     reserved.add(rs)
 
-            slot = 1
-            while slot in taken or slot in reserved:
-                slot += 1
+            name_override = None
+            custom_name = None
+            if preferred_name:
+                if preferred_name in self._instances:
+                    raise NameInUse(preferred_name)
+                if preferred_name in self._reserved:
+                    if not allow_reserved:
+                        raise NameInUse(preferred_name)
+                    del self._reserved[preferred_name]
+                    reserved = {s for s in reserved if f"{base}-{s}" != preferred_name and not (s == 1 and preferred_name == base)}
+                p_base, p_slot = self._parse_name(preferred_name)
+                if p_base == base:
+                    if p_slot in taken or p_slot in reserved:
+                        raise NameInUse(preferred_name)
+                    # "claude-1" must not collide with a bare "claude" holding slot 1
+                    if p_slot == 1 and base in self._instances:
+                        raise NameInUse(preferred_name)
+                    name_override = preferred_name
+                    slot_pref = p_slot
+                else:
+                    conflict = self._conflicts_with_other_family(preferred_name, base)
+                    if conflict:
+                        raise NameInUse(preferred_name, conflict)
+                    custom_name = preferred_name
+                    slot_pref = None
+            else:
+                slot_pref = None
+
+            slot = slot_pref if slot_pref is not None else 1
+            if slot_pref is None:
+                while slot in taken or slot in reserved:
+                    slot += 1
 
             # When a 2nd instance registers, rename slot-1 from "base" to "base-1"
             # so that no instance shares a name with the base family.  This prevents
@@ -224,7 +268,7 @@ class RuntimeRegistry:
                     self._renames[base] = new_s1_name
                     renamed_slot1 = {"old": base, "new": new_s1_name}
 
-            name = base if slot == 1 else f"{base}-{slot}"
+            name = name_override or (base if slot == 1 else f"{base}-{slot}")
             base_cfg = self._bases[base]
             color = _derive_color(base_cfg.get("color", "#888"), slot)
 
@@ -252,6 +296,15 @@ class RuntimeRegistry:
         self._notify()
         self._save_renames()
         self._save_instances()
+
+        if custom_name:
+            renamed = self.rename(name, custom_name, label)
+            if isinstance(renamed, str):
+                self.deregister(name)
+                raise NameInUse(custom_name, renamed)
+            result["name"] = renamed["name"]
+            result["label"] = renamed["label"]
+
         return result
 
     def deregister(self, name: str, reclaimable: bool = False) -> dict | None:
@@ -530,6 +583,26 @@ class RuntimeRegistry:
     def get_all_names(self) -> list[str]:
         with self._lock:
             return list(self._instances.keys())
+
+    def free_slot_name(self, base: str, exclude=()) -> str:
+        """Smallest free '<base>-<n>' for workspace agents (never bare '<base>').
+
+        `exclude` holds names that are not live in the registry but must not be
+        reused either — the launcher passes every saved workspace member."""
+        excluded = set(exclude)
+        with self._lock:
+            self._expire_reserved()
+            taken = {i.slot for i in self._instances.values() if i.base == base}
+            if base in self._instances:
+                taken.add(1)
+            for rn in self._reserved:
+                rb, rs = self._parse_name(rn)
+                if rb == base:
+                    taken.add(rs)
+            n = 1
+            while n in taken or f"{base}-{n}" in excluded:
+                n += 1
+            return f"{base}-{n}"
 
     def get_active_names(self) -> list[str]:
         with self._lock:
