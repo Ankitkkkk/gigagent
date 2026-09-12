@@ -1255,6 +1255,15 @@ class WorkspaceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.unrouted_ids(ws["id"], channel_ids), [])
         self.assertEqual(self.store.get(ws["id"]).get("routing_done", []), [])
 
+    def test_compaction_drops_done_ids_deleted_from_the_channel(self):
+        ws = self.store.create("x")
+        ch = ws["channel"]
+        self.store.record_routing(ch, 4, [])      # a slash command: processed, then deleted from the store
+        self.store.record_routing(ch, 5, [])
+        self.store.compact_routing(ws["id"], [5])
+        self.assertEqual(self.store.routing_high_water(ws["id"]), 5)
+        self.assertEqual(self.store.get(ws["id"]).get("routing_done", []), [])
+
     def test_routing_recorded_and_acks_compact(self):
         ws = self.store.create("x")
         ag = self.add(ws)
@@ -1692,14 +1701,19 @@ class WorkspaceStore:
             return [i for i in sorted(channel_msg_ids) if i > high and i not in done]
 
     def compact_routing(self, ws_id: str, channel_msg_ids: list[int]) -> None:
-        """Advance the mark through processed ids that are contiguous in the channel."""
+        """Advance the mark through processed ids that are contiguous in the channel.
+
+        A done id that is no longer in the channel (the observer deletes raw slash
+        commands after processing) is dropped so it cannot linger forever."""
         with self._lock:
             ws = self._find(ws_id)
             if not ws:
                 return
             high = int(ws.get("routing_high_water", -1))
-            done = set(ws.get("routing_done", []))
-            moved = False
+            known = set(channel_msg_ids)
+            newest = max(known, default=-1)
+            done = {d for d in ws.get("routing_done", []) if d in known or d > newest}
+            moved = done != set(ws.get("routing_done", []))
             for i in sorted(channel_msg_ids):
                 if i <= high:
                     continue
@@ -1845,7 +1859,7 @@ class WorkspaceStore:
 - [ ] **Step 5: Run to verify it passes**
 
 Run: `python -m unittest tests.test_workspace_store -v`
-Expected: 19 tests, OK.
+Expected: 20 tests, OK.
 
 - [ ] **Step 6: Commit**
 
@@ -2466,6 +2480,23 @@ class RoutingRecipientsTests(unittest.TestCase):
         self.assertEqual(self.ws_store.routing_high_water(self.ws["id"]), plain["id"])
         self.assertEqual(self.routed(routed_mid), [self.stopped["agent_id"]])
 
+    def test_skipped_message_types_do_not_pin_the_watermark(self):
+        sysmsg = app_module.store.add("system", "claude-1 appears offline", msg_type="system",
+                                      channel=self.ws["channel"])
+        asyncio.run(app_module._handle_new_message(sysmsg))       # returns before routing
+        chat = self.post("@claude-1 after the system line")
+        app_module._compact_routing_marks()
+        self.assertEqual(self.ws_store.routing_high_water(self.ws["id"]), chat["id"] if isinstance(chat, dict) else chat)
+        self.assertEqual(self.ws_store.get(self.ws["id"]).get("routing_done", []), [])
+        self.assertEqual(self.routed(sysmsg["id"]), [])
+
+    def test_loop_guard_return_still_marks_the_message(self):
+        app_module.router._get_ch(self.ws["channel"])["paused"] = True
+        mid = self.post("@codex-1 while paused")
+        app_module._compact_routing_marks()
+        self.assertGreaterEqual(self.ws_store.routing_high_water(self.ws["id"]), mid)
+        app_module.router._get_ch(self.ws["channel"])["paused"] = False
+
     def test_replay_fills_a_gap_left_by_out_of_order_observers(self):
         first = app_module.store.add("ankit", "@claude-1 first", channel=self.ws["channel"])
         second = app_module.store.add("ankit", "@claude-1 second", channel=self.ws["channel"])
@@ -2545,17 +2576,46 @@ with
         router.update_agents(sorted(all_names))
 ```
 
-In `_handle_new_message`, immediately after `targets = list(dict.fromkeys(targets))  # dedupe, preserve order` add:
+Every message in a workspace channel must end up marked as processed, or the
+routing watermark pins on it forever. `_handle_new_message` has several early
+`return`s (system/join/leave types, slash commands, the loop guard), so the
+mark is made in a wrapper's `finally`, not at the routing site alone. Rename
+the existing function to `_handle_new_message_inner(msg: dict, mark)` and add
+the wrapper above it:
+
+```python
+async def _handle_new_message(msg: dict):
+    """Store observer. Wraps the real handler so every workspace-channel message is
+    marked processed (spec §4) no matter which early return it takes."""
+    channel = msg.get("channel", "general")
+    marked = [False]
+
+    def mark(agent_ids):
+        if workspace_store is not None and "id" in msg and not marked[0]:
+            workspace_store.record_routing(channel, msg["id"], list(agent_ids))
+            marked[0] = True
+
+    if msg.get("type", "chat") not in ("chat", "summary"):
+        mark([])            # system/join/leave/drafts: processed, nobody addressed
+    try:
+        await _handle_new_message_inner(msg, mark)
+    finally:
+        mark([])            # any early return or exception: processed, nobody addressed
+```
+
+`record_routing` is a no-op for channels that belong to no workspace, so the
+wrapper costs nothing elsewhere. Then, inside `_handle_new_message_inner`,
+immediately after `targets = list(dict.fromkeys(targets))  # dedupe, preserve order` add:
 
 ```python
     # Spec §4: record stable recipients for unread tracking (side table, not the message).
-    # Always called for workspace channels so the high-water mark advances even when
-    # nobody was addressed; _replay_unrouted() relies on that after a crash.
-    if workspace_store is not None and msg_type in ("chat", "summary") and "id" in msg:
+    if msg_type in ("chat", "summary"):
         tokens = router.mention_tokens(text)
-        agent_ids = workspace_store.resolve_recipients(channel, tokens, targets)
-        workspace_store.record_routing(channel, msg["id"], agent_ids)
+        mark(workspace_store.resolve_recipients(channel, tokens, targets) if workspace_store else [])
 ```
+
+A chat message that dies in a crash before the observer finishes is the only
+case that leaves no mark; `_replay_unrouted()` handles it.
 
 Add next to `_on_workspace_change` (Task 12 adds that; put this helper beside `_on_registry_change` now):
 
@@ -2599,7 +2659,7 @@ def _compact_routing_marks():
 
 - [ ] **Step 5: Run to verify it passes, then the whole suite**
 
-Run: `python -m unittest tests.test_unread_routing -v` → 17 tests (one skip) OK. If `configure()` raises `KeyError` for a config key the test config lacks, copy that key's default from `config.toml` into `cfg()` in the test.
+Run: `python -m unittest tests.test_unread_routing -v` → 21 tests (one skip) OK. (`self.post` returns the message id; the first new test tolerates either shape.) If `configure()` raises `KeyError` for a config key the test config lacks, copy that key's default from `config.toml` into `cfg()` in the test.
 Run: `python -m unittest discover -s tests -v` → green.
 
 - [ ] **Step 6: Commit**
