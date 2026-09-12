@@ -56,7 +56,8 @@ class StartupTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch('cli_api._opener', return_value=self.opener).start()
         self.runner = patch('cli_workspace_chat.subprocess.run', side_effect=[
-            subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)]).start()
+            subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0)]).start()
         patch('cli_workspace_chat.shutil.which', return_value='/usr/bin/tmux').start()
         patch('cli_workspace_chat.sys.platform', 'linux').start()
         patch('cli_workspace_chat.time.monotonic', side_effect=lambda: self.now).start()
@@ -100,6 +101,7 @@ class StartupTests(unittest.TestCase):
         with self.assertRaises(CLIError) as error:
             self.ensure(explicit=True)
         self.assert_manual(error)
+        self.assertNotIn('agentchattr-server', str(error.exception))
         self.runner.assert_not_called()
 
     def test_windows_refuses_autostart(self):
@@ -115,6 +117,7 @@ class StartupTests(unittest.TestCase):
             with self.assertRaises(CLIError) as error:
                 self.ensure()
         self.assert_manual(error)
+        self.assertNotIn('agentchattr-server', str(error.exception))
         self.runner.assert_not_called()
 
     def test_launch_quotes_all_resolved_config_flags(self):
@@ -156,15 +159,30 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(len(self.runner.call_args_list), 1)
         self.assertEqual(len(self.requests), 1)
 
-    def test_launch_failure_has_manual_log_tmux_hint(self):
+    def test_launch_failure_has_manual_log_hint_without_unconfirmed_tmux(self):
         self.down()
         self.runner.side_effect = [subprocess.CompletedProcess([], 1),
                                    subprocess.CompletedProcess([], 1)]
         with self.assertRaises(CLIError) as error:
             self.ensure()
         self.assert_manual(error)
-        self.assertIn('agentchattr-server', str(error.exception))
+        self.assertNotIn('agentchattr-server', str(error.exception))
         self.assertNotIn('Started server in tmux session agentchattr-server.', self.output)
+
+    def test_readiness_timeout_names_only_confirmed_remaining_tmux_session(self):
+        self.opener.open.side_effect = URLError(ConnectionRefusedError())
+        for returncode in (0, 1):
+            with self.subTest(session_exists=returncode == 0):
+                self.runner.reset_mock(side_effect=True)
+                self.runner.side_effect = [subprocess.CompletedProcess([], 1),
+                    subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], returncode)]
+                with self.assertRaises(CLIError) as error:
+                    self.ensure()
+                self.assert_manual(error)
+                self.assertEqual('Tmux session: agentchattr-server' in str(error.exception), returncode == 0)
+                self.assertEqual(self.runner.call_args.args[0],
+                                 ['tmux', 'has-session', '-t', '=agentchattr-server'])
+                self.assertLessEqual(self.runner.call_args.kwargs['timeout'], 5)
 
     def test_fifteen_second_deadline_bounds_every_probe(self):
         def unreachable(request, timeout):
@@ -226,6 +244,7 @@ class PickerFixture:
         self.warning = None
         self.main_thread = threading.get_ident()
         self.refuse = set()
+        self.refusal = CLIError('native session id unknown; use --fresh', 409)
         self.api = WorkspaceAPI('http://127.0.0.1:18300')
         self.addCleanup(patch.stopall)
         patch('cli_api.fetch_session_token', return_value='token').start()
@@ -271,7 +290,7 @@ class PickerFixture:
         if parts[-1] == 'resume':
             agent = next(a for a in ws['agents'] if a['agent_id'] == parts[-2])
             if agent['agent_id'] in self.refuse:
-                raise CLIError('native session id unknown', 409)
+                raise self.refusal
             agent['last_state'] = 'starting'
             return dict(agent)
         raise AssertionError(f'Unexpected request: {self.calls[-1]}')
@@ -408,20 +427,41 @@ class ResumeTests(PickerFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.prompts[-1], ('Resume 2 stopped agents? [Y/n]', 'y'))
         posts = [c for c in self.calls if c[0] == 'POST']
         self.assertEqual(posts, [
-            ('POST', '/api/workspaces/ws_abcd00/agents/ag_a/resume', {'cwd': str(self.tmp_path)}),
-            ('POST', '/api/workspaces/ws_abcd00/agents/ag_b/resume', {'cwd': str(self.tmp_path)})])
+            ('POST', '/api/workspaces/ws_abcd00/agents/ag_a/resume', {}),
+            ('POST', '/api/workspaces/ws_abcd00/agents/ag_b/resume', {})])
         self.assertEqual(self.calls[-1], ('GET', '/api/workspaces/ws_abcd00', None))
         self.assertEqual(selected['agents'][0]['last_state'], 'starting')
+
+    async def test_batch_resume_does_not_override_stored_symlink_cwd(self):
+        project = self.tmp_path / 'project'
+        project.mkdir()
+        link = self.tmp_path / 'project-link'
+        link.symlink_to(project, target_is_directory=True)
+        self.workspaces = [self.workspace(agents=[self.agent(cwd=str(link))])]
+        await self.choose('1', 'yes')
+        self.assertIn(('POST', '/api/workspaces/ws_abcd00/agents/ag_a/resume', {}), self.calls)
 
     async def test_resume_refusal_prints_exact_fresh_hint_and_continues(self):
         self.workspaces = [self.workspace(agents=[self.agent(),
             self.agent(agent_id='ag_b', registry_name='codex-1')])]
         self.refuse.add('ag_a')
         await self.choose('1', 'yes')
-        self.assertIn('native session id unknown', self.output)
+        self.assertIn('native session id unknown; use --fresh', self.output)
         self.assertIn('/resume claude-1 --fresh', self.output)
         self.assertEqual([c[1] for c in self.calls if c[0] == 'POST'], [
             '/api/workspaces/ws_abcd00/agents/ag_a/resume', '/api/workspaces/ws_abcd00/agents/ag_b/resume'])
+
+    async def test_other_resume_refusals_do_not_recommend_fresh(self):
+        for status, message in [(409, 'name claude-1 in use'), (409, 'agent is already running'),
+                                (403, 'authentication required'), (500, 'failed despite --fresh')]:
+            with self.subTest(status=status, message=message):
+                self.workspaces = [self.workspace(agents=[self.agent()])]
+                self.refuse = {'ag_a'}
+                self.refusal = CLIError(message, status)
+                self.output.clear()
+                await self.choose('1', 'yes')
+                self.assertIn(message, self.output)
+                self.assertNotIn('/resume claude-1 --fresh', self.output)
 
     async def test_session_selector_skips_picker_retains_resume_prompt(self):
         self.workspaces = [self.workspace(agents=[self.agent()])]
@@ -454,6 +494,17 @@ class ControllerTests(PickerFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.channel, 'ws-billing')
         self.assertEqual(controller.workspace['id'], 'ws_abcd00')
         self.assertEqual(self.prompts, [])
+
+    async def test_windows_exited_agent_skips_resume_and_enters_chat(self):
+        self.workspaces = [self.workspace(agents=[self.agent()])]
+        controller = chat.WorkspaceChatController(self.client, self.api, selector='billing')
+        with patch('cli_workspace_chat.sys.platform', 'win32'):
+            initialized = await controller.initialize(self.answers(''))
+        self.assertTrue(initialized)
+        self.assertEqual(self.client.channel, 'ws-billing')
+        self.assertIn('Requires tmux (Linux/macOS). See wrapper_windows.py for manual launch.', self.output)
+        self.assertEqual(self.prompts, [])
+        self.assertFalse(any(c[0] == 'POST' for c in self.calls))
 
     async def test_plain_channel_skips_picker_and_keeps_channel(self):
         self.client.channel = 'support'

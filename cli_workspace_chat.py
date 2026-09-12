@@ -60,8 +60,18 @@ def ensure_server(url, *, explicit_url, config, output=print):
     url = cli_api.local_url(url)
     data_dir = _resolved_path(config.get('server', {}).get('data_dir', './data'))
     log_path = data_dir / 'logs/server.log'
-    hint = (f'Start it manually: python run.py\nServer log: {_safe(log_path)}\n'
-            f'Tmux session: {SERVER_SESSION}')
+    hint = f'Start it manually: python run.py\nServer log: {_safe(log_path)}'
+    session_hint = f'\nTmux session: {SERVER_SESSION}'
+
+    def readiness_failure_hint():
+        try:
+            existing = subprocess.run(['tmux', 'has-session', '-t', '=' + SERVER_SESSION],
+                                      capture_output=True, timeout=5)
+            if existing.returncode == 0:
+                return hint + session_hint
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return hint
 
     def ready(status):
         if _resolved_path(status['data_dir']) != data_dir:
@@ -82,7 +92,8 @@ def ensure_server(url, *, explicit_url, config, output=print):
         existing = subprocess.run(['tmux', 'has-session', '-t', '=' + SERVER_SESSION],
                                   capture_output=True, timeout=5)
         if existing.returncode == 0:
-            raise CLIError(f'Tmux session {SERVER_SESSION} already exists but the server is unavailable.\n' + hint)
+            raise CLIError(f'Tmux session {SERVER_SESSION} already exists but the server is unavailable.\n'
+                           + hint + session_hint)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         argv = [sys.executable, str(ROOT / 'run.py'),
                 '--port', str(config.get('server', {}).get('port', 8300)),
@@ -102,14 +113,14 @@ def ensure_server(url, *, explicit_url, config, output=print):
         try:
             status = _probe_status(url, min(2, remaining))
         except CLIError as error:
-            raise CLIError(_safe(error) + '\n' + hint) from None
+            raise CLIError(_safe(error) + '\n' + readiness_failure_hint()) from None
         if status is not None:
             output(f'Started server in tmux session {SERVER_SESSION}.')
             return ready(status)
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(.25, remaining))
-    raise CLIError('The local server did not become ready within 15 seconds.\n' + hint)
+    raise CLIError('The local server did not become ready within 15 seconds.\n' + readiness_failure_hint())
 
 
 def _timestamp(value):
@@ -180,24 +191,28 @@ async def _offer_resume(api, workspace, prompt, output, no_resume):
     agents = workspace.get('agents', [])
     for agent in agents:
         output(_agent_line(agent))
-    eligible = [(agent, cwd) for agent in agents
+    eligible = [agent for agent in agents
                 if agent.get('last_state') == 'exited'
-                and (cwd := _agent_cwd(agent)) is not None]
+                and _agent_cwd(agent) is not None]
     if no_resume or not eligible:
+        return workspace
+    if sys.platform == 'win32':
+        output(WINDOWS_TMUX_ERROR)
         return workspace
     answer = (await prompt(f'Resume {len(eligible)} stopped agents? [Y/n]', default='y')).strip().lower()
     if answer not in ('', 'y', 'yes'):
         return workspace
     require_tmux_platform()
     resumed = False
-    for agent, cwd in eligible:
+    for agent in eligible:
         try:
             await asyncio.to_thread(api.action, workspace['id'], 'resume', agent['agent_id'],
-                                    body={'cwd': str(cwd)})
+                                    body={})
             resumed = True
         except CLIError as error:
             output(_safe(error))
-            output(_safe(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh'))
+            if error.status == 409 and '--fresh' in str(error):
+                output(_safe(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh'))
     if resumed:
         workspace = await asyncio.to_thread(api.get, workspace['id'])
     return workspace
