@@ -2,7 +2,7 @@
 
 import argparse
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import redirect_stdout
 import json
 import re
@@ -13,8 +13,8 @@ from urllib.parse import urlencode
 
 from cli_api import (CLIError, SessionTokenParser, fetch_session_token, get_api,
                      local_url)
-from cli_workspaces import (WorkspaceAPI, format_workspace_result,
-                            run_workspace_command)
+from cli_workspaces import (WorkspaceAPI, attach_agent, format_workspace_result,
+                            require_tmux_platform, resolve_agent, run_workspace_command)
 from cli_workspace_chat import WorkspaceChatController, ensure_server
 from config_loader import load_config
 
@@ -57,9 +57,30 @@ class ChatClient:
         self.pending_channel = None
         self.on_workspace = None
         self.on_settings = None
+        self._output_paused = False
+        self._output_buffer = deque(maxlen=10000)
+        self._output_omitted = 0
 
-    def show(self, text):
-        self.output(terminal_text(text))
+    def show(self, text, *, immediate=False):
+        text = terminal_text(text)
+        if self._output_paused and not immediate:
+            for line in text.split('\n'):
+                if len(self._output_buffer) == self._output_buffer.maxlen:
+                    self._output_omitted += 1
+                self._output_buffer.append(line)
+        else:
+            self.output(text)
+
+    def pause_output(self):
+        self._output_paused = True
+
+    def resume_output(self):
+        self._output_paused = False
+        if self._output_omitted:
+            omitted, self._output_omitted = self._output_omitted, 0
+            self.output(f'[{omitted} buffered lines omitted]')
+        while self._output_buffer:
+            self.output(self._output_buffer.popleft())
 
     def remember(self, message):
         key = message["id"]
@@ -352,6 +373,7 @@ def build_parser():
                     ("new", "Create a terminal session"),
                     ("spawn", "Start a new agent in a session"),
                     ("resume", "Resume an agent in a session"),
+                    ("attach", "Attach to an agent terminal"),
                     ("stop", "Stop an agent in a session"),
                     ("unread", "Show unread messages for session agents"),
                     ("retry", "Retry unread delivery for an agent"),
@@ -384,7 +406,7 @@ def build_parser():
                                    default=argparse.SUPPRESS)
             subparser.add_argument("--agent-name", default=argparse.SUPPRESS)
             subparser.add_argument("--cwd", default=argparse.SUPPRESS)
-        elif command in ("stop", "retry"):
+        elif command in ("stop", "retry", "attach"):
             subparser.add_argument("agent", metavar="AGENT")
         elif command == "unread":
             subparser.add_argument("--agent", default=argparse.SUPPRESS)
@@ -411,9 +433,18 @@ def main(argv=None):
         parser.error("--channel and --session cannot be used together")
     if args.command == "archive" and args.session is not None:
         parser.error("archive SESSION cannot be combined with --session")
-    if args.command in ("spawn", "resume", "stop", "unread", "retry", "history") \
+    if args.command in ("spawn", "resume", "stop", "unread", "retry", "history", "attach") \
             and args.session is None:
         parser.error(f"{args.command} requires --session")
+    if args.command == 'attach':
+        if args.json:
+            parser.error('--json is not available for attach')
+        try:
+            require_tmux_platform()
+        except CLIError as error:
+            parser.exit(1, str(error) + '\n')
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            parser.exit(1, 'Attach requires a terminal\n')
     if args.history_mode == "summary":
         parser.error("summary history mode is not available in this version; use literal or none")
     if args.command in ("spawn", "history") and args.history_mode not in ("literal", "none"):
@@ -457,6 +488,18 @@ def main(argv=None):
                 no_resume=args.no_resume, plain_channel=args.channel is not None,
                 data_dir=startup_status.get('data_dir'), providers=config.get('agents', {}))
             asyncio.run(interactive(client, controller))
+        elif args.command == 'attach':
+            api = WorkspaceAPI(url, timeout=args.timeout)
+
+            async def resolve_terminal():
+                async with asyncio.timeout(args.timeout):
+                    workspace = await asyncio.to_thread(api.resolve, args.session, True)
+                    return resolve_agent(workspace, args.agent), workspace['id']
+
+            agent, ws_id = asyncio.run(resolve_terminal())
+            code = attach_agent(agent, output=print, shell_session=ws_id)
+            if code:
+                parser.exit(code)
         elif args.command in workspace_commands:
             api = WorkspaceAPI(url, timeout=args.timeout)
 

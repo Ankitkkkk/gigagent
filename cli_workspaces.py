@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass
 import os
+import shlex
+import subprocess
+import sys
 
 import cli_api
 from cli_api import CLIError
@@ -74,6 +77,42 @@ def require_tmux_platform():
     """Reject local terminal launches on Windows before calling their APIs."""
     if os.name == "nt":
         raise CLIError(WINDOWS_TMUX_ERROR)
+
+
+def tmux_target(agent):
+    """Use the server target, falling back only for older agent records."""
+    if 'tmux_session' in agent:
+        target = agent['tmux_session']
+    else:
+        agent_id = agent.get('agent_id')
+        target = f'agentchattr-{agent_id}' if agent_id else None
+    if not isinstance(target, str) or not target:
+        raise CLIError('Agent terminal session is unavailable')
+    return target
+
+
+def attach_agent(agent, *, runner=subprocess.run, output=print, shell_session=None):
+    """Hand over the terminal to an existing tmux session; never launch one."""
+    require_tmux_platform()
+    if shell_session is not None and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise CLIError('Attach requires a terminal')
+    target = tmux_target(agent)
+    label = shlex.quote(_safe(agent.get('registry_name') or agent.get('agent_id', '')))
+    hint = f'/resume {label}' if shell_session is None else (
+        f'python cli.py resume {label} --session {shlex.quote(_safe(shell_session))}')
+    try:
+        probe = runner(['tmux', 'has-session', '-t', target], timeout=5,
+                       capture_output=True)
+        if probe.returncode:
+            raise CLIError(f'not running; resume with {hint}')
+        nested = bool(os.environ.get('TMUX'))
+        result = runner(['tmux', 'switch-client' if nested else 'attach', '-t', target])
+    except (OSError, subprocess.SubprocessError):
+        # Process diagnostics may contain credentials or terminal controls.
+        raise CLIError('Could not attach to the agent terminal. Check tmux and retry.') from None
+    if nested and result.returncode == 0:
+        output('Switch back: tmux switch-client -l')
+    return result.returncode
 
 
 def _selected_workspace(api, selector):

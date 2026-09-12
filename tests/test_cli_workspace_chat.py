@@ -965,13 +965,13 @@ class ControllerEventTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
         for text in ['/spawn', '/resume', '/stop', '/unread', '/retry', '/history', '/rename',
                      '/archive', '/sessions', 'claude-1', 'ag_a', 'claude', 'configured-provider']:
             self.assertIn(text, words)
-        self.assertNotIn('/attach', words)
+        self.assertIn('/attach', words)
         await self.controller.handle('/help')
         self.assertIn('/spawn', '\n'.join(self.output))
         self.assertIn('/history AGENT MODE', '\n'.join(self.output))
         for command in ['/jobs', '/rules', '/channels']:
             self.assertIn(command, '\n'.join(self.output))
-        self.assertNotIn('/attach', '\n'.join(self.output))
+        self.assertIn('/attach AGENT', '\n'.join(self.output))
         self.assertEqual(self.api.action.call_count, 0)
 
     async def test_provided_startup_directory_avoids_extra_status_call(self):
@@ -1339,6 +1339,258 @@ class ControllerSnapshotOrderingTests(ControllerFixture, unittest.IsolatedAsynci
         self.assertEqual(self.controller.workspace['agents'][0]['last_state'], 'exited')
         self.assertTrue(self.controller._refresh_requested)
         self.api.action.assert_called_once_with('ws_a', 'stop', 'ag_a')
+
+
+class OutputBufferTests(unittest.TestCase):
+    def setUp(self):
+        self.output = []
+        self.client = ChatClient('http://localhost:8300', output=self.output.append)
+        self.client.ready.set()
+        self.assertTrue(callable(getattr(self.client, 'pause_output', None)), 'pause_output missing')
+
+    def test_buffer_keeps_cache_live_and_flushes_once(self):
+        self.client.pause_output()
+        self.client.handle_event({'type': 'message', 'data': {
+            'id': 7, 'channel': 'general', 'sender': 'human', 'text': 'during attach\x1b\x00'}})
+        self.assertIn(7, self.client.messages)
+        self.assertEqual(self.output, [])
+        self.client.resume_output()
+        self.assertIn('during attach', '\n'.join(self.output))
+        self.assertNotIn('\x1b', '\n'.join(self.output))
+        self.assertNotIn('\x00', '\n'.join(self.output))
+        original = list(self.output)
+        self.client.resume_output()
+        self.assertEqual(self.output, original)
+
+    def test_multiline_buffer_bound_preserves_latest_lines_and_notice(self):
+        self.client.pause_output()
+        self.client.show('\n'.join(f'line {n}' for n in range(10003)))
+        self.assertEqual(self.output, [])
+        self.client.resume_output()
+        self.assertIn('3', self.output[0])
+        self.assertIn('omitted', self.output[0])
+        self.assertEqual(self.output[1:], [f'line {n}' for n in range(3, 10003)])
+        self.client.pause_output()
+        self.client.show('fresh')
+        self.client.resume_output()
+        self.assertEqual(self.output[-1], 'fresh')
+        self.assertEqual(sum('omitted' in line for line in self.output), 1)
+
+    def test_immediate_menu_is_sanitized_while_events_wait(self):
+        self.client.pause_output()
+        self.client.show('later')
+        self.client.show('Sessions\x1b\x00', immediate=True)
+        self.assertEqual(self.output, ['Sessions'])
+        self.client.resume_output()
+        self.assertEqual(self.output, ['Sessions', 'later'])
+
+
+class ControlledSocket:
+    def __init__(self):
+        self.frames = asyncio.Queue()
+        self.processed = asyncio.Queue()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def __aiter__(self):
+        while True:
+            frame = await self.frames.get()
+            yield json.dumps(frame)
+            self.processed.put_nowait(None)
+
+    async def deliver(self, frame):
+        await self.frames.put(frame)
+        await asyncio.wait_for(self.processed.get(), 2)
+
+
+class AttachControllerTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
+    async def initialize(self):
+        await self.controller.initialize(AsyncMock(return_value='1'))
+        self.client.ready.set()
+        self.output.clear()
+
+    async def test_attach_receiver_survives_and_buffers_messages_and_state(self):
+        await self.initialize()
+        self.assertIn('/attach', self.controller.completion_words())
+        await self.handle('/help')
+        self.assertIn('/attach AGENT', self.output[-1])
+        self.output.clear()
+        socket = ControlledSocket()
+        entered, release = threading.Event(), threading.Event()
+        def runner(argv, **kwargs):
+            if argv[1] == 'has-session':
+                return subprocess.CompletedProcess(argv, 0)
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('attach not released')
+            return subprocess.CompletedProcess(argv, 0)
+        real_attach = __import__('cli_workspaces').attach_agent
+        def attach(agent, **kwargs):
+            return real_attach(agent, runner=runner, **kwargs)
+        with patch('websockets.asyncio.client.connect', return_value=socket), \
+                patch('cli.fetch_session_token', return_value='secret'), \
+                patch.dict('os.environ', {'TMUX': 'inside'}), \
+                patch.object(chat, 'attach_agent', side_effect=attach, create=True):
+            receiver = asyncio.create_task(self.client.receive_forever())
+            await socket.deliver({'type': 'history_complete'})
+            self.output.clear()
+            task = asyncio.create_task(self.handle('/attach claude-1'))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                await socket.deliver({'type': 'message', 'data': {
+                    'id': 7, 'channel': 'ws-a', 'sender': 'human', 'text': 'during attach'}})
+                newer = copy.deepcopy(self.ws)
+                newer['agents'][0]['last_state'] = 'running'
+                await socket.deliver({'type': 'workspace', 'data': newer})
+                self.assertIn(7, self.client.messages)
+                self.assertEqual(self.controller.workspace['agents'][0]['last_state'], 'running')
+                self.assertEqual(self.output, [])
+                self.assertFalse(receiver.done())
+                self.assertFalse(task.done())
+                release.set()
+                self.assertEqual(await task, 'continue')
+                self.assertEqual(sum('during attach' in line for line in self.output), 1)
+                self.assertIn('Switch back: tmux switch-client -l', self.output)
+                self.assertFalse(receiver.done())
+                before = list(self.output)
+                self.client.resume_output()
+                self.assertEqual(self.output, before)
+            finally:
+                release.set()
+                task.cancel()
+                receiver.cancel()
+                await asyncio.gather(task, receiver, return_exceptions=True)
+
+    async def test_attach_failures_restore_output(self):
+        await self.initialize()
+        for error in (CLIError('not running; resume with /resume claude-1'),
+                      OSError('secret-token')):
+            with self.subTest(error=type(error).__name__), patch.object(
+                    chat, 'attach_agent', side_effect=error, create=True):
+                self.assertEqual(await self.handle('/attach ag_a'), 'continue')
+                self.client.show('prompt restored')
+                self.assertEqual(self.output[-1], 'prompt restored')
+                self.assertNotIn('secret-token', '\n'.join(self.output))
+        self.assertIn('not running; resume with /resume claude-1', self.output)
+
+    async def test_attach_cancellation_restores_output(self):
+        await self.initialize()
+        entered, release = threading.Event(), threading.Event()
+        def attach(*args, **kwargs):
+            entered.set()
+            release.wait(3)
+        with patch.object(chat, 'attach_agent', side_effect=attach, create=True):
+            task = asyncio.create_task(self.handle('/attach ag_a'))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                self.client.show('queued')
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertEqual(self.output, ['queued'])
+                self.client.show('restored')
+                self.assertEqual(self.output[-1], 'restored')
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_attach_invalid_plain_windows_and_ambiguous_inputs(self):
+        await self.initialize()
+        with patch.object(chat, 'attach_agent', create=True) as attach:
+            for command in ('/attach', '/attach ag_a extra', '/attach unknown'):
+                self.assertEqual(await self.handle(command), 'continue')
+            self.controller.workspace['agents'].append(dict(self.agent, agent_id='ag_b', registry_name='claude-2'))
+            await self.handle('/attach claude')
+            self.assertIn('ambiguous agent', self.output[-1])
+            with patch('cli_workspaces.os.name', 'nt'):
+                await self.handle('/attach ag_a')
+            self.assertIn('Requires tmux', self.output[-1])
+            self.controller.plain_channel = True
+            await self.handle('/attach ag_a')
+            self.assertIn('requires a selected session', self.output[-1])
+            attach.assert_not_called()
+
+    async def test_midchat_picker_keeps_menu_visible_and_buffers_receiver(self):
+        await self.initialize()
+        socket = ControlledSocket()
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def prompt(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return '1'
+        self.controller.prompt = prompt
+        with patch('websockets.asyncio.client.connect', return_value=socket), \
+                patch('cli.fetch_session_token', return_value='secret'):
+            receiver = asyncio.create_task(self.client.receive_forever())
+            await socket.deliver({'type': 'history_complete'})
+            self.output.clear()
+            picker = asyncio.create_task(self.handle('/sessions'))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                self.assertIn('Sessions', self.output)
+                menu = list(self.output)
+                await socket.deliver({'type': 'message', 'data': {
+                    'id': 8, 'channel': 'ws-a', 'sender': 'human', 'text': 'during picker'}})
+                self.assertIn(8, self.client.messages)
+                self.assertEqual(self.output, menu)
+                self.assertFalse(receiver.done())
+                release.set()
+                self.assertEqual(await picker, 'continue')
+                self.assertIn('during picker', '\n'.join(self.output))
+                self.client.show('restored')
+                self.assertEqual(self.output[-1], 'restored')
+            finally:
+                release.set()
+                picker.cancel()
+                receiver.cancel()
+                await asyncio.gather(picker, receiver, return_exceptions=True)
+
+    async def test_picker_cancellation_restores_output(self):
+        await self.initialize()
+        for error in (EOFError(), KeyboardInterrupt(), asyncio.CancelledError()):
+            self.controller._select(copy.deepcopy(self.ws))
+            self.controller.prompt = AsyncMock(side_effect=error)
+            try:
+                await self.handle('/sessions')
+            except asyncio.CancelledError:
+                pass
+            self.client.show('restored')
+            self.assertEqual(self.output[-1], 'restored')
+
+    async def test_initial_and_midchat_selection_reconcile_once_after_picker(self):
+        self.client.websocket = object()
+        self.controller.no_resume = False
+        for initial in (True, False):
+            with self.subTest(initial=initial):
+                self.api.get.reset_mock()
+                self.api.get.side_effect = lambda _: copy.deepcopy(self.ws)
+                async def prompt(text, **kwargs):
+                    if text == 'Choose:':
+                        return '1'
+                    # Event lands after picker fetch, during resume question.
+                    newer = copy.deepcopy(self.ws)
+                    newer['agents'][0].update(unread_count=9, last_state='running')
+                    self.client.handle_event({'type': 'workspace', 'data': newer})
+                    self.api.get.side_effect = lambda _: copy.deepcopy(newer)
+                    return 'n'
+                if initial:
+                    await self.controller.initialize(prompt)
+                else:
+                    self.controller.prompt = prompt
+                    await self.handle('/sessions')
+                self.assertEqual(self.controller.workspace['agents'][0]['unread_count'], 0)
+                self.assertTrue(self.controller._refresh_requested)
+                self.api.get.reset_mock()
+                with patch('cli_workspace_chat.asyncio.sleep', AsyncMock(
+                        side_effect=[None, None, asyncio.CancelledError()])):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await self.controller.poll_forever()
+                self.api.get.assert_called_once_with('ws_a')
+                self.assertEqual(self.controller.workspace['agents'][0]['unread_count'], 9)
 
 
 if __name__ == '__main__':

@@ -15,7 +15,7 @@ from urllib.error import HTTPError
 import cli_api
 from cli_api import CLIError
 from cli_workspaces import (WINDOWS_TMUX_ERROR, WorkspaceCommandResult,
-                            format_workspace_result, require_tmux_platform,
+                            attach_agent, format_workspace_result, require_tmux_platform,
                             resolve_agent, resolve_session)
 
 
@@ -263,10 +263,11 @@ async def choose_workspace(api, prompt, output, *, selector=None, no_resume=Fals
 
 
 SESSION_COMMANDS = {'/spawn', '/resume', '/stop', '/retry', '/unread', '/history',
-                    '/rename', '/archive', '/sessions'}
+                    '/rename', '/archive', '/sessions', '/attach'}
 SUMMARY_ERROR = 'summary history mode is not available in this version; use literal or none'
 SESSION_HELP = """/spawn PROVIDER [--agent-name NAME] [--cwd PATH] [--history-mode none|literal]
 /resume AGENT [--fresh] [--agent-name NAME] [--cwd PATH]
+/attach AGENT        Attach to an agent terminal
 /stop AGENT          Stop a session agent
 /agents              Show session agents and other live agents
 /unread [AGENT]      Show unread messages
@@ -300,7 +301,7 @@ def _parse_command(command, words):
         parser.add_argument('--fresh', action='store_true')
         parser.add_argument('--agent-name')
         parser.add_argument('--cwd')
-    elif command in ('/stop', '/retry', '/history'):
+    elif command in ('/stop', '/retry', '/history', '/attach'):
         parser.add_argument('agent')
         if command == '/history':
             parser.add_argument('history_mode')
@@ -362,7 +363,7 @@ class WorkspaceChatController:
         self._selection_version += 1
         self._closed = False
         self._failed_launches.clear()
-        self._refresh_requested = False
+        self._refresh_requested = workspace is not None
         self._poll_error = None
         self._agent_states = {a['agent_id']: self._agent_status(a)
                               for a in (workspace or {}).get('agents', [])}
@@ -383,8 +384,13 @@ class WorkspaceChatController:
 
     async def _pick_again(self):
         self._select(None)
-        self._select(await choose_workspace(self.api, self.prompt, self.client.show,
-                                            no_resume=self.no_resume))
+        self.client.pause_output()
+        try:
+            self._select(await choose_workspace(
+                self.api, self.prompt, lambda text: self.client.show(text, immediate=True),
+                no_resume=self.no_resume))
+        finally:
+            self.client.resume_output()
         if self.workspace is None:
             return 'quit'
         self.client.history()
@@ -557,9 +563,17 @@ class WorkspaceChatController:
             mode = getattr(args, 'history_mode', None)
             if mode is not None:
                 _validate_history(mode)
-            if command in ('/spawn', '/resume'):
+            if command in ('/spawn', '/resume', '/attach'):
                 require_tmux_platform()
             ws_id = self.workspace['id']
+            if command == '/attach':
+                agent = resolve_agent(self.workspace, args.agent)
+                self.client.pause_output()
+                try:
+                    await asyncio.to_thread(attach_agent, agent, output=self.client.show)
+                finally:
+                    self.client.resume_output()
+                return 'continue'
             if command == '/sessions':
                 await self.close()
                 switching = True

@@ -1,12 +1,16 @@
 """Parser and shell command contracts for terminal sessions (spec §5)."""
 
 import argparse
+import builtins
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import os
+import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -111,6 +115,177 @@ class TerminalInput(StringIO):
 
     def isatty(self):
         return self._tty
+
+
+class AttachHelperTests(unittest.TestCase):
+    def helper(self, name='attach_agent'):
+        helper = getattr(cli_workspaces, name, None)
+        self.assertTrue(callable(helper), f'{name} is missing')
+        return helper
+
+    def test_stable_id_target_ignores_unusual_registry_name(self):
+        self.assertEqual(self.helper('tmux_target')({
+            'agent_id': 'ag_a', 'registry_name': 'name ; $(touch nope)'}),
+            'agentchattr-ag_a')
+
+    def test_present_server_target_does_not_fall_back(self):
+        target = self.helper('tmux_target')
+        self.assertEqual(target({'agent_id': 'ag_a', 'tmux_session': 'server-target'}),
+                         'server-target')
+        for value in ('', None):
+            with self.subTest(value=value), self.assertRaises(CLIError):
+                target({'agent_id': 'ag_a', 'tmux_session': value})
+
+    def test_foreground_attach_inherits_stdio_and_environment_without_deadline(self):
+        runner = MagicMock(side_effect=[subprocess.CompletedProcess([], 0),
+                                       subprocess.CompletedProcess([], 7)])
+        with patch.dict(os.environ, {'TMUX_TMPDIR': '/tmp/isolated'}, clear=True):
+            code = self.helper()({'agent_id': 'ag_a'}, runner=runner)
+        self.assertEqual(code, 7)
+        self.assertEqual(runner.call_args_list[0].args[0],
+                         ['tmux', 'has-session', '-t', 'agentchattr-ag_a'])
+        self.assertEqual(runner.call_args_list[0].kwargs,
+                         {'timeout': 5, 'capture_output': True})
+        self.assertEqual(runner.call_args_list[1].args[0],
+                         ['tmux', 'attach', '-t', 'agentchattr-ag_a'])
+        self.assertEqual(runner.call_args_list[1].kwargs, {})
+        self.assertEqual(runner.call_count, 2)
+
+    def test_server_target_and_nested_switch_emit_switch_back_hint(self):
+        output = []
+        runner = MagicMock(return_value=subprocess.CompletedProcess([], 0))
+        with patch.dict(os.environ, {'TMUX': 'inside'}):
+            code = self.helper()({'agent_id': 'ag_a', 'tmux_session': 'server-target'},
+                                 runner=runner, output=output.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.call_args.args[0],
+                         ['tmux', 'switch-client', '-t', 'server-target'])
+        self.assertEqual(output, ['Switch back: tmux switch-client -l'])
+
+    def test_missing_session_has_chat_or_shell_resume_hint(self):
+        attach = self.helper()
+        for session, hint in [(None, '/resume claude-1'),
+                              ('ws_a', 'python cli.py resume claude-1 --session ws_a')]:
+            runner = MagicMock(return_value=subprocess.CompletedProcess([], 1,
+                                                       stderr='secret-token'))
+            with self.subTest(session=session), patch.object(
+                    sys, 'stdin', TerminalInput(tty=True)), patch.object(
+                    sys, 'stdout', TerminalInput(tty=True)):
+                with self.assertRaises(CLIError) as caught:
+                    attach(agent(), runner=runner, shell_session=session)
+            self.assertEqual(str(caught.exception), 'not running; resume with ' + hint)
+            self.assertEqual(runner.call_count, 1)
+
+    def test_windows_rejected_before_tmux(self):
+        runner = MagicMock()
+        with patch.object(cli_workspaces, 'os', SimpleNamespace(name='nt')):
+            with self.assertRaisesRegex(CLIError, 'Requires tmux'):
+                self.helper()(agent(), runner=runner)
+        runner.assert_not_called()
+
+    def test_non_tty_shell_attach_rejected_before_tmux(self):
+        runner = MagicMock()
+        with patch.object(sys, 'stdin', TerminalInput(tty=False)):
+            with self.assertRaisesRegex(CLIError, 'requires a terminal'):
+                self.helper()(agent(), runner=runner, shell_session='ws_a')
+        runner.assert_not_called()
+
+    def test_runner_errors_never_expose_diagnostics(self):
+        attach = self.helper()
+        for error in (OSError('secret-token'), subprocess.TimeoutExpired('secret-token', 5)):
+            for stage in ('probe', 'attach'):
+                runner = MagicMock(side_effect=([error] if stage == 'probe' else
+                    [subprocess.CompletedProcess([], 0), error]))
+                with self.subTest(error=type(error).__name__, stage=stage):
+                    with self.assertRaises(CLIError) as caught:
+                        attach(agent(), runner=runner)
+                    self.assertNotIn('secret-token', str(caught.exception))
+
+
+class ShellAttachTests(unittest.TestCase):
+    def run_attach(self, argv=None, *, tty=True, api=None, attach=None):
+        api = api or RecordingAPI()
+        attach = attach or MagicMock(return_value=0)
+        stdout, stderr = TerminalInput(tty=tty), StringIO()
+        with patch.object(sys, 'stdin', TerminalInput(tty=tty)), \
+                redirect_stdout(stdout), redirect_stderr(stderr), \
+                patch.object(cli, 'WorkspaceAPI', return_value=api) as factory, \
+                patch.object(cli, 'attach_agent', attach, create=True):
+            try:
+                cli.main(argv or ['attach', 'claude', '--session', 'billing',
+                                  '--url', 'http://localhost:8300'])
+                code = 0
+            except SystemExit as error:
+                code = error.code
+        return code, stdout.getvalue(), stderr.getvalue(), api, attach, factory
+
+    def test_attach_parser_accepts_common_options_on_either_side(self):
+        for argv in (['--session', 'billing', 'attach', 'ag_a'],
+                     ['attach', 'ag_a', '--session', 'billing']):
+            with self.subTest(argv=argv), redirect_stderr(StringIO()):
+                try:
+                    args = cli.build_parser().parse_args(argv)
+                except SystemExit:
+                    self.fail('attach parser is missing')
+                self.assertEqual((args.command, args.agent, args.session), ('attach', 'ag_a', 'billing'))
+
+    def test_attach_resolves_once_without_websocket_or_mutation_and_preserves_exit(self):
+        original_import = builtins.__import__
+        def no_websocket(name, *args, **kwargs):
+            if name.startswith('websockets'):
+                raise ImportError('websocket must not be required')
+            return original_import(name, *args, **kwargs)
+        attach = MagicMock(return_value=7)
+        with patch('builtins.__import__', side_effect=no_websocket):
+            code, stdout, stderr, api, _, _ = self.run_attach(attach=attach)
+        self.assertEqual(code, 7, stderr)
+        self.assertEqual(api.calls, [('resolve', 'billing', True)])
+        self.assertEqual(attach.call_args.args, (api.selected['agents'][0],))
+        self.assertEqual(attach.call_args.kwargs['shell_session'], 'ws_a')
+        self.assertEqual(stdout, '')
+
+    def test_attach_validation_precedes_network_and_terminal_takeover(self):
+        for argv, tty, hint in [(['attach', 'ag_a'], True, 'requires --session'),
+                (['attach', 'ag_a', '--session', 'billing', '--json'], True, '--json'),
+                (['attach', 'ag_a', '--session', 'billing'], False, 'requires a terminal')]:
+            with self.subTest(argv=argv):
+                code, _, stderr, _, attach, factory = self.run_attach(argv, tty=tty)
+                self.assertNotEqual(code, 0)
+                self.assertIn(hint, stderr)
+                factory.assert_not_called()
+                attach.assert_not_called()
+
+    def test_attach_windows_rejects_before_api(self):
+        with patch('cli_workspaces.os.name', 'nt'):
+            code, _, stderr, _, attach, factory = self.run_attach()
+        self.assertEqual(code, 1)
+        self.assertIn(WINDOWS_ERROR, stderr)
+        attach.assert_not_called()
+        factory.assert_not_called()
+
+    def test_request_deadline_does_not_limit_foreground_attach(self):
+        def attach(*args, **kwargs):
+            time.sleep(.04)
+            return 0
+        code, _, stderr, api, _, _ = self.run_attach(
+            ['attach', 'ag_a', '--session', 'billing', '--timeout', '.01',
+             '--url', 'http://localhost:8300'], attach=attach)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(api.calls, [('resolve', 'billing', True)])
+
+    def test_request_deadline_still_limits_resolution(self):
+        api = RecordingAPI()
+        resolve = api.resolve
+        def slow_resolve(*args, **kwargs):
+            time.sleep(.04)
+            return resolve(*args, **kwargs)
+        api.resolve = slow_resolve
+        code, _, stderr, _, attach, _ = self.run_attach(
+            ['attach', 'ag_a', '--session', 'billing', '--timeout', '.01',
+             '--url', 'http://localhost:8300'], api=api)
+        self.assertEqual(code, 1)
+        self.assertIn('timed out', stderr)
+        attach.assert_not_called()
 
 
 class ParserTests(unittest.TestCase):
