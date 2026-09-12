@@ -8,7 +8,7 @@ Branch: `feature/terminal-tui`, based on reviewed CLI head `ec8067c`.
 
 Make everyday session work discoverable without remembering slash commands. The user can find a session, read its conversation, see agent state, write a message, and launch or attach to an agent from one persistent terminal screen.
 
-The first version includes searchable session navigation, a scrollable conversation, a multiline composer, agent status and actions, guided forms, a command palette, and keyboard help. It reuses the authenticated HTTP/WebSocket interfaces and existing lifecycle controller. Shell commands retain their output, arguments, and scripting behavior.
+The first version includes searchable session navigation, a scrollable conversation, a multiline composer, agent status and actions, guided forms, a command palette, and keyboard help. It reuses the authenticated HTTP/WebSocket interfaces and existing lifecycle controller. No server or slice-1 change is required: all inspector fields come from existing endpoints. Shell commands retain their output, arguments, and scripting behavior.
 
 This is the TUI slice. It does not implement the separately deferred summary-history slice, provider-terminal emulation, file editing, attachment uploading, or release packaging. Existing server commands remain accessible through the composer.
 
@@ -18,13 +18,13 @@ This is the TUI slice. It does not implement the separately deferred summary-his
 - `--session NAME` opens that session and keeps the existing stopped-agent resume decision. `--no-resume` suppresses that decision.
 - `--channel NAME` opens full-screen plain-channel chat. The sidebar lists channels; session-only actions are absent. Existing channel commands continue to work.
 - A new interactive-only `--plain` flag runs the existing line-oriented interface. It works on the bare invocation and the explicit `chat` command. Passing it with a shell command is rejected before configuration or network work.
-- Full-screen mode requires terminal stdin and stdout. Redirected output and `TERM=dumb` produce a short explanation with the `--plain` alternative; non-terminal input still directs scripts to `read` or `send`. Screen-reader users can choose `--plain` explicitly.
+- Full-screen mode requires terminal stdin and stdout and a nonempty `TERM` other than `dumb`. With terminal stdin but non-terminal stdout, or with `TERM` unset/empty/`dumb`, automatically use plain mode and emit exactly one stderr line: `Full-screen unavailable; using plain mode.` Fallback alone does not change the exit code. Non-terminal stdin retains the existing refusal directing scripts to `read` or `send`; this validation precedes fallback. Explicit `--plain` skips capability selection without printing a fallback notice. Screen-reader users can choose it explicitly.
 - Existing auto-start rules remain: interactive local chat only, never auto-start with explicit `--url`, no server restart or duplicate-session replacement. Startup diagnostics appear before screen entry and remain available in the UI's activity panel.
 - Exiting checkpoints the selected session and leaves server and agents running.
 
 ## 3. Layout and visual language
 
-Use the terminal's normal background and foreground, one cyan accent for selection/focus, muted separators, and semantic success/warning/error accents. State always has a readable label; color and symbols are supplementary. Never render server-supplied text as ANSI or markup. Sanitize each display fragment before layout: single-line labels cannot contain tabs/newlines or terminal controls; message bodies may retain newlines and expand tabs to spaces. Style names come only from application code.
+Use the terminal's normal background and foreground, one cyan accent for selection/focus, muted separators, and semantic success/warning/error accents. State always has a readable label; color and symbols are supplementary. Never render server-supplied text as ANSI or markup. Message bodies use existing `terminal_text` semantics, preserving newlines and expanding retained tabs to spaces. Single-line labels use the `_safe` policy: remove tabs/newlines, terminal controls, and zero-width/bidi formatting controls. Measure/truncate sanitized fragments with `prompt_toolkit.utils.get_cwidth`, never Python string length. Style names come only from application code.
 
 Wide layout, at least 110 columns and 24 rows:
 
@@ -48,7 +48,7 @@ Wide layout, at least 110 columns and 24 rows:
  F2 Sessions   F3 Agents   F4 Commands   F1 Help   Ctrl+Q Quit
 ```
 
-The left sidebar is 26 columns wide. The main pane holds the conversation, a compact agent area, and a composer that grows from three to six lines. An expanded agent inspector shows provider, directory, unread count, history state, resume availability, and relevant recovery guidance. Long labels truncate by display width; focusing a row exposes its full label in the inspector/help area.
+The left sidebar occupies 22 columns including its borders, matching the schematic. The main pane holds the conversation, a compact agent area, and a composer that grows from three to six lines. An expanded agent inspector shows provider, directory, unread count, history state, resume availability, and relevant recovery guidance. Long labels truncate by display width; focusing a row exposes its full label in the inspector/help area.
 
 At 80–109 columns or 18–23 rows, navigation becomes an overlay opened with F2, and the agent area becomes a compact status row opened with F3. Conversation and composer retain the usable space. Below 80 columns or 18 rows, show a compact resize message plus Help and Quit; keep connection state, draft, and background work intact. Resizing back restores the focused control without losing input.
 
@@ -69,15 +69,15 @@ Empty states are actionable: “No sessions yet” with New session and Show arc
 | PageUp / PageDown | Scroll conversation when its pane has focus |
 | End | Jump to the latest message when conversation has focus |
 | Escape | Dismiss the current overlay or completion, then restore prior focus |
-| Ctrl+C | Cancel the current form/overlay, or clear the composer; never stop agents |
+| Ctrl+C | Cancel the current form/overlay/completion; preserve composer text when nothing is open; never stop agents |
 | Ctrl+Q | Quit, confirming first if any unsent draft exists |
-| Ctrl+D | In an empty composer, request Quit; otherwise normal forward-delete behavior |
+| Ctrl+D | In an empty composer, request the same draft-aware Quit confirmation as Ctrl+Q; otherwise normal forward-delete behavior |
 
 Mouse selection, buttons, and wheel scrolling are supported, but every operation is keyboard-accessible. Buttons have full text labels. Single-letter actions never capture typing in text fields.
 
-The composer supports multiline paste and suggestions for commands, agent mentions, and applicable arguments. Pasting never submits automatically. Enter accepts a highlighted completion before sending. A visible hint explains Enter and Alt+Enter when the composer has focus.
+The composer supports multiline paste and suggestions for commands, agent mentions, and applicable arguments. Pasting never submits automatically. Enter accepts a highlighted completion before sending. A visible hint explains Enter and Alt+Enter when the composer has focus. Esc then Enter means Alt+Enter only within prompt-toolkit's configured escape timeout (`Application.ttimeoutlen`); a lone Escape is handled after that timeout, so help documents the timing. Clear draft is an explicit palette action with confirmation; Ctrl+C never silently clears text.
 
-Preserve one in-memory draft per visited session/channel, bounded to 50 drafts of at most 64 KiB of UTF-8 text each. Empty drafts do not consume a slot. If all 50 slots contain unsent text, ask the user to discard a chosen draft or cancel switching; never silently evict unsent text. Drafts are not written to provider files or persisted to disk. Cap composer input at 64 KiB with an explanatory message.
+Preserve one in-memory draft per visited session/channel, bounded to 50 drafts of at most 64 KiB of UTF-8 text each. Empty drafts do not consume a slot. When all 50 slots contain unsent text, refuse switching to an uncached destination with `50 unsent drafts; send or clear one` and retain the current selection and text. No eviction dialog or silent eviction. Revisiting an existing draft stays possible. Drafts are not written to provider files or persisted to disk. Cap composer input at 64 KiB with an explanatory message.
 
 Do not clear the composer when disconnected, when a command fails, or when a form is cancelled. Clear a message after the existing transport accepts the send; display the server echo as the conversation record. Do not describe socket acceptance as server acknowledgment. Transport failure/uncertainty retains the draft and explains that retry is manual. There is no automatic message replay.
 
@@ -87,17 +87,25 @@ When the user is at the bottom, follow new messages. When they scroll away, pres
 
 Session search is a case-insensitive local filter over fetched names and IDs. Rows are keyed by full ID, not display names. Preserve selected ID across refresh/reordering. Use existing newest-updated ordering and duplicate-name ID suffixes. Show archived state explicitly. Refresh on entry, explicit Refresh, completed session changes, and reconnect; do not introduce unconditional background list polling.
 
-Selecting a session runs the controller's existing lifecycle sequence: checkpoint the old selection, retrieve the new workspace, resolve archived/resume prompts, select its channel, and request reconciliation. Keep the old selection if listing/loading fails before the switch commits. Disable sending and competing lifecycle actions during a switch. Draft and selection are never changed by a stale response. Opening navigation alone does not checkpoint or clear selection.
+Full-screen startup without `--session` opens mandatory session navigation before starting the receiver or poller. Escape/Ctrl+Q at this initial navigation exits without checkpointing or starting those tasks. With `--session`, resolve the selector then enter the same selection path. Only after the first successful selection commit and channel assignment do receiver and poller start. Plain-channel startup assigns the requested channel first and starts only the receiver; legacy plain-mode startup order stays unchanged.
 
-For a stopped-agent batch, display the exact question `Resume N stopped agents? [Y/n]` with Resume and Chat only choices. Initial default is Resume; Escape cancels the choice and keeps the prior selection. `--no-resume` means Chat only without prompting. Missing-directory agents are explained and excluded as today. On Windows, show the existing tmux limitation and enter chat without launching.
+`controller.select_session(ws_id)` is the full-screen switch authority. Under the serialized action lock: capture the old selection generation; fetch the candidate workspace; run archived and stopped-agent dialogs; fetch updated candidate state if its actions changed it; verify the captured generation still matches; checkpoint the old workspace; call `_select(new)`; set `client.channel`; request reconciliation. `_select` resets `_closed` for the new selection and increments the generation before notifications. The checkpoint uses the existing warning-and-continue policy; commit follows it without another cancellable prompt. Before this commit, loading failure or cancellation leaves the old selection, `_closed`, channel, draft, and viewport intact. Do not call `close()` while merely opening navigation or fetching candidates, and never un-close an abandoned old selection. Candidate API actions already completed (such as an explicit Unarchive) are not rolled back or replayed.
+
+Disable sending and competing lifecycle actions during a switch. Reject stale selections before checkpoint/commit. F2 and `/sessions` both open navigation without checkpointing in TUI mode; checkpoint occurs on a committed switch or Quit. `--plain` keeps its existing `/sessions` checkpoint-then-picker sequence.
+
+For a stopped-agent batch, display the exact question `Resume N stopped agents? [Y/n]` with Resume and Chat only choices. Initial default is Resume; Escape means Chat only and proceeds into the selected session without launches. `--no-resume` means Chat only without prompting. Missing-directory agents are explained and excluded as today. On Windows, show the existing tmux limitation and enter chat without launching.
 
 Selecting an archived session opens `Unarchive it? [y/N]` with No selected by default. Declining an explicit `--session` selection exits with status 1 as today; declining a navigation selection returns to navigation. Empty active lists still expose Show archived, which intentionally replaces the former forced-create flow in full-screen mode.
+
+Confirmation dialogs bind `y` and `n` directly, and Enter accepts the indicated default, so `[Y/n]` and `[y/N]` remain truthful. Escape in an archived/stop/archive confirmation is No; Escape in the batch-resume dialog is Chat only. Ctrl+Q and empty-composer Ctrl+D share one Quit flow, including confirmation if any draft is unsent.
 
 Agent rows show name, state, and server unread count. Selecting one exposes Attach, Resume, Stop, Retry delivery, and History settings with reasons when unavailable. New agent opens a form with configured provider choices, absolute working directory, optional name, and history policy. Default directory/history selection follows existing controller rules. History choices are literal and none; summary retains the existing refusal text.
 
 Resume first uses the existing native conversation. A refusal offers the applicable explicit action: choose a new directory, change agent name, or confirm a fresh conversation. Fresh is never selected automatically. Stop and Archive confirmations name the affected agent/session; Archive explains that it stops session agents. Cancel performs no mutation. Repeated activation while work is pending cannot duplicate a request.
 
-The palette includes New session, Switch session, Rename session, Archive session, New agent, Attach, Resume, Stop, Unread, Retry delivery, History settings, Refresh, Help, and Quit. In plain-channel mode it instead exposes Switch channel and Create channel alongside applicable chat commands. Actions and slash commands converge on the same controller operations.
+The palette includes New session, Switch session, Rename session, Archive session, New agent, Attach, Resume, Stop, Unread, Retry delivery, History settings, Clear draft, Refresh, Help, and Quit. In plain-channel mode it instead exposes Switch channel and Create channel alongside applicable chat commands. Actions and slash commands converge on the same controller operations.
+
+The palette mirrors visible controls rather than being their only entry: session navigation has New session and More actions (Rename, Archive, Refresh); the agent area's More actions contains Resume, Stop, Unread, Retry delivery, and History settings; the composer exposes Clear draft with confirmation. Tab/Enter reaches each control and its menu without a mouse. Help and Quit also have the persistent footer shortcuts.
 
 ## 6. Activity, connection state, and errors
 
@@ -119,16 +127,44 @@ This document is an additive amendment to §5 of `2026-09-12-terminal-sessions-d
 | Empty list immediately prompts for creation | Empty state shows both New session and Show archived |
 | One printed state line per agent | Persistent rows and inspector; same state/recovery labels |
 | Sequential textual prompts | Forms/dialogs with equivalent values and confirmation defaults |
-| `/sessions` immediately opens picker | Controller checkpoints, then opens navigation; ordinary F2 opening does not checkpoint |
+| `/sessions` checkpoints, then opens picker | Like F2, TUI navigation opens without checkpoint; checkpoint happens at switch commit or Quit. This avoids closing the old controller before a potentially cancelled selection. Plain mode retains its original order. |
 | `/history` prints cached recent messages | Focus/jump to the conversation history without appending duplicate records |
 | Attach pause buffer is flushed after detach | Renderer suspends; model keeps updating; restore paints current state once and retains bounded notices |
 | Plain-channel chat prints lines | Full-screen channel view with existing channel semantics; `--plain` retains old rendering |
 
 Literal confirmations and recovery strings remain visible in dialog bodies/details. The Windows message stays exactly `Requires tmux (Linux/macOS). See wrapper_windows.py for manual launch.` Nested tmux guidance stays exactly `Switch back: tmux switch-client -l`. Shell output and legacy `--plain` output contracts are unchanged.
 
+Literal placement contract (`<...>` denotes the same substituted value as the existing CLI; it is not displayed literally):
+
+| Contract literal | TUI location |
+|---|---|
+| `Sessions`, `New session`, `Show archived` | Navigation title and visible buttons |
+| `Choose:` and numbered rows | Explicitly amended to searchable navigation and Enter selection above |
+| `Session name:` | New-session form field label |
+| `fresh` | Agent row in place of starting after a fresh launch |
+| `catching up…` | Agent row and history inspector during pending literal catch-up |
+| `id unknown` | Agent row/inspector when native ID is absent |
+| `⚠ cwd missing — /resume <agent> --cwd PATH` | Agent row/inspector, plus the optional directory-repair action |
+| `Resume N stopped agents? [Y/n]` | Batch-resume dialog body; y/n and Enter/default bound |
+| `archived` | Archived session row and unarchive dialog context |
+| `Unarchive it? [y/N]` | Unarchive dialog body; No default |
+| `Working directory:` | Spawn/resume form directory label |
+| `History mode [none/literal]:` | History-choice form label; literal default |
+| `Archive session? [y/N]` | Archive confirmation body alongside affected session name |
+| `not running; resume with /resume <agent>` | Attach preflight failure notice |
+| `failed to start; see <data_dir>/logs/wrapper-<agent_id>.log` | Agent row/inspector failure detail when data directory is known; retain the existing unknown-directory explanation otherwise |
+| `Requires tmux (Linux/macOS). See wrapper_windows.py for manual launch.` | Disabled-action explanation or attempted-action notice; chat continues |
+| `Switch back: tmux switch-client -l` | Activity/notice sink after successful nested switch-client |
+| `summary history mode is not available in this version; use literal or none` | Invalid-history action notice or form error |
+| `Started server in tmux session agentchattr-server.` | Pre-screen stdout on auto-start, retained in activity |
+| `Start it manually: python run.py` | Existing shell connection failure; unchanged outside TUI |
+| API refusal/checkpoint/startup failure text and log-path hints | Form/notice or pre-screen diagnostic, sanitized; no loss of recovery details |
+
+Rows can use `_agent_line`/`_agent_status` as sanitized fragments so state/recovery wording stays shared. A known failed-start log hint remains available in the expanded inspector even when its row is clipped. Once this design is approved, add a cross-reference from the original 09-12 spec's §5 and decision section to D16+ here; that reference activates only the full-screen presentation amendment.
+
 ## 8. Architecture and terminal ownership
 
-Use the already-installed prompt-toolkit 3.x `Application`, layout controls, buffers, and async event loop. Installed baseline is 3.0.53. Its full-screen layout and conditional-container APIs fit this design; its `in_terminal()` context manager detaches input, restores cooked mode, suspends painting, and repaints on return. No additional TUI framework is needed. Reference: [official full-screen guide](https://python-prompt-toolkit.readthedocs.io/en/master/pages/full_screen_apps.html) and the locally inspected `prompt_toolkit.application.in_terminal` implementation.
+Use prompt-toolkit `Application`, layout controls, buffers, and async event loop. The implementation raises the `requirements-cli.txt` constraint to `prompt-toolkit>=3.0.53,<4.0`, the locally verified baseline for `Application`, context-managed `create_pipe_input`, and `in_terminal`. Its full-screen layout and conditional-container APIs fit this design; its `in_terminal()` context manager detaches input, restores cooked mode, suspends painting, and repaints on return. No additional TUI framework is needed. Reference: [official full-screen guide](https://python-prompt-toolkit.readthedocs.io/en/master/pages/full_screen_apps.html) and the locally inspected `prompt_toolkit.application.in_terminal` implementation. No server/slice-1 implementation changes are needed; existing endpoints supply all view data.
 
 Proposed boundaries:
 
@@ -145,6 +181,7 @@ The following are planned integration interfaces, not APIs already present at th
 | Caller / interface | Responsibility |
 |---|---|
 | TUI → `controller.list_sessions(include_archived=False)` | Async read through the existing WorkspaceAPI; return the server list/warning without changing selection |
+| TUI → `controller.select_session(ws_id)` | Transactional full-screen selection sequence defined in §5; also used by the select-session action |
 | TUI → `controller.execute_action(action, payload)` | Async, validated shared operation; returns a structured completed/cancelled/failed outcome; failures cannot masquerade as successful command submission |
 | TUI → `controller.handle(text)` via a structured command adapter | Preserve slash syntax and legacy delegation; the adapter also exposes the structured outcome without changing existing legacy return strings |
 | TUI → `client.submit(text)` via a structured submission adapter | Preserve chat/channel command behavior while exposing whether transport accepted a message; no direct socket calls from widgets |
@@ -156,15 +193,25 @@ The following are planned integration interfaces, not APIs already present at th
 
 `execute_action` accepts an explicit allowlist: select/create/rename/archive session; spawn/resume/stop/attach agent; unread/retry/history policy. Session and agent selection use full stable IDs in payloads; user-written slash commands still use existing resolvers. The controller captures and validates the selected workspace before any mutation. Form values become typed/validated payload fields, not interpolated shell or slash strings. The legacy dispatcher delegates to these same operations. Event notifications are advisory invalidations and never replace workspace or message state with a second copy.
 
+View notifications have one defined shape: `source` (`client` or `controller`), `kind` (`connection`, `messages`, `history`, `settings`, `status`, `channel`, `selection`, `agent_state`, `action`, or `notice`), `workspace_id` and `agent_id` (nullable strings), `message_ids` (tuple of existing message IDs, empty when inapplicable), `revision` (monotonic integer for that source), `selection_generation` (controller generation, null for unscoped client events), and `text` (optional plain notice text). Controller revision means `_state_revision`; client revision is an invalidation counter, not a duplicate message store. A callback runs after the state mutation and applicable `_state_revision`/`_selection_version` bump, in the same event-loop tick. Never notify with pre-mutation state. Views use IDs/revisions to reject stale delayed presentation work and read the current authoritative model.
+
+`execute_action` returns `ActionOutcome(status, message, workspace_id, agent_id)`: status is exactly `completed`, `cancelled`, or `failed`; message is optional plain diagnostic text; IDs are nullable stable strings identifying the attempted action. Expected refusals return failed; cancelled forms return cancelled and perform no action. Unexpected local exceptions propagate through terminal restoration. Structured legacy adapters expose the same outcome without changing their pre-existing boolean/string return contracts.
+
+In TUI mode `ChatClient.output` is the bounded notice sink. With `on_view_change` set, `show_message()` and `history()` bypass printed transcript output and notify the view; the conversation reads `client.messages`. Controller `on_workspace` emits `agent_state` after mutation instead of calling `client.show()` for repetitive status lines. Legacy adapters retain those prints. Other `show()` calls go to the notice sink, never directly to terminal stdout. `pause_output()` and `resume_output()` are unused by the TUI: its renderer owns screen suspension, and the authoritative model remains live. Marshal worker-thread notice calls onto the loop before notifying/rendering.
+
 All lifecycle mutations run through one serialized controller action path, with the selection ID captured before awaits. Preserve selection-generation and same-session revision guards; one conditional two-second poller and one receiver stay alive through forms, navigation, and terminal handoff. UI notification hooks run on the event loop; worker-thread output is marshaled with thread-safe loop scheduling. Bound existing message storage at 10,000 records; rendering must not make an unbounded duplicate transcript.
 
-For Attach, acquire an exclusive terminal-handoff guard, suspend the Application with `in_terminal()`, and run the existing attach helper in `asyncio.to_thread`. Do not cancel receiver/poller. On normal detach or attach failure, restore and invalidate once using current model state. Keep focus, draft, and scroll-follow preference. While the foreground process owns the terminal, a cancellation request must wait for terminal ownership to return before repainting or exiting; cancelling an asyncio task does not stop its worker thread. Do not kill provider terminals to recover UI ownership.
+Attach has two phases under an exclusive terminal-handoff guard. First perform platform/target/exact has-session preflight off-loop while the Application remains visible. Windows, missing-session `not running`, and other preflight `CLIError` results become notices without suspending. Extract a shared preflight helper from existing `attach_agent`; keep the shell helper's signature and behavior by having it call the same preflight plus foreground operation. A terminal disappearing after preflight is still handled as an ordinary foreground failure.
 
-Inside tmux, `switch-client` returns promptly; the hidden application's model may continue updating. Returning to its tmux client shows current state and the switch-back guidance. Outside tmux, foreground attach owns the tty until detach. Nonzero attach results and missing sessions become visible recoverable notices.
+After successful preflight, enter `in_terminal()` and run only the foreground attach/switch operation through a strongly referenced, shielded `asyncio.to_thread` task. Receiver and poller remain live. Any `attach_agent(output=...)` text and other `show()` calls go to the notice sink during handoff and appear after repaint. On detach or foreground failure, wait for thread completion, release terminal ownership, restore Application input/renderer, then render current state once. Keep focus, draft, and scroll-follow preference.
+
+While foreground tmux owns the tty, Ctrl+C is handled by that terminal client/foreground session, not by the TUI's key binding; detach returns ownership. SIGINT/SIGTERM delivered to the CLI request graceful Quit, which waits on the handoff guard and shielded task. Do not repaint or exit while `to_thread` still owns the terminal; cancelling its awaiting coroutine alone cannot stop it. Do not kill provider terminals to recover UI ownership. After ownership returns, the normal checkpoint-before-task-cancel Quit path runs. An uncatchable process termination is outside graceful-shutdown guarantees.
+
+Inside tmux, `switch-client` returns promptly, `in_terminal()` exits immediately, and the hidden app repaints. `Switch back: tmux switch-client -l` is retained as a notice; returning to the TUI's client shows current state. Outside tmux, foreground attach owns the tty until detach. Nonzero foreground results become recoverable notices after restoration.
 
 ## 9. Validation and acceptance
 
-Use real application/controller paths with prompt-toolkit pipe input and controlled output. Assert visible state, focus, key behavior, and API effects rather than only matching widget constructors. Keep existing shell and legacy-prompt tests.
+Use real application/controller paths with prompt-toolkit pipe input and controlled output. Assert visible state, focus, key behavior, and API effects rather than only matching widget constructors. Keep existing shell and legacy-prompt tests. `DummyOutput.get_size()` is fixed at 40×80; resize tests must use a subclass overriding `get_size()` with a mutable `Size`, or `Vt100_Output(StringIO(), get_size=..., enable_cpr=False)`. Capture `renderer.last_rendered_screen.data_buffer` after render callbacks for row/cell assertions; a fragment list alone does not prove layout.
 
 Required coverage:
 
@@ -184,8 +231,8 @@ Concrete headless scenario (test-harness sketch; helper names are to be defined 
 ```python
 async def test_session_selection_message_and_quit():
     # In-memory API fixture: billing and frontend, no agents or paid launches.
-    # Pipe-input drives the real Application/controller; DummyOutput supplies I/O.
-    # A render observer captures sanitized fragments plus focused control IDs.
+    # Pipe-input drives the real Application/controller; sized output supplies I/O.
+    # A render observer captures last_rendered_screen.data_buffer and focus IDs.
     async with tui_harness(sessions=[billing, frontend]) as ui:
         await ui.key("F2")
         await ui.type_text("billing")
@@ -194,6 +241,8 @@ async def test_session_selection_message_and_quit():
         assert ui.focused_control == "composer"
         await ui.type_text("Please review retries")
         await ui.inject_workspace_state("claude-1", "running")
+        # That helper calls client.handle_event({'type': 'workspace', 'data': ...})
+        # with a complete server-shaped snapshot; it never mutates TUI internals.
         assert ui.composer_text == "Please review retries"
         await ui.key("ENTER")
         await ui.wait_for_server_echo("Please review retries")
@@ -218,5 +267,9 @@ Acceptance: a new user can create a session, start an agent, attach, return, and
 | D19 | Compact layouts use overlays, not squeezed permanent panes. Cost: one additional action to inspect agents/sessions on smaller terminals. |
 | D20 | Amend the empty-session picker and full-screen history/attach presentation as listed above; lifecycle/security constraints stand. Cost: full-screen help/tests differ from legacy text presentation. |
 | D21 | Preserve reviewed `feature/terminal-sessions` at `ec8067c`; work on `feature/terminal-tui`. No merge or push implied. Cost: later integration must account for the stacked branch. |
+| D22 (R-A) | TUI `/sessions` opens navigation without checkpoint; switch commit/Quit checkpoint instead. Plain order is unchanged. Avoids un-closing an abandoned controller selection; no observable checkpoint loss. |
+| D23 (R-B) | Non-terminal stdout or unset/empty/dumb TERM auto-falls back to plain mode with one stderr line and no fallback-specific exit change; non-terminal stdin remains rejected. Cost: piped output uses plain rendering. |
+| D24 | Require prompt-toolkit >=3.0.53,<4.0 for verified context-manager/test APIs. Cost: older installations must upgrade this existing dependency. |
+| D25 | At the 50-unsent-draft limit, refuse a new destination with a notice instead of adding eviction UI. Cost: send/clear a draft before opening another destination. |
 
 Next gate: user review of this concrete design, plus Claude's technical feedback. After approval, write the implementation plan and execute it with reviewed tasks. No TUI implementation is included in this design change.
