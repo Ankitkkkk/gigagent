@@ -89,8 +89,21 @@ def _error_message(error):
         return f"Request failed (HTTP {error.code})"
     if isinstance(payload, dict):
         detail = payload.get("error", payload.get("detail"))
-        if isinstance(detail, str) and detail:
+        if isinstance(detail, str):
             return detail
+        if isinstance(detail, list) and detail:
+            messages = []
+            for item in detail:
+                if (not isinstance(item, dict) or
+                        not isinstance(item.get("loc"), (list, tuple)) or
+                        not isinstance(item.get("msg"), str)):
+                    break
+                location = ".".join(str(part) for part in item["loc"]
+                                    if part != "body")
+                messages.append(f"{location}: {item['msg']}" if location
+                                else item["msg"])
+            else:
+                return "; ".join(messages)
         if detail is not None:
             return json.dumps(detail, ensure_ascii=False, sort_keys=True)
     return f"Request failed (HTTP {error.code})"

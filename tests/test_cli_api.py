@@ -138,7 +138,10 @@ class RequestJsonTests(unittest.TestCase):
                 if self.path == "/error":
                     self.send_json(400, {"error": "bad request"})
                 elif self.path == "/detail":
-                    self.send_json(422, {"detail": [{"loc": ["body", "name"], "msg": "required"}]})
+                    self.send_json(422, {"detail": [
+                        {"loc": ["body", "name"], "msg": "field required"},
+                        {"loc": ["body", "options", 0], "msg": "invalid value"},
+                    ]})
                 elif self.path == "/missing-session":
                     self.send_json(404, {"error": "session not found"})
                 elif self.path == "/missing-agent":
@@ -149,7 +152,8 @@ class RequestJsonTests(unittest.TestCase):
         with serve(Handler) as url:
             cases = [
                 ("/error", 400, "bad request"),
-                ("/detail", 422, '"msg": "required"'),
+                ("/detail", 422,
+                 "name: field required; options.0: invalid value"),
                 ("/missing-session", 404, "session not found"),
                 ("/missing-agent", 404, "agent not found"),
                 ("/launch", 503, "agent launching is not available on this server"),
@@ -159,6 +163,9 @@ class RequestJsonTests(unittest.TestCase):
                     request_json(url, "token", "GET", path)
                 self.assertEqual(caught.exception.status, status)
                 self.assertIn(message, caught.exception.message)
+                if path == "/detail":
+                    self.assertNotIn("{", caught.exception.message)
+                    self.assertNotIn('"msg"', caught.exception.message)
 
     def test_non_json_http_error_network_error_and_timeout_do_not_leak_secrets(self):
         class Handler(_QuietHandler):
