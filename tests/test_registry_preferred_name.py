@@ -61,6 +61,17 @@ class PreferredNameTests(unittest.TestCase):
         with self.assertRaises(NameInUse):
             self.reg.register("claude", preferred_name="claude-1")
 
+    def test_rejected_cross_family_reclaim_keeps_grace_reservation(self):
+        self.reg.register("codex", preferred_name="codex-3")
+        self.reg.deregister("codex-3")
+        with self.assertRaises(NameInUse):
+            self.reg.register("claude", preferred_name="codex-3", allow_reserved=True)
+        with self.assertRaises(NameInUse):
+            self.reg.register("codex", preferred_name="codex-3")
+        self.assertEqual(self.reg.get_all_names(), [])
+        reclaimed = self.reg.register("codex", preferred_name="codex-3", allow_reserved=True)
+        self.assertEqual(reclaimed["name"], "codex-3")
+
     def test_owner_may_reclaim_reserved_name(self):
         self.reg.register("claude", preferred_name="claude-1")
         self.reg.deregister("claude-1")

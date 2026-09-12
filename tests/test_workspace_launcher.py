@@ -179,6 +179,83 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse((corrupt_data / "identity").exists())
 
+    def test_bad_adapter_spawn_is_400_before_registration(self):
+        from providers import get_adapter
+        self.launcher._adapters = get_adapter
+        for spec in ("nope:Nope", "providers:MissingClass", "bad-spec"):
+            with self.subTest(adapter=spec):
+                self.config["agents"]["claude"]["adapter"] = spec
+                with patch.object(self.registry, "register", wraps=self.registry.register) as register:
+                    with self.assertRaises(LaunchError) as caught:
+                        self.launcher.spawn(self.ws["id"], "claude", str(self.proj), "none")
+                self.assertEqual(caught.exception.status, 400)
+                self.assertIn("adapter for claude could not be loaded:", caught.exception.message)
+                register.assert_not_called()
+                self.assertEqual(self.registry.get_all_names(), [])
+                self.assertEqual(self.registry.free_slot_name("claude"), "claude-1")
+                self.assertEqual(self.store.get(self.ws["id"])["agents"], [])
+                self.assertEqual(self.popen_calls, [])
+                self.assertFalse((self.data / "identity").exists())
+
+    def test_bad_adapter_resume_is_400_without_changes(self):
+        from providers import get_adapter
+        agent = self.launcher.spawn(self.ws["id"], "claude", str(self.proj), "none")
+        self.launcher.stop(self.ws["id"], agent["agent_id"])
+        before = self.agent(agent)
+        shadow = self.store.read_identity(agent["agent_id"])
+        count = len(self.popen_calls)
+        self.launcher._adapters = get_adapter
+        for spec in ("nope:Nope", "providers:MissingClass", "bad-spec"):
+            with self.subTest(adapter=spec):
+                self.config["agents"]["claude"]["adapter"] = spec
+                with patch.object(self.registry, "register", wraps=self.registry.register) as register:
+                    with self.assertRaises(LaunchError) as caught:
+                        self.launcher.resume(self.ws["id"], agent["agent_id"], fresh=True)
+                self.assertEqual(caught.exception.status, 400)
+                self.assertIn("adapter for claude could not be loaded:", caught.exception.message)
+                register.assert_not_called()
+                self.assertEqual(self.agent(agent), before)
+                self.assertEqual(self.store.read_identity(agent["agent_id"]), shadow)
+                self.assertEqual(len(self.popen_calls), count)
+
+    def test_spawn_name_race_requests_retry_and_preserves_reason(self):
+        from registry import NameInUse
+        with patch.object(self.registry, "register", side_effect=NameInUse("claude-1", "grace reserved")):
+            with self.assertRaises(LaunchError) as caught:
+                self.launcher.spawn(self.ws["id"], "claude", str(self.proj), "none")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("name claude-1 in use; retry", caught.exception.message)
+        self.assertIn("grace reserved", caught.exception.message)
+        self.assertNotIn("resume", caught.exception.message)
+
+    def test_custom_spawn_and_resume_name_conflicts_preserve_reason(self):
+        from registry import NameInUse
+        agent = self.launcher.spawn(self.ws["id"], "claude", str(self.proj), "none")
+        self.launcher.stop(self.ws["id"], agent["agent_id"])
+        for operation, status in (
+            (lambda: self.launcher.spawn(self.ws["id"], "claude", str(self.proj), "none", "reviewer"), 400),
+            (lambda: self.launcher.resume(self.ws["id"], agent["agent_id"], fresh=True, name="reviewer"), 409),
+        ):
+            with self.subTest(status=status):
+                with patch.object(self.registry, "register", side_effect=NameInUse("reviewer", "family conflict")):
+                    with self.assertRaises(LaunchError) as caught:
+                        operation()
+                self.assertEqual(caught.exception.status, status)
+                self.assertIn("family conflict", caught.exception.message)
+                if status == 409:
+                    self.assertIn("resume with --name", caught.exception.message)
+
+    def test_unread_fetch_starts_after_read_mark(self):
+        agent = self.launcher.spawn(self.ws["id"], "claude", str(self.proj), "literal")
+        for text in ("seen", "unread", "also unread"):
+            msg = self.messages.add("user", text, channel=self.ws["channel"])
+            self.store.record_routing(self.ws["channel"], msg["id"], [agent["agent_id"]])
+        self.store.ack(self.ws["id"], agent["agent_id"], [0])
+        with patch.object(self.messages, "get_since", wraps=self.messages.get_since) as get_since:
+            items = self.launcher.unread_for(self.ws["id"], agent["agent_id"])
+        self.assertEqual([item["id"] for item in items], [1, 2])
+        get_since.assert_called_once_with(0, channel=self.ws["channel"])
+
     def test_spawn_claude_literal(self):
         ag = self.launcher.spawn(self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="literal")
         self.assertEqual(ag["registry_name"], "claude-1")

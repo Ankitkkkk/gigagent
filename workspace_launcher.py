@@ -100,7 +100,7 @@ class WorkspaceLauncher:
     def _floor_for(self, mode: str, channel: str) -> int:
         return 0 if mode == "literal" else self._channel_latest_id(channel) + 1
 
-    def _validate(self, ws: dict | None, provider: str, cwd: str) -> None:
+    def _validate(self, ws: dict | None, provider: str, cwd: str):
         if self.store.warning:
             raise LaunchError(
                 409,
@@ -125,6 +125,10 @@ class WorkspaceLauncher:
             raise LaunchError(400, f"'{command}' is not on PATH; install it first")
         if not self._tmux.available():
             raise LaunchError(400, "tmux is required to run agents in the background (Linux/macOS)")
+        try:
+            return self._adapter(provider)
+        except (ImportError, AttributeError, ValueError) as exc:
+            raise LaunchError(400, f"adapter for {provider} could not be loaded: {exc}") from exc
 
     def launch_context_for(self, agent: dict) -> LaunchContext:
         last_launch = agent.get("last_launch") or {}
@@ -184,7 +188,7 @@ class WorkspaceLauncher:
             return ""
 
     def _register(self, ws: dict, provider: str, preferred: str, custom: bool,
-                  allow_reserved: bool = False) -> dict:
+                  allow_reserved: bool = False, spawning: bool = False) -> dict:
         try:
             return self.registry.register(
                 provider, label=f"{ws['name']} {provider}", preferred_name=preferred,
@@ -192,15 +196,16 @@ class WorkspaceLauncher:
             )
         except NameInUse as exc:
             if custom:
-                raise LaunchError(400, f"name in use: {exc.name}")
+                raise LaunchError(400, f"name in use: {exc.name} ({exc.reason})") from exc
+            action = "retry" if spawning else "stop that agent or resume with --name <new>"
             raise LaunchError(
-                409, f"name {exc.name} in use; stop that agent or resume with --name <new>"
-            )
+                409, f"name {exc.name} in use; {action} ({exc.reason})"
+            ) from exc
 
     def spawn(self, ws_id: str, provider: str, cwd: str, history_mode: str,
               name: str | None = None) -> dict:
         ws = self.store.get(ws_id)
-        self._validate(ws, provider, cwd)
+        adapter = self._validate(ws, provider, cwd)
         if history_mode not in HISTORY_MODES:
             raise LaunchError(400, f"history_mode must be one of {', '.join(HISTORY_MODES)}")
         if history_mode == "summary":
@@ -212,8 +217,7 @@ class WorkspaceLauncher:
         reg = None
         agent = None
         try:
-            reg = self._register(ws, provider, preferred, custom=bool(name))
-            adapter = self._adapter(provider)
+            reg = self._register(ws, provider, preferred, custom=bool(name), spawning=True)
             session_id = adapter.allocate_session_id()
             last_launch = {
                 "kind": "spawn", "nonce": uuid.uuid4().hex, "at": _now_iso(), "pid": None,
@@ -249,11 +253,10 @@ class WorkspaceLauncher:
         if agent is None:
             raise LaunchError(404, "agent not found")
         requested_cwd = cwd if cwd is not None else agent["cwd"]
-        self._validate(ws, agent["provider"], requested_cwd)
+        adapter = self._validate(ws, agent["provider"], requested_cwd)
         effective_cwd = str(Path(requested_cwd).resolve())
         if agent["last_state"] in ("starting", "running") or self._tmux.has_session(self.tmux_name(agent)):
             raise LaunchError(409, f"{agent['registry_name']} is already running")
-        adapter = self._adapter(agent["provider"])
         session_id = agent["native_session_id"]
         if not fresh:
             if not adapter.supports_resume:
@@ -524,13 +527,15 @@ class WorkspaceLauncher:
         ):
             self._verify_transcript(ws_id, agent_id, adapter, nonce)
 
-    def unread_for(self, ws_id: str, agent_id: str) -> list[dict]:
+    def unread_for(self, ws_id: str, agent_id: str, *, routing: dict | None = None) -> list[dict]:
         ws = self.store.get(ws_id)
         agent = self.store.get_agent(ws_id, agent_id) if ws else None
         if not agent:
             return []
-        messages = self.messages.get_since(-1, channel=ws["channel"])
-        return unread(agent, messages, self.store.routing_for(ws_id))
+        messages = self.messages.get_since(agent["read_mark"], channel=ws["channel"])
+        if routing is None:
+            routing = self.store.routing_for(ws_id)
+        return unread(agent, messages, routing)
 
     def _send_bundle(self, ws: dict, agent: dict) -> int:
         items = self.unread_for(ws["id"], agent["agent_id"])

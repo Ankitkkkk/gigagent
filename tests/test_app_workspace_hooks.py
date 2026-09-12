@@ -1,11 +1,14 @@
 """app.py hooks for workspaces: rename/deregister propagation, HTTP filtering (spec §1, §2, §7)."""
 import asyncio
 import json
+import os
+import subprocess
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from starlette.requests import Request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +45,37 @@ class HooksTests(unittest.TestCase):
         for i in range(6):
             app_module.store.add("ankit", f"m{i}", channel=self.ws["channel"])
 
+    def test_routing_commit_does_not_rebuild_agent_vocabulary(self):
+        with patch.object(app_module.router, "update_agents", wraps=app_module.router.update_agents) as update:
+            self.ws_store.record_routing(self.ws["channel"], 5, [self.agent["agent_id"]])
+            update.assert_not_called()
+            self.ws_store.add_agent(
+                self.ws["id"], provider="codex", cwd="/p", history_mode="none",
+                registry_name="reviewer", floor_id=0, native_session_id=None,
+                history_state="done", last_launch={"kind": "spawn", "nonce": "new", "at": "t"},
+            )
+            update.assert_called_once()
+        self.assertIn("reviewer", app_module.router.agent_names)
+
+    def test_archiving_and_renaming_saved_members_updates_vocabulary(self):
+        self.ws_store.rename_agent("claude-1", "reviewer")
+        self.assertIn("reviewer", app_module.router.agent_names)
+        self.ws_store.set_archived(self.ws["id"], True)
+        self.assertNotIn("reviewer", app_module.router.agent_names)
+        self.ws_store.set_archived(self.ws["id"], False)
+        self.assertIn("reviewer", app_module.router.agent_names)
+
+    def test_tokenless_custom_member_heartbeat_cannot_mark_presence_or_readiness(self):
+        self.ws_store.rename_agent("claude-1", "reviewer")
+        self.ws_store.update_agent(self.ws["id"], self.agent["agent_id"], last_state="starting")
+        for body in (None, {"ready": True, "pid": 123}):
+            with self.subTest(body=body):
+                response = asyncio.run(app_module.heartbeat("reviewer", self.request(body=body)))
+                self.assertEqual(getattr(response, "status_code", None), 403)
+                self.assertEqual(json.loads(response.body), {"error": "authenticated agent session required"})
+                self.assertNotIn("reviewer", mcp_bridge._presence)
+                self.assertEqual(self.ws_store.get_agent(self.ws["id"], self.agent["agent_id"])["last_state"], "starting")
+
     def test_filter_messages_for_member_applies_floor(self):
         app_module.store.add("system", "private", msg_type="summary", channel=self.ws["channel"],
                              metadata={"audience": [self.agent["agent_id"]]})   # id 6
@@ -76,7 +110,7 @@ class HooksTests(unittest.TestCase):
     def request(self, token=None, body=None):
         headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
         async def receive():
-            return {"type": "http.request", "body": json.dumps(body or {}).encode(), "more_body": False}
+            return {"type": "http.request", "body": json.dumps(body).encode() if body is not None else b"", "more_body": False}
         return Request({"type": "http", "method": "GET", "path": "/", "headers": headers}, receive)
 
     def test_messages_endpoint_filters_agent_and_preserves_browser_read(self):
@@ -131,6 +165,37 @@ class HooksTests(unittest.TestCase):
             "workspace launcher on_heartbeat failed for claude-1" in message
             for message in logs.output
         ))
+
+
+class ConfigurePathTests(unittest.TestCase):
+    def test_relative_data_dir_resolves_from_repo_when_cwd_differs(self):
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix="test-relative-data-") as repo_temp:
+            with tempfile.TemporaryDirectory() as foreign_cwd:
+                relative = str(Path(repo_temp).relative_to(ROOT) / "data")
+                code = """
+import asyncio, json, sys
+from pathlib import Path
+from unittest.mock import patch
+import app
+with patch.object(app.threading.Thread, 'start'):
+    app.configure({'server': {'data_dir': sys.argv[1]}, 'agents': {}})
+ws = app.workspace_store.create('relative')
+app._save_settings()
+print(json.dumps({'store': str(app.workspace_store._path),
+                  'settings': str(app._settings_path()),
+                  'status': asyncio.run(app.get_status())['data_dir']}))
+"""
+                env = dict(os.environ, PYTHONPATH=str(ROOT))
+                result = subprocess.run([sys.executable, "-c", code, relative], cwd=foreign_cwd,
+                                        env=env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                paths = json.loads(result.stdout)
+                expected = Path(repo_temp) / "data"
+                self.assertEqual(paths["store"], str(expected / "workspaces.json"))
+                self.assertEqual(paths["settings"], str(expected / "settings.json"))
+                self.assertEqual(paths["status"], str(expected))
+                self.assertTrue((expected / "workspaces.json").exists())
+                self.assertFalse((Path(foreign_cwd) / relative).exists())
 
 
 if __name__ == "__main__":

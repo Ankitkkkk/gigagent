@@ -266,8 +266,11 @@ def configure(cfg: dict, session_token: str = ""):
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
 
-    data_dir = cfg.get("server", {}).get("data_dir", "./data")
-    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    data_dir = Path(cfg.get("server", {}).get("data_dir", "./data"))
+    if not data_dir.is_absolute():
+        data_dir = Path(__file__).parent / data_dir
+    cfg.setdefault("server", {})["data_dir"] = str(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     log_path = Path(data_dir) / "agentchattr_log.jsonl"
     legacy_log_path = Path(data_dir) / "room_log.jsonl"
@@ -321,7 +324,16 @@ def configure(cfg: dict, session_token: str = ""):
     agents = AgentTrigger(registry, data_dir=data_dir)
     # Terminal sessions (spec §1): records live next to the channel store.
     workspace_store = WorkspaceStore(Path(data_dir) / "workspaces.json", Path(data_dir) / "identity")
-    workspace_store.on_change(_on_registry_change)
+    last_member_names = set(workspace_store.member_names(include_archived=False))
+
+    def _on_workspace_members_change():
+        nonlocal last_member_names
+        names = set(workspace_store.member_names(include_archived=False))
+        if names != last_member_names:
+            last_member_names = names
+            _on_registry_change()
+
+    workspace_store.on_change(_on_workspace_members_change)
     workspace_store.on_workspace_change(_on_workspace_change)
     _on_registry_change()
 
@@ -2450,7 +2462,9 @@ async def heartbeat(agent_name: str, request: Request):
     presented_token = _extract_agent_token(request)
     if presented_token and not auth_inst:
         return JSONResponse({"error": "stale_session"}, status_code=409)
-    if registry and registry.is_agent_family(agent_name) and not auth_inst:
+    is_agent = ((registry and registry.is_agent_family(agent_name))
+                or (workspace_store and agent_name in workspace_store.member_names()))
+    if is_agent and not auth_inst:
         return JSONResponse({"error": "authenticated agent session required"}, status_code=403)
 
     current_name = auth_inst["name"] if auth_inst else agent_name
@@ -2729,6 +2743,28 @@ async def delete_session_template(template_id: str):
 
 # --- Terminal sessions (spec §2) ---
 
+class _InvalidJSONBody(ValueError):
+    pass
+
+
+@app.exception_handler(_InvalidJSONBody)
+async def _invalid_json_body_response(request: Request, exc: _InvalidJSONBody):
+    return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+
+async def _json_body(request: Request) -> dict:
+    raw = await request.body()
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise _InvalidJSONBody() from exc
+    if not isinstance(body, dict):
+        raise _InvalidJSONBody()
+    return body
+
+
 def _launcher_or_503():
     if workspace_launcher is None:
         return JSONResponse({"error": "agent launching is not available on this server"}, status_code=503)
@@ -2738,8 +2774,10 @@ def _launcher_or_503():
 def _ws_view(ws: dict) -> dict:
     """Record plus live state and unread_count per agent."""
     out = ws
+    routing = workspace_store.routing_for(ws["id"]) if workspace_launcher else {}
     for a in out["agents"]:
-        a["unread_count"] = len(workspace_launcher.unread_for(ws["id"], a["agent_id"])) if workspace_launcher else 0
+        a["unread_count"] = len(workspace_launcher.unread_for(
+            ws["id"], a["agent_id"], routing=routing)) if workspace_launcher else 0
         a["tmux_session"] = f"agentchattr-{a['agent_id']}"
     for key in ("routing", "routing_done", "routing_high_water"):
         out.pop(key, None)
@@ -2771,7 +2809,7 @@ def _ensure_channel(name: str) -> None:
 
 @app.post("/api/workspaces")
 async def create_workspace(request: Request):
-    body = await request.json()
+    body = await _json_body(request)
     ws = workspace_store.create(body.get("name"))
     _ensure_channel(ws["channel"])
     await broadcast_settings()
@@ -2786,7 +2824,7 @@ async def get_workspace(ws_id: str):
 
 @app.patch("/api/workspaces/{ws_id}")
 async def rename_workspace(ws_id: str, request: Request):
-    body = await request.json()
+    body = await _json_body(request)
     ws = workspace_store.rename(ws_id, str(body.get("name", "")))
     return JSONResponse({"error": "session not found"}, status_code=404) if ws is None else _ws_view(ws)
 
@@ -2831,7 +2869,7 @@ async def spawn_agent(ws_id: str, request: Request):
     if err:
         return err
     from workspace_launcher import LaunchError
-    body = await request.json()
+    body = await _json_body(request)
     try:
         agent = await asyncio.to_thread(
             workspace_launcher.spawn, ws_id, str(body.get("provider", "")), str(body.get("cwd", "")),
@@ -2847,7 +2885,7 @@ async def resume_agent(ws_id: str, agent_id: str, request: Request):
     if err:
         return err
     from workspace_launcher import LaunchError
-    body = await request.json() if int(request.headers.get("content-length", "0") or 0) else {}
+    body = await _json_body(request)
     try:
         return await asyncio.to_thread(workspace_launcher.resume, ws_id, agent_id,
                                        bool(body.get("fresh")), body.get("name") or None, body.get("cwd") or None)
@@ -2886,16 +2924,18 @@ async def change_history_mode(ws_id: str, agent_id: str, request: Request):
     ws, err = _ws_or_404(ws_id)
     if err:
         return err
+    if ws.get("archived"):
+        return JSONResponse({"error": "session is archived; unarchive it first"}, status_code=400)
     agent = workspace_store.get_agent(ws_id, agent_id)
     if agent is None:
         return JSONResponse({"error": "agent not found"}, status_code=404)
-    body = await request.json()
+    body = await _json_body(request)
     mode = str(body.get("mode", ""))
     if mode == "summary":
         return JSONResponse({"error": "summary history mode is not available in this version"}, status_code=400)
     if mode not in ("none", "literal"):
         return JSONResponse({"error": "mode must be none or literal"}, status_code=400)
-    if agent["history_state"] == "pending":
+    if agent["history_state"] == "pending" and agent["last_state"] in ("starting", "running"):
         return JSONResponse({"error": "catch-up in progress"}, status_code=409)
     if mode == agent["history_mode"]:
         if agent.get("floor_id") is None:
@@ -2905,8 +2945,9 @@ async def change_history_mode(ws_id: str, agent_id: str, request: Request):
                 recent = store.get_recent(1, channel=ws["channel"])
                 floor_id = (recent[-1]["id"] if recent else -1) + 1
             agent = workspace_store.update_agent(ws_id, agent_id, floor_id=floor_id)
-            token = (workspace_store.read_identity(agent_id) or {}).get("token", "")
-            workspace_store.write_identity(ws, agent, token)
+            identity = workspace_store.read_identity(agent_id)
+            if identity is not None:
+                workspace_store.write_identity(ws, agent, identity["token"])
         return agent
     if agent["history_mode"] != "none":
         return JSONResponse({"error": f"{agent['registry_name']} already read history under "
@@ -2914,7 +2955,9 @@ async def change_history_mode(ws_id: str, agent_id: str, request: Request):
                             status_code=400)
     agent = workspace_store.update_agent(ws_id, agent_id, history_mode="literal", floor_id=0,
                                          history_state="pending")
-    workspace_store.write_identity(ws, agent, (workspace_store.read_identity(agent_id) or {}).get("token", ""))
+    identity = workspace_store.read_identity(agent_id)
+    if identity is not None:
+        workspace_store.write_identity(ws, agent, identity["token"])
     if agent["last_state"] == "running":
         from workspace_launcher import LITERAL_PROMPT
         agents.trigger_sync(agent["registry_name"], message="catch up", channel=ws["channel"],
@@ -2929,17 +2972,18 @@ async def workspace_unread(ws_id: str, agent_id: str = ""):
     if err:
         return err
     out = []
+    routing = workspace_store.routing_for(ws_id) if workspace_launcher else {}
     for a in ws["agents"]:
         if agent_id and a["agent_id"] != agent_id:
             continue
-        items = workspace_launcher.unread_for(ws_id, a["agent_id"]) if workspace_launcher else []
+        items = workspace_launcher.unread_for(ws_id, a["agent_id"], routing=routing) if workspace_launcher else []
         out.append({
             "agent_id": a["agent_id"], "registry_name": a["registry_name"],
             "read_mark": a["read_mark"], "acked_above_mark": a["acked_above_mark"], "floor_id": a["floor_id"],
             "count": len(items),
             "messages": [{"id": m["id"], "sender": m["sender"], "time": m.get("time", ""),
                           "text": (m.get("text") or "")[:200],
-                          "routed_to": workspace_store.routing_for(ws_id).get(m["id"], [])} for m in items],
+                          "routed_to": routing.get(m["id"], [])} for m in items],
         })
     return {"agents": out}
 

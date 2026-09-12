@@ -52,8 +52,10 @@ class WorkspaceStore:
             return
         try:
             data = json.loads(self._path.read_text("utf-8"))
-            self._workspaces = list(data.get("workspaces", []))
-        except (OSError, ValueError) as exc:
+            if not isinstance(data, dict) or not isinstance(data.get("workspaces", []), list):
+                raise ValueError("expected an object containing a workspaces list")
+            self._workspaces = data.get("workspaces", [])
+        except Exception as exc:
             stamp = time.strftime("%Y%m%d-%H%M%S")
             quarantined = self._path.with_name(f"{self._path.name}.corrupt-{stamp}")
             try:
@@ -504,9 +506,6 @@ class WorkspaceStore:
                 "floor_id": agent["floor_id"],
                 "last_launch": agent.get("last_launch"),
             }
-            existing = self.read_identity(agent_id) or {}
-            if existing.get("wrapper_pid"):
-                data["wrapper_pid"] = existing["wrapper_pid"]
             return self._write_identity_dict(agent_id, data)
 
     def _write_identity_dict(self, agent_id: str, data: dict) -> Path:

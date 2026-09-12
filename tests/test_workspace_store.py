@@ -116,6 +116,27 @@ class WorkspaceStoreTests(unittest.TestCase):
         self.assertIn("corrupt", s.warning)
         self.assertTrue(list(self.root.glob("workspaces.json.corrupt-*")))
 
+    def test_wrong_shaped_json_is_quarantined_with_warning(self):
+        for data in ([], None, 7, "text", {"workspaces": {}}, {"workspaces": None}):
+            with self.subTest(data=data):
+                self.path.write_text(json.dumps(data))
+                with self.assertLogs("workspace_store", level="ERROR"):
+                    loaded = WorkspaceStore(self.path, self.root / "identity")
+                self.assertEqual(loaded.list(), [])
+                self.assertIn("corrupt", loaded.warning)
+                self.assertFalse(self.path.exists())
+                self.assertTrue(list(self.root.glob("workspaces.json.corrupt-*")))
+
+    def test_identity_rewrite_drops_obsolete_top_level_wrapper_pid(self):
+        ws = self.store.create("x")
+        agent = self.add(ws)
+        self.store.write_identity(ws, agent, "tok")
+        shadow = self.store.read_identity(agent["agent_id"])
+        shadow["wrapper_pid"] = 123
+        self.store.restore_identity(agent["agent_id"], shadow)
+        self.store.write_identity(ws, agent, "tok")
+        self.assertNotIn("wrapper_pid", self.store.read_identity(agent["agent_id"]))
+
     def test_add_agent_fields_and_update(self):
         ws = self.store.create("x")
         ag = self.add(ws)

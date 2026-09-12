@@ -139,7 +139,9 @@ class TmuxIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, stopped)
         self.assertEqual(stopped["last_state"], "exited")
-        time.sleep(1)
+        deadline = time.monotonic() + 10
+        while self.tmux_alive(tmux_name) and time.monotonic() < deadline:
+            time.sleep(0.1)
         self.assertFalse(self.tmux_alive(tmux_name))
 
         status, error = self.call(

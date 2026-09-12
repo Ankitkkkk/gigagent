@@ -218,6 +218,7 @@ class RuntimeRegistry:
                 if rb == base:
                     reserved.add(rs)
 
+            reclaimed_reservation = None
             name_override = None
             custom_name = None
             if preferred_name:
@@ -226,7 +227,7 @@ class RuntimeRegistry:
                 if preferred_name in self._reserved:
                     if not allow_reserved:
                         raise NameInUse(preferred_name)
-                    del self._reserved[preferred_name]
+                    reclaimed_reservation = self._reserved[preferred_name]
                     reserved = {s for s in reserved if f"{base}-{s}" != preferred_name and not (s == 1 and preferred_name == base)}
                 p_base, p_slot = self._parse_name(preferred_name)
                 if p_base == base:
@@ -305,6 +306,12 @@ class RuntimeRegistry:
             result["name"] = renamed["name"]
             result["label"] = renamed["label"]
 
+        # Only consume grace after every name validation (including custom rename)
+        # succeeded. Never remove a newer reservation created by a racing caller.
+        if reclaimed_reservation is not None:
+            with self._lock:
+                if self._reserved.get(preferred_name) == reclaimed_reservation:
+                    del self._reserved[preferred_name]
         return result
 
     def deregister(self, name: str, reclaimable: bool = False) -> dict | None:

@@ -13,6 +13,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from starlette.requests import Request
 from websockets.sync.client import connect as websocket_connect
@@ -75,6 +76,12 @@ class WorkspaceApiTests(unittest.TestCase):
                 return r.status, json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"{}")
+
+    def test_bodiless_create_uses_default_name(self):
+        status, workspace = self.call("POST", "/api/workspaces")
+        self.assertEqual(status, 200)
+        self.assertEqual(workspace["name"], workspace["id"])
+        self.call("POST", f"/api/workspaces/{workspace['id']}/archive")
 
     def test_crud_archive_and_order(self):
         s, a = self.call("POST", "/api/workspaces", {"name": "alpha"})
@@ -151,11 +158,16 @@ class WorkspaceApiTests(unittest.TestCase):
         s, changed = self.call("PATCH", f"/api/workspaces/{changed['id']}", {"name": "renamed-event"})
         self.assertEqual(s, 200)
         workspace_ids = []
-        for _ in range(30):
-            event = json.loads(client.recv(timeout=3))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                event = json.loads(client.recv(timeout=max(0.001, deadline - time.monotonic())))
+            except TimeoutError:
+                continue
             if event.get("type") == "workspace":
                 workspace_ids.append(event["data"]["id"])
-                break
+                if event["data"]["id"] == changed["id"]:
+                    break
         else:
             self.fail("workspace event not received")
         try:
@@ -226,6 +238,9 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         none_agent = self.add_agent(ws, "none", None, state="running")
         literal_agent = self.add_agent(ws, "literal", None, state="running")
 
+        self.ws_store.write_identity(ws, none_agent, "none-token")
+        self.ws_store.write_identity(ws, literal_agent, "literal-token")
+
         repaired_none = self.post_history(ws["id"], none_agent["agent_id"], "none")
         repaired_literal = self.post_history(ws["id"], literal_agent["agent_id"], "literal")
 
@@ -237,6 +252,114 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         channel_messages = self.messages.get_recent(50, channel=ws["channel"])
         visible = self.app._filter_messages_for_agent("fake-1", channel_messages)
         self.assertEqual([m["id"] for m in visible], [new_message["id"]])
+
+    def test_history_repair_does_not_mint_missing_identity_shadow(self):
+        ws = self.ws_store.create("missing-shadow")
+        for old_mode, mode in (("none", "none"), ("literal", "literal"), ("none", "literal")):
+            with self.subTest(old_mode=old_mode, mode=mode):
+                agent = self.add_agent(ws, old_mode, None, state="exited")
+                result = self.post_history(ws["id"], agent["agent_id"], mode)
+                self.assertEqual(result["history_mode"], mode)
+                self.assertIsNotNone(result["floor_id"])
+                self.assertIsNone(self.ws_store.read_identity(agent["agent_id"]))
+
+    def test_exited_pending_history_can_be_repaired(self):
+        ws = self.ws_store.create("stuck")
+        agent = self.add_agent(ws, "literal", None, state="exited")
+        self.ws_store.update_agent(ws["id"], agent["agent_id"], history_state="pending")
+        result = self.post_history(ws["id"], agent["agent_id"], "literal")
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["floor_id"], 0)
+
+    def test_live_pending_history_remains_conflict(self):
+        ws = self.ws_store.create("busy")
+        for state in ("starting", "running"):
+            with self.subTest(state=state):
+                agent = self.add_agent(ws, "literal", None, state=state)
+                self.ws_store.update_agent(ws["id"], agent["agent_id"], history_state="pending")
+                result = self.post_history(ws["id"], agent["agent_id"], "literal")
+                self.assertEqual(result.status_code, 409)
+                self.assertIsNone(self.ws_store.get_agent(ws["id"], agent["agent_id"])["floor_id"])
+
+    def test_archived_history_rejects_without_mutation(self):
+        ws = self.ws_store.create("archived")
+        agent = self.add_agent(ws, "none", 7, state="exited")
+        before = self.ws_store.get_agent(ws["id"], agent["agent_id"])
+        self.ws_store.set_archived(ws["id"], True)
+        result = self.post_history(ws["id"], agent["agent_id"], "literal")
+        self.assertEqual(getattr(result, "status_code", None), 400)
+        self.assertIn("archived", json.loads(result.body)["error"])
+        self.assertEqual(self.ws_store.get_agent(ws["id"], agent["agent_id"]), before)
+        self.assertIsNone(self.ws_store.read_identity(agent["agent_id"]))
+
+    def test_all_body_routes_reject_malformed_and_nonobject_json(self):
+        import httpx
+        from fastapi import FastAPI
+        ws = self.ws_store.create("json")
+        agent = self.add_agent(ws, "none", 0, state="exited")
+        # Real handlers and exception handlers; separate ASGI app avoids changing
+        # the shared app's middleware lifecycle during later configure() tests.
+        isolated = FastAPI(routes=self.app.app.routes, exception_handlers=self.app.app.exception_handlers)
+        self.app.workspace_launcher = object()  # invalid bodies must never reach launcher
+        base = f"/api/workspaces/{ws['id']}"
+        routes = [("POST", "/api/workspaces"), ("PATCH", base), ("POST", base + "/agents"),
+                  ("POST", base + f"/agents/{agent['agent_id']}/resume"),
+                  ("POST", base + f"/agents/{agent['agent_id']}/history")]
+
+        async def exercise():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=isolated, raise_app_exceptions=False),
+                                         base_url="http://localhost") as client:
+                for method, path in routes:
+                    for raw in (b"not json", b"[]", b"null", b"42", b'"text"', b"\xff", b" "):
+                        with self.subTest(method=method, path=path, raw=raw):
+                            response = await client.request(method, path, content=raw)
+                            self.assertEqual(response.status_code, 400, response.text)
+                            self.assertEqual(response.json(), {"error": "invalid JSON body"})
+        asyncio.run(exercise())
+
+    def test_resume_parses_body_without_content_length_and_allows_empty_body(self):
+        class Launcher:
+            def resume(self, ws_id, agent_id, fresh, name, cwd):
+                return {"fresh": fresh, "name": name, "cwd": cwd}
+
+        self.app.workspace_launcher = Launcher()
+        body = {"fresh": True, "name": "reviewer", "cwd": self.tmp}
+        result = asyncio.run(self.app.resume_agent("ws_saved", "ag_saved", self.request(body)))
+        self.assertEqual(result, body)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        request = Request({"type": "http", "method": "POST", "path": "/", "headers": []}, receive)
+        result = asyncio.run(self.app.resume_agent("ws_saved", "ag_saved", request))
+        self.assertEqual(result, {"fresh": False, "name": None, "cwd": None})
+
+    def test_unread_views_fetch_routing_once_and_start_after_marks(self):
+        from workspace_launcher import WorkspaceLauncher
+        ws = self.ws_store.create("unread-view")
+        first = self.add_agent(ws, "literal", 0, state="exited")
+        second = self.add_agent(ws, "literal", 0, state="exited")
+        ids = [first["agent_id"], second["agent_id"]]
+        for text in ("seen", "first pending", "last pending"):
+            msg = self.messages.add("user", text, channel=ws["channel"])
+            self.ws_store.record_routing(ws["channel"], msg["id"], ids)
+        self.ws_store.ack(ws["id"], first["agent_id"], [0])
+        self.ws_store.ack(ws["id"], second["agent_id"], [0, 1])
+        self.app.workspace_launcher = WorkspaceLauncher(
+            store=self.ws_store, messages=self.messages, registry=self.registry, agents=self.triggers,
+            config={"agents": {}}, data_dir=Path(self.tmp), root=ROOT,
+        )
+        for view in ("detail", "unread"):
+            with self.subTest(view=view):
+                with patch.object(self.ws_store, "routing_for", wraps=self.ws_store.routing_for) as routing:
+                    with patch.object(self.messages, "get_since", wraps=self.messages.get_since) as since:
+                        result = (self.app._ws_view(self.ws_store.get(ws["id"])) if view == "detail"
+                                  else asyncio.run(self.app.workspace_unread(ws["id"])))
+                key = "unread_count" if view == "detail" else "count"
+                self.assertEqual([a[key] for a in result["agents"]], [2, 1])
+                routing.assert_called_once_with(ws["id"])
+                self.assertEqual([call.args[0] for call in since.call_args_list], [0, 1])
+                if view == "unread":
+                    self.assertCountEqual(result["agents"][0]["messages"][0]["routed_to"], ids)
 
     def test_stopped_widening_catches_up_once_after_ready(self):
         from providers.base import NullAdapter
@@ -280,7 +403,7 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         record["routing_high_water"] = 3
 
         class Launcher:
-            def unread_for(self, ws_id, agent_id):
+            def unread_for(self, ws_id, agent_id, *, routing=None):
                 if ws_id == ws["id"] and agent_id == agent["agent_id"]:
                     return [{"id": 4}, {"id": 5}]
                 return []
@@ -338,7 +461,7 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         self.add_agent(ws, "literal", 0, state="running")
 
         class Launcher:
-            def unread_for(self, ws_id, agent_id):
+            def unread_for(self, ws_id, agent_id, *, routing=None):
                 raise RuntimeError("unread failed")
 
         self.app.workspace_launcher = Launcher()
