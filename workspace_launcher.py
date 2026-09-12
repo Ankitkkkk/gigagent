@@ -209,27 +209,35 @@ class WorkspaceLauncher:
         if name and name in saved:
             raise LaunchError(400, f"name in use by a saved agent: {name}")
         preferred = name or self.registry.free_slot_name(provider, exclude=saved)
-        reg = self._register(ws, provider, preferred, custom=bool(name))
-        adapter = self._adapter(provider)
-        session_id = adapter.allocate_session_id()
-        last_launch = {"kind": "spawn", "nonce": uuid.uuid4().hex, "at": _now_iso(), "pid": None}
-        agent = self.store.add_agent(
-            ws_id, provider=provider, cwd=str(Path(cwd).resolve()), history_mode=history_mode,
-            registry_name=reg["name"], floor_id=self._floor_for(history_mode, ws["channel"]),
-            native_session_id=session_id,
-            history_state="done" if history_mode == "none" else "pending",
-            last_launch=last_launch,
-        )
-        self.store.write_identity(ws, agent, reg["token"])
-        launch = self.launch_context_for(agent)
+        reg = None
+        agent = None
         try:
+            reg = self._register(ws, provider, preferred, custom=bool(name))
+            adapter = self._adapter(provider)
+            session_id = adapter.allocate_session_id()
+            last_launch = {
+                "kind": "spawn", "nonce": uuid.uuid4().hex, "at": _now_iso(), "pid": None,
+            }
+            agent = self.store.add_agent(
+                ws_id, provider=provider, cwd=str(Path(cwd).resolve()), history_mode=history_mode,
+                registry_name=reg["name"], floor_id=self._floor_for(history_mode, ws["channel"]),
+                native_session_id=session_id,
+                history_state="done" if history_mode == "none" else "pending",
+                last_launch=last_launch,
+            )
+            self.store.write_identity(ws, agent, reg["token"])
+            launch = self.launch_context_for(agent)
             wrapper_pid = self._launch(
                 ws, agent, adapter.new_session_args(session_id), adapter.launch_env(launch)
             )
         except Exception as exc:
-            self.registry.deregister(reg["name"])
-            self.store.delete_identity(agent["agent_id"])
-            self.store.remove_agent(ws_id, agent["agent_id"])
+            if reg is not None:
+                self.registry.deregister(reg["name"])
+            if agent is not None:
+                self.store.delete_identity(agent["agent_id"])
+                self.store.remove_agent(ws_id, agent["agent_id"])
+            if isinstance(exc, LaunchError):
+                raise
             raise LaunchError(500, f"failed to start wrapper: {exc}")
         last_launch["wrapper_pid"] = wrapper_pid
         return self.store.update_agent(ws_id, agent["agent_id"], last_launch=last_launch)
@@ -276,44 +284,48 @@ class WorkspaceLauncher:
         preferred = name or agent["registry_name"]
         if name and name != agent["registry_name"] and name in set(self.store.member_names()):
             raise LaunchError(400, f"name in use by a saved agent: {name}")
-        reg = self._register(
-            ws, agent["provider"], preferred, custom=False,
-            allow_reserved=(preferred == agent["registry_name"]),
-        )
-        fields = {"registry_name": reg["name"], "last_state": "starting", "last_error": None}
-        if effective_cwd != agent["cwd"]:
-            fields["cwd"] = effective_cwd
-            fields["previous_cwds"] = agent.get("previous_cwds", []) + [agent["cwd"]]
-        kind = "fresh" if fresh else "resume"
-        if fresh:
-            new_session_id = adapter.allocate_session_id()
-            fields["previous_native_ids"] = agent.get("previous_native_ids", []) + (
-                [session_id] if session_id else []
-            )
-            fields["native_session_id"] = new_session_id
-            fields["native_verified"] = False
-            if agent["history_mode"] == "literal":
-                fields["history_state"] = "pending"
-            session_id = new_session_id
-        fields["last_launch"] = {
-            "kind": kind, "nonce": uuid.uuid4().hex, "at": _now_iso(), "pid": None,
-        }
-        agent = self.store.update_agent(ws_id, agent_id, **fields)
-        self.store.write_identity(ws, agent, reg["token"])
-        launch = self.launch_context_for(agent)
-        provider_args = (
-            adapter.new_session_args(session_id)
-            if fresh else adapter.resume_args(session_id, Path(agent["cwd"]))
-        )
+        reg = None
         try:
+            reg = self._register(
+                ws, agent["provider"], preferred, custom=False,
+                allow_reserved=(preferred == agent["registry_name"]),
+            )
+            fields = {"registry_name": reg["name"], "last_state": "starting", "last_error": None}
+            if effective_cwd != agent["cwd"]:
+                fields["cwd"] = effective_cwd
+                fields["previous_cwds"] = agent.get("previous_cwds", []) + [agent["cwd"]]
+            kind = "fresh" if fresh else "resume"
+            if fresh:
+                new_session_id = adapter.allocate_session_id()
+                fields["previous_native_ids"] = agent.get("previous_native_ids", []) + (
+                    [session_id] if session_id else []
+                )
+                fields["native_session_id"] = new_session_id
+                fields["native_verified"] = False
+                if agent["history_mode"] == "literal":
+                    fields["history_state"] = "pending"
+                session_id = new_session_id
+            fields["last_launch"] = {
+                "kind": kind, "nonce": uuid.uuid4().hex, "at": _now_iso(), "pid": None,
+            }
+            agent = self.store.update_agent(ws_id, agent_id, **fields)
+            self.store.write_identity(ws, agent, reg["token"])
+            launch = self.launch_context_for(agent)
+            provider_args = (
+                adapter.new_session_args(session_id)
+                if fresh else adapter.resume_args(session_id, Path(agent["cwd"]))
+            )
             wrapper_pid = self._launch(ws, agent, provider_args, adapter.launch_env(launch))
         except Exception as exc:
-            self.registry.deregister(reg["name"])
-            self.store.update_agent(
-                ws_id, agent_id, last_state="exited",
-                last_error=f"failed to start wrapper: {exc}", **restore,
-            )
-            self.store.restore_identity(agent_id, original_identity)
+            if reg is not None:
+                self.registry.deregister(reg["name"])
+                self.store.update_agent(
+                    ws_id, agent_id, last_state="exited",
+                    last_error=f"failed to start wrapper: {exc}", **restore,
+                )
+                self.store.restore_identity(agent_id, original_identity)
+            if isinstance(exc, LaunchError):
+                raise
             raise LaunchError(500, f"failed to start wrapper: {exc}")
         last_launch = dict(agent["last_launch"])
         last_launch["wrapper_pid"] = wrapper_pid
@@ -348,11 +360,17 @@ class WorkspaceLauncher:
             return
         kind = agent["last_launch"].get("kind", "spawn")
         if agent["history_mode"] == "literal" and agent["history_state"] == "pending":
-            self.agents.trigger_sync(
-                agent["registry_name"], message="catch up", channel=ws["channel"],
-                prompt=LITERAL_PROMPT.format(channel=ws["channel"]),
-            )
-            self._update_if_launch(ws_id, agent_id, nonce, history_state="done")
+            if not self._update_if_launch(ws_id, agent_id, nonce, history_state="done"):
+                return
+            try:
+                self.agents.trigger_sync(
+                    agent["registry_name"], message="catch up", channel=ws["channel"],
+                    prompt=LITERAL_PROMPT.format(channel=ws["channel"]),
+                )
+            except Exception:
+                self._update_if_launch(ws_id, agent_id, nonce, history_state="pending")
+                log.exception("failed to enqueue literal catch-up for %s", agent_id)
+                return
         if kind in ("resume", "fresh"):
             self._send_bundle(ws, self.store.get_agent(ws_id, agent_id))
         adapter = self._adapter(agent["provider"])

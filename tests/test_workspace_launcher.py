@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -246,6 +247,20 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.ws["id"])["agents"], [])
         self.assertEqual(self.registry.get_all_names(), [])
 
+    def test_add_agent_failure_on_spawn_rolls_back_registration(self):
+        with patch.object(self.store, "add_agent", side_effect=OSError("disk full")):
+            with self.assertRaises(LaunchError) as cm:
+                self.launcher.spawn(
+                    self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="none"
+                )
+
+        self.assertEqual(cm.exception.status, 500)
+        self.assertIn("disk full", cm.exception.message)
+        self.assertEqual(self.registry.get_all_names(), [])
+        self.assertEqual(self.store.get(self.ws["id"])["agents"], [])
+        identities = list((self.data / "identity").glob("*")) if (self.data / "identity").exists() else []
+        self.assertEqual(identities, [])
+
     def test_ready_heartbeat_runs_literal_catchup(self):
         ag = self.launcher.spawn(self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="literal")
         self.launcher.on_heartbeat("claude-1", ready=False, pid=1)
@@ -259,6 +274,31 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(q), 1)
         self.assertIn("since_id=-1", q[0]["prompt"])
         self.assertIn("has_more", q[0]["prompt"])
+
+    def test_stale_literal_catchup_cas_never_enqueues(self):
+        ag = self.launcher.spawn(
+            self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="literal"
+        )
+        nonce = ag["last_launch"]["nonce"]
+
+        with patch.object(self.store, "update_agent_if_launch", return_value=False):
+            self.launcher._after_ready(self.ws["id"], ag["agent_id"], nonce)
+
+        self.assertEqual(self.queue("claude-1"), [])
+        self.assertEqual(self.agent(ag)["history_state"], "pending")
+
+    def test_literal_catchup_enqueue_failure_reverts_pending(self):
+        ag = self.launcher.spawn(
+            self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="literal"
+        )
+        nonce = ag["last_launch"]["nonce"]
+
+        with patch.object(self.agents, "trigger_sync", side_effect=OSError("queue read only")):
+            with self.assertLogs("workspace_launcher", level="ERROR") as logs:
+                self.launcher._after_ready(self.ws["id"], ag["agent_id"], nonce)
+
+        self.assertEqual(self.agent(ag)["history_state"], "pending")
+        self.assertTrue(any("queue read only" in line for line in logs.output))
 
     def test_no_ready_within_timeout_terminates_launch(self):
         ag = self.launcher.spawn(self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="none")
@@ -463,6 +503,24 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(got["registry_name"], "claude-1")
         self.assertEqual(got["last_launch"], before_fresh["last_launch"])
         self.assertEqual(self.store.read_identity(ag["agent_id"]), shadow_before_fresh)
+
+    def test_identity_write_failure_on_fresh_restores_saved_conversation(self):
+        ag = self._running_claude()
+        self.launcher.stop(self.ws["id"], ag["agent_id"])
+        before = self.agent(ag)
+        shadow = self.store.read_identity(ag["agent_id"])
+
+        with patch.object(self.store, "write_identity", side_effect=OSError("read only")):
+            with self.assertRaises(LaunchError) as cm:
+                self.launcher.resume(self.ws["id"], ag["agent_id"], fresh=True)
+
+        got = self.agent(ag)
+        self.assertEqual(cm.exception.status, 500)
+        self.assertIn("read only", cm.exception.message)
+        self.assertEqual(got["native_session_id"], before["native_session_id"])
+        self.assertEqual(got["last_launch"], before["last_launch"])
+        self.assertEqual(self.store.read_identity(ag["agent_id"]), shadow)
+        self.assertEqual(self.registry.get_all_names(), [])
 
     def test_reconcile_marks_missing_sessions_exited(self):
         ag = self._running_claude()
