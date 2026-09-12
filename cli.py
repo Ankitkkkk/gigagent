@@ -12,6 +12,8 @@ from urllib.parse import urlencode
 
 from cli_api import (CLIError, SessionTokenParser, fetch_session_token, get_api,
                      local_url)
+from cli_workspaces import (WorkspaceAPI, format_workspace_result,
+                            run_workspace_command)
 from config_loader import load_config
 
 
@@ -289,12 +291,17 @@ async def shell_command(client, args):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Terminal chat and shell commands for agentchattr.")
-    parser.set_defaults(url=None, channel="general", name=None, history=30,
-                        timeout=15.0, json=False, command="chat")
+    parser.set_defaults(url=None, channel=None, session=None, name=None, history=30,
+                        timeout=15, json=False, command="chat", agent_name=None,
+                        history_mode="literal", cwd=None, fresh=False, archived=False,
+                        yes=False, agent=None, no_resume=False, provider=None,
+                        session_name=None, target_session=None)
 
     def options(target):
         target.add_argument("--url", default=argparse.SUPPRESS, help="Local server URL")
         target.add_argument("--channel", default=argparse.SUPPRESS, help="Channel (default: general)")
+        target.add_argument("--session", default=argparse.SUPPRESS,
+                            help="Session id, name, or unique name prefix")
         target.add_argument("--name", default=argparse.SUPPRESS, help="Human display name")
         target.add_argument("--history", "--limit", type=int, default=argparse.SUPPRESS,
                             help="Recent messages to display (default: 30)")
@@ -305,15 +312,59 @@ def build_parser():
 
     options(parser)
     commands = parser.add_subparsers(dest="command")
-    for command, help_text in [("chat", "Interactive chat (default)"),
-                               ("send", "Send a message; use - to read stdin"),
-                               ("read", "Read recent channel messages"),
-                               ("channels", "List channels"),
-                               ("status", "Show agent status")]:
+    command_help = [("chat", "Interactive chat (default)"),
+                    ("send", "Send a message; use - to read stdin"),
+                    ("read", "Read recent channel messages"),
+                    ("channels", "List channels"),
+                    ("status", "Show agent status"),
+                    ("sessions", "List terminal sessions"),
+                    ("new", "Create a terminal session"),
+                    ("spawn", "Start a new agent in a session"),
+                    ("resume", "Resume an agent in a session"),
+                    ("stop", "Stop an agent in a session"),
+                    ("unread", "Show unread messages for session agents"),
+                    ("retry", "Retry unread delivery for an agent"),
+                    ("history", "Change an agent history mode"),
+                    ("archive", "Archive a terminal session")]
+    for command, help_text in command_help:
         subparser = commands.add_parser(command, help=help_text)
         options(subparser)
-        if command == "send":
+        if command == "chat":
+            subparser.add_argument("--no-resume", action="store_true",
+                                   default=argparse.SUPPRESS,
+                                   help="Do not offer to resume stopped agents")
+        elif command == "send":
             subparser.add_argument("message", nargs="+", help="Message text or - for stdin")
+        elif command == "sessions":
+            subparser.add_argument("--archived", action="store_true",
+                                   default=argparse.SUPPRESS,
+                                   help="Include archived sessions")
+        elif command == "new":
+            subparser.add_argument("session_name", metavar="NAME")
+        elif command == "spawn":
+            subparser.add_argument("provider", metavar="PROVIDER")
+            subparser.add_argument("--cwd", required=True)
+            subparser.add_argument("--agent-name", default=argparse.SUPPRESS)
+            subparser.add_argument("--history-mode", default=argparse.SUPPRESS,
+                                   metavar="MODE")
+        elif command == "resume":
+            subparser.add_argument("agent", metavar="AGENT")
+            subparser.add_argument("--fresh", action="store_true",
+                                   default=argparse.SUPPRESS)
+            subparser.add_argument("--agent-name", default=argparse.SUPPRESS)
+            subparser.add_argument("--cwd", default=argparse.SUPPRESS)
+        elif command in ("stop", "retry"):
+            subparser.add_argument("agent", metavar="AGENT")
+        elif command == "unread":
+            subparser.add_argument("--agent", default=argparse.SUPPRESS)
+        elif command == "history":
+            subparser.add_argument("agent", metavar="AGENT")
+            subparser.add_argument("--mode", dest="history_mode", required=True,
+                                   metavar="MODE")
+        elif command == "archive":
+            subparser.add_argument("target_session", metavar="SESSION")
+            subparser.add_argument("--yes", action="store_true",
+                                   default=argparse.SUPPRESS)
     return parser
 
 
@@ -325,8 +376,27 @@ def main(argv=None):
         parser.error("--history must be between 1 and 10000")
     if not 0 < args.timeout <= 300:
         parser.error("--timeout must be between 0 and 300 seconds")
+    if args.channel is not None and args.session is not None:
+        parser.error("--channel and --session cannot be used together")
+    if args.command == "archive" and args.session is not None:
+        parser.error("archive SESSION cannot be combined with --session")
+    if args.command in ("spawn", "resume", "stop", "unread", "retry", "history") \
+            and args.session is None:
+        parser.error(f"{args.command} requires --session")
+    if args.history_mode == "summary":
+        parser.error("summary history mode is not available in this version; use literal or none")
+    if args.command in ("spawn", "history") and args.history_mode not in ("literal", "none"):
+        parser.error("history mode must be literal or none")
+    if args.command == "archive" and not args.yes:
+        if not sys.stdin.isatty():
+            parser.exit(1, "archive requires --yes when input is not a terminal\n")
+        if input("Archive session? [y/N] ").strip().lower() not in ("y", "yes"):
+            return
+    workspace_commands = {"sessions", "new", "spawn", "resume", "stop",
+                          "unread", "retry", "history", "archive"}
     try:
-        from websockets.asyncio.client import connect  # noqa: F401
+        if args.command in ("chat", "send"):
+            from websockets.asyncio.client import connect  # noqa: F401
         if args.command == "chat":
             import prompt_toolkit  # noqa: F401
     except ImportError:
@@ -342,15 +412,36 @@ def main(argv=None):
         url = args.url or f"http://127.0.0.1:{load_config()['server']['port']}"
     try:
         output = print if args.command == "chat" else lambda text: None
-        client = ChatClient(url, args.channel, args.name, args.history, output=output)
+        channel = (args.channel or "general").removeprefix("#")
+        client = ChatClient(url, channel, args.name, args.history, output=output)
     except ValueError as error:
         parser.error(str(error))
     try:
         if args.command == "chat":
             asyncio.run(interactive(client))
+        elif args.command in workspace_commands:
+            api = WorkspaceAPI(url, timeout=args.timeout)
+
+            async def run_session_command():
+                async with asyncio.timeout(args.timeout):
+                    return await asyncio.to_thread(run_workspace_command, api, args)
+
+            result = asyncio.run(run_session_command())
+            if args.json:
+                print(json.dumps(result.data, ensure_ascii=True))
+            else:
+                print(terminal_text(format_workspace_result(args.command, result)))
         else:
             async def run_command():
                 async with asyncio.timeout(args.timeout):
+                    if args.session:
+                        api = WorkspaceAPI(url, timeout=args.timeout)
+                        workspace = await asyncio.to_thread(
+                            api.resolve, args.session, True)
+                        args.channel = workspace["channel"]
+                        client.channel = workspace["channel"]
+                    else:
+                        args.channel = channel
                     return await shell_command(client, args)
             result = asyncio.run(run_command())
             if args.json:
@@ -371,7 +462,13 @@ def main(argv=None):
     except KeyboardInterrupt:
         parser.exit(130)
     except ValueError as error:
-        parser.exit(1, terminal_text(str(error)) + "\n")
+        message = terminal_text(str(error))
+        if args.command != "chat" and ("Could not connect" in message or
+                                        "timed out" in message.lower()):
+            message += "\nStart it manually: python run.py"
+        parser.exit(1, message + "\n")
+    except TimeoutError:
+        parser.exit(1, "Server request timed out.\nStart it manually: python run.py\n")
     except Exception:
         # Transport exception messages may embed the session token in a URL.
         parser.exit(1, "Server request failed or timed out. Check run.py and --url. "
