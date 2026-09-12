@@ -633,8 +633,15 @@ API in §2. The user-facing word is "session"; flags and commands use it.
 ### Startup: `python cli.py`
 
 1. **Server** (D7) — interactive chat only. Probe `GET /api/status` on the port from `config.toml`.
-   Down → `tmux new-session -d -s agentchattr-server "<sys.executable> run.py"`
-   from the repo root, then poll `/api/status` for up to 15 s. Print one line:
+   Down → `tmux new-session -d -s agentchattr-server "<sys.executable> run.py
+   --port … --data-dir … --upload-dir … --mcp-http-port … --mcp-sse-port …"`
+   (the values the CLI resolved from `config.toml` and any `AGENTCHATTR_*`
+   overrides, passed explicitly because a session created on an existing
+   tmux server inherits that server's environment, not the CLI's) from the
+   repo root, with output appended to `data/logs/server.log`, then poll
+   `/api/status` for up to 15 s. If a tmux session named `agentchattr-server`
+   already exists while the port is down, do not create or kill anything:
+   exit 1 naming that session and the manual command. Print one line:
    `Started server in tmux session agentchattr-server.` If tmux is missing or
    the server never answers, exit 1 with `Start it manually: python run.py`
    and the log location. `--url` given → never auto-start; the user chose a
@@ -655,6 +662,12 @@ API in §2. The user-facing word is "session"; flags and commands use it.
    Empty list → straight to the new-session prompt. A workspace whose agent
    `cwd` no longer exists shows `⚠ cwd missing — /resume <agent> --cwd PATH`
    on that agent line, and the select-time resume question skips that agent.
+   An agent whose `last_launch.kind` is `fresh` and whose state is `starting`
+   shows `fresh` in place of its state. Two workspaces with the same name
+   show the first four hex characters of their ids after the name.
+   `--session <archived name>` prints that the session is archived and asks
+   `Unarchive it? [y/N]`; no → exit 1. `sessions --archived` lists archived
+   sessions in addition to active ones.
 3. **New session**. Prompt for a name; blank → the id. `POST /api/workspaces`,
    then enter chat in its channel.
 4. **Existing session**. Print one status line per agent. If any agent is
@@ -671,12 +684,13 @@ API in §2. The user-facing word is "session"; flags and commands use it.
 
 | Command | Behaviour |
 |---|---|
-| `/spawn <provider> [--agent-name NAME] [--cwd PATH] [--history-mode none\|literal\|summary]` | Missing `--cwd` → prompt, default = last cwd used in this workspace, else the CLI's cwd. Missing `--history-mode` → prompt; until slice 3 ships only `none`/`literal` are offered with `literal` as the default (the size-based `summary` default applies once slice 3 exists); an explicit `summary` is refused with the server's "not available" message. `--agent-name` sets a custom `registry_name`; default `<provider>-<n>`. (`--name` keeps its existing meaning everywhere: the human sender; `--history` stays the numeric history limit.) `POST …/agents`; prints `registry_name`, state. While `history_state` is `pending` prints `summarizing…`; on `done` prints so; on `failed` prints the reason and prompts `[r]etry / [l]iteral / [n]one` (WebSocket `workspace` event, polling fallback every 2 s). |
+| `/spawn <provider> [--agent-name NAME] [--cwd PATH] [--history-mode none\|literal\|summary]` | Missing `--cwd` → prompt, default = last cwd used in this workspace, else the CLI's cwd. Missing `--history-mode` → prompt; until slice 3 ships only `none`/`literal` are offered with `literal` as the default (the size-based `summary` default applies once slice 3 exists); an explicit `summary` is refused with the server's "not available" message. `--agent-name` sets a custom `registry_name`; default `<provider>-<n>`. (`--name` keeps its existing meaning everywhere: the human sender; `--history` stays the numeric history limit.) `POST …/agents`; prints `registry_name`, state. While `history_state` is `pending` prints `catching up…` (`summarizing…` once slice 3 exists and the mode is `summary`); on `done` prints so; on `failed` (slice 3 only — nothing in slice 1–2 writes `failed`) prints the reason and prompts `[r]etry / [l]iteral / [n]one`. Progress arrives via the WebSocket `workspace` event; the 2 s poll runs only while an agent is `starting` or `history_state` is `pending`, or while the WebSocket is down. |
 | `/resume <agent> [--fresh] [--agent-name NAME] [--cwd PATH]` | `POST …/resume`. `--agent-name` takes a new registry name when the old one is held; `--cwd` re-points a moved project. On `native_session_id` null without `--fresh`: prints the refusal and the exact `--fresh` command. |
 | `/stop <agent>` | `POST …/stop`. |
-| `/attach <agent>` | Runs `tmux attach -t agentchattr-<agent_id>` in the foreground. The WebSocket stays connected; messages arriving during attach are buffered and printed after detach (Ctrl+B D). If the tmux session is gone, prints `not running` and the resume hint. |
+| `/attach <agent>` | Uses the agent's `tmux_session` field from the server (`agentchattr-<agent_id>`; derive it only if the field is absent). Outside tmux: `tmux attach -t <session>` in the foreground, run off the event loop so the receiver keeps draining; messages arriving during attach are buffered (bounded) and printed after detach (Ctrl+B D). Inside tmux (`$TMUX` set): `tmux switch-client -t <session>` — nested attach is refused by tmux — and the CLI prints how to switch back (`tmux switch-client -l`). If the tmux session is gone, prints `not running` and the resume hint. |
 | `/agents` | Extended: for each workspace agent — `registry_name`, provider, state, cwd, unread count, native id present or not. Non-workspace agents listed below as today. |
 | `/unread [agent]`, `/retry <agent>` | §4. |
+| `/history` (no arguments) | Unchanged from today: prints recent channel history. |
 | `/history <agent> <none\|literal\|summary>` | `POST …/history`. Resolves a failed summary or widens `none`. |
 | `/rename <name>` | `PATCH /api/workspaces/{id}`. |
 | `/archive` | Confirm `y/N`. Checkpoint, stop agents, archive, return to the picker. |
