@@ -26,6 +26,9 @@ registry = None       # set by run.py — RuntimeRegistry instance
 config = None         # set by run.py — full config.toml dict
 router = None         # set by run.py — Router instance
 agents = None         # set by run.py — AgentManager instance
+# Workspace visibility (spec §1). Both set by run.py; None = feature off.
+workspace_policy = None   # callable(registry_name, channel) -> {"agent_id","floor_id"} | None
+workspace_ack = None      # callable(registry_name, channel, returned_ids: list[int]) -> None
 _presence: dict[str, float] = {}
 _activity: dict[str, bool] = {}   # True = screen changed on last poll
 _activity_ts: dict[str, float] = {}  # timestamp of last active=True heartbeat
@@ -426,6 +429,47 @@ def _serialize_messages(msgs: list[dict]) -> str:
     return json.dumps(out, ensure_ascii=False) if out else ""
 
 
+def _policy_blocked(sender: str, channel: str | None):
+    """True when the sender is a workspace agent whose policy for `channel` is lost."""
+    if not sender or not channel or workspace_policy is None:
+        return False
+    from workspace_unread import is_blocked
+    return is_blocked(workspace_policy(sender, channel))
+
+
+def _apply_visibility(sender: str, msgs: list[dict]) -> list[dict] | None:
+    """Filter channel messages through the workspace predicate for `sender`.
+
+    Returns None when any touched channel is blocked (fail closed)."""
+    if not sender or workspace_policy is None:
+        return msgs
+    from workspace_unread import is_blocked, visible
+    cache: dict[str, dict | None] = {}
+    out = []
+    for m in msgs:
+        ch = m.get("channel", "general")
+        if ch not in cache:
+            cache[ch] = workspace_policy(sender, ch)
+        pol = cache[ch]
+        if pol is not None and is_blocked(pol):
+            return None
+        if visible(pol, m):          # pol None → audience still enforced, no floor
+            out.append(m)
+    return out
+
+
+def _record_acks(sender: str, msgs: list[dict]) -> None:
+    """Spec D5: a read tool returning a message is the acknowledgement."""
+    if not sender or workspace_ack is None or workspace_policy is None or not msgs:
+        return
+    by_channel: dict[str, list[int]] = {}
+    for m in msgs:
+        by_channel.setdefault(m.get("channel", "general"), []).append(m["id"])
+    for ch, ids in by_channel.items():
+        if workspace_policy(sender, ch) is not None:
+            workspace_ack(sender, ch, ids)
+
+
 def _load_cursors():
     """Load cursor state from disk (called by run.py after store init)."""
     global _cursors
@@ -574,7 +618,7 @@ def _update_cursor(sender: str, msgs: list[dict], channel: str | None):
 
 def chat_read(
     sender: str = "",
-    since_id: int = 0,
+    since_id: int | None = None,
     limit: int = 20,
     channel: str = "",
     job_id: int = 0,
@@ -585,7 +629,9 @@ def chat_read(
     Smart defaults:
     - First call with sender: returns last `limit` messages (full context).
     - Subsequent calls with same sender: returns only NEW messages since last read.
-    - Pass since_id to override and read from a specific point.
+    - Pass since_id (any integer, -1 for the very beginning) to page forward
+      oldest-first; the reply ends with "has_more: true, next_since_id: N"
+      when more remain.
     - Omit sender to always get the last `limit` messages (no cursor).
     - Pass channel to filter by channel name (default: all channels).
     - Pass job_id to read a specific job. Job reads return a header entry first,
@@ -637,15 +683,17 @@ def chat_read(
         return json.dumps(out, ensure_ascii=False)
 
     ch = channel if channel else None
+    from workspace_unread import BLOCKED_TEXT
+    if _policy_blocked(sender, ch):
+        return BLOCKED_TEXT
     # Remember the channel this agent just read so chat_send without an
     # explicit channel defaults here instead of falling back to "general".
-    # Only record when a specific channel was requested — broad reads
-    # (no channel) shouldn't overwrite a useful last-read.
     if sender and ch:
         with _last_read_lock:
             _last_read_channel[sender] = ch
             _last_read_job_id.pop(sender, None)
-    if since_id:
+    explicit = since_id is not None
+    if explicit:
         msgs = store.get_since(since_id, channel=ch)
     elif sender:
         ch_key = ch if ch else "__all__"
@@ -659,9 +707,20 @@ def chat_read(
     else:
         msgs = store.get_recent(limit, channel=ch)
 
-    msgs = msgs[-limit:]
+    msgs = _apply_visibility(sender, msgs)
+    if msgs is None:
+        return BLOCKED_TEXT
+    has_more = False
+    if explicit:
+        has_more = len(msgs) > limit
+        msgs = msgs[:limit]          # oldest-first page
+    else:
+        msgs = msgs[-limit:]         # newest window, unchanged behaviour
     _update_cursor(sender, msgs, ch)
+    _record_acks(sender, msgs)
     serialized = _serialize_messages(msgs)
+    if has_more and msgs:
+        serialized += f"\nhas_more: true, next_since_id: {msgs[-1]['id']}"
 
     # Escalating empty-read hints to discourage polling loops
     if not serialized and sender:
@@ -705,8 +764,15 @@ def chat_resync(
     if err:
         return err
     ch = channel if channel else None
-    msgs = store.get_recent(limit, channel=ch)
+    from workspace_unread import BLOCKED_TEXT
+    if _policy_blocked(sender, ch):
+        return BLOCKED_TEXT
+    msgs = _apply_visibility(sender, store.get_recent(limit, channel=ch))
+    if msgs is None:
+        return BLOCKED_TEXT
+    msgs = msgs[-limit:]
     _update_cursor(sender, msgs, ch)
+    _record_acks(sender, msgs)
     serialized = _serialize_messages(msgs)
     return serialized
 
@@ -914,6 +980,14 @@ def chat_summary(
 
     if action == "read":
         entry = summaries.get(channel)
+        if sender and workspace_policy is not None:
+            from workspace_unread import BLOCKED_TEXT, is_blocked
+            pol = workspace_policy(sender, channel)
+            if is_blocked(pol):
+                return BLOCKED_TEXT
+            if pol and entry and int(entry.get("message_id", 0)) < int(pol["floor_id"]):
+                return json.dumps({"channel": channel, "text": None,
+                                   "message": f"No summary visible for #{channel}."})
         if not entry:
             return json.dumps({"channel": channel, "text": None, "message": f"No summary for #{channel} yet — one hasn't been written."})
         return json.dumps(entry, ensure_ascii=False)
