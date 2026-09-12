@@ -107,7 +107,11 @@ class WorkspaceStore:
                 "routing": {},
             }
             self._workspaces.append(ws)
-            self._commit()
+            try:
+                self._commit()
+            except Exception:
+                self._workspaces.pop()
+                raise
             return json.loads(json.dumps(ws))
 
     def get(self, ws_id: str) -> dict | None:
@@ -190,9 +194,19 @@ class WorkspaceStore:
                 "last_error": None,
                 "last_launch": dict(last_launch),
             }
+            missing = object()
+            previous_updated_at = ws.get("updated_at", missing)
             ws["agents"].append(agent)
             self._touch(ws)
-            self._commit()
+            try:
+                self._commit()
+            except Exception:
+                ws["agents"].remove(agent)
+                if previous_updated_at is missing:
+                    ws.pop("updated_at", None)
+                else:
+                    ws["updated_at"] = previous_updated_at
+                raise
             return json.loads(json.dumps(agent))
 
     def _find_agent(self, ws: dict, agent_id: str) -> dict | None:

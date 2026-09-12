@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -45,6 +46,15 @@ class WorkspaceStoreTests(unittest.TestCase):
         self.assertLessEqual(len(ws2["channel"]), 20)          # app._CHANNEL_NAME_RE limit
         ws3 = self.store.create("Billing Refactor")
         self.assertNotEqual(ws2["channel"], ws3["channel"])
+
+    def test_create_save_failure_restores_memory_and_allows_retry(self):
+        with patch.object(self.store, "_save", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.store.create("failed")
+
+        self.assertEqual(self.store.list(include_archived=True), [])
+        created = self.store.create("works")
+        self.assertEqual([ws["id"] for ws in self.store.list(include_archived=True)], [created["id"]])
 
     def test_list_is_newest_first_and_hides_archived(self):
         a = self.store.create("a")
@@ -101,6 +111,17 @@ class WorkspaceStoreTests(unittest.TestCase):
         got = self.store.get_agent(ws["id"], ag["agent_id"])
         self.assertEqual(got["last_launch"]["nonce"], "abc")
         self.assertEqual(got["previous_cwds"], [])
+
+    def test_add_agent_save_failure_restores_memory_and_allows_retry(self):
+        ws = self.store.create("x")
+        with patch("workspace_store._now", return_value="2099-01-01T00:00:00Z"):
+            with patch.object(self.store, "_save", side_effect=OSError("read only")):
+                with self.assertRaisesRegex(OSError, "read only"):
+                    self.add(ws)
+
+        self.assertEqual(self.store.get(ws["id"]), ws)
+        agent = self.add(ws)
+        self.assertEqual(self.store.get(ws["id"])["agents"][0]["agent_id"], agent["agent_id"])
 
     def test_write_identity_uses_current_registry_name_not_a_stale_dict(self):
         ws = self.store.create("x")
