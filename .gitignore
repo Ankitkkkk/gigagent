@@ -17,7 +17,8 @@ build/
 .gemini/
 .claude/
 agents_lineup.svg
-docs/
+docs/*
+!docs/superpowers/
 goals.py
 pr-reviews/
 agentchattr-*.zip
