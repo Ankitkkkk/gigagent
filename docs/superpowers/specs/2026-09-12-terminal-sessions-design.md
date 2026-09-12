@@ -599,16 +599,21 @@ Repeated retries are allowed; there is no server-side dedupe in v1.
 `GET /api/workspaces/{id}/unread?agent_id=` →
 
 ```json
-{"agent_id": "ag_…", "registry_name": "claude-1", "read_mark": 140, "acked_above_mark": [143], "floor_id": 101,
- "count": 3,
- "messages": [{"id": 141, "sender": "ankit", "time": "…", "text": "first 200 chars…",
-               "routed_to": ["claude"]},
-              {"id": 147, "sender": "codex-1", "time": "…", "text": "…", "routed_to": ["claude-1"]},
-              {"id": 152, "sender": "ankit", "time": "…", "text": "…", "routed_to": ["claude-1"]}]}
+{"agents": [
+  {"agent_id": "ag_…", "registry_name": "claude-1", "read_mark": 140, "acked_above_mark": [143], "floor_id": 101,
+   "count": 3,
+   "messages": [{"id": 141, "sender": "ankit", "time": "…", "text": "first 200 chars…",
+                 "routed_to": ["ag_…"]},
+                {"id": 147, "sender": "codex-1", "time": "…", "text": "…", "routed_to": ["ag_…"]},
+                {"id": 152, "sender": "ankit", "time": "…", "text": "…", "routed_to": ["ag_…"]}]}
+]}
 ```
 
-Here 143 was read out of order (in `acked_above_mark`), so it is not listed;
-141, 147 and 152 are routed to the agent, above the mark, and not acked.
+`routed_to` carries stable `agent_id`s (the routing side table's key), not
+registry names. With `agent_id` the list holds that one agent; the shape is
+the same either way. Here 143 was read out of order (in `acked_above_mark`),
+so it is not listed; 141, 147 and 152 are routed to the agent, above the
+mark, and not acked.
 Without `agent_id`, one entry per agent in the workspace. The workspace list
 route carries `unread_count` per agent from the same computation.
 
