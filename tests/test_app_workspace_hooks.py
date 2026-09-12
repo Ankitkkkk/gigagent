@@ -112,6 +112,26 @@ class HooksTests(unittest.TestCase):
         self.assertEqual(response["name"], "claude-1")
         self.assertEqual(launcher.calls, [("claude-1", True, 123)])
 
+    def test_ready_heartbeat_logs_launcher_failure_and_returns_ok(self):
+        class Launcher:
+            def on_heartbeat(self, name, ready, pid):
+                raise RuntimeError("launcher unavailable")
+
+        previous = app_module.workspace_launcher
+        app_module.workspace_launcher = Launcher()
+        self.addCleanup(setattr, app_module, "workspace_launcher", previous)
+        with self.assertLogs(app_module.log, level="ERROR") as logs:
+            response = asyncio.run(app_module.heartbeat(
+                "different-name",
+                self.request(self.reg["token"], {"ready": True, "pid": 123}),
+            ))
+        self.assertEqual(response["ok"], True)
+        self.assertEqual(response["name"], "claude-1")
+        self.assertTrue(any(
+            "workspace launcher on_heartbeat failed for claude-1" in message
+            for message in logs.output
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

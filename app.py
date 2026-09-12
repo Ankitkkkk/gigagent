@@ -2441,6 +2441,7 @@ async def heartbeat(agent_name: str, request: Request):
         mcp_bridge._presence[current_name] = __import__("time").time()
     # Optional activity report from wrapper's terminal monitor
     _activity_changed = False
+    body = {}
     try:
         body = await request.json()
         if "active" in body:
@@ -2448,10 +2449,13 @@ async def heartbeat(agent_name: str, request: Request):
             was_active = mcp_bridge._activity.get(current_name, False)
             mcp_bridge.set_active(current_name, active_val)
             _activity_changed = was_active != active_val
-        if "ready" in body and workspace_launcher is not None:
-            workspace_launcher.on_heartbeat(current_name, ready=bool(body["ready"]), pid=body.get("pid"))
     except Exception:
         pass  # No body = plain heartbeat
+    if isinstance(body, dict) and "ready" in body and workspace_launcher is not None:
+        try:
+            workspace_launcher.on_heartbeat(current_name, ready=bool(body["ready"]), pid=body.get("pid"))
+        except Exception:
+            log.exception("workspace launcher on_heartbeat failed for %s", current_name)
     # Immediately broadcast on activity state change (don't wait for background checker)
     if _activity_changed:
         await broadcast_status()
