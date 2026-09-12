@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cli
+import cli_api
 import cli_workspaces
 from cli_api import CLIError
 
@@ -476,6 +477,44 @@ class MainValidationTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("timed out", stderr)
         self.assertIn("Start it manually: python run.py", stderr)
+
+    def test_all_shell_commands_share_down_server_error_and_manual_hint(self):
+        expected = ("Could not connect to the local agentchattr server\n"
+                    "Start it manually: python run.py\n")
+        commands = [
+            ["--url", "http://127.0.0.1:1", "send", "--json", "hello"],
+            ["--url", "http://127.0.0.1:1", "read", "--json"],
+            ["--url", "http://127.0.0.1:1", "status", "--json"],
+            ["--url", "http://127.0.0.1:1", "channels", "--json"],
+            ["--url", "http://127.0.0.1:1", "sessions", "--json"],
+        ]
+        opener = MagicMock()
+        opener.open.side_effect = OSError("connection refused")
+        for argv in commands:
+            with self.subTest(command=argv[-2]), \
+                    patch.object(cli_api, "_opener", return_value=opener), \
+                    patch.object(cli.sys, "stdin", TerminalInput()), \
+                    redirect_stdout(stdout := StringIO()), \
+                    redirect_stderr(stderr := StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    cli.main(argv)
+                self.assertEqual(caught.exception.code, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), expected)
+
+    def test_all_legacy_commands_report_missing_websocket_dependency(self):
+        expected = "Install terminal dependencies: python -m pip install -r requirements-cli.txt\n"
+        for argv in (["read", "--json"], ["send", "x"]):
+            with self.subTest(command=argv[0]), \
+                    patch.dict(sys.modules, {"websockets.asyncio.client": None}), \
+                    patch.object(cli.sys, "stdin", TerminalInput()), \
+                    redirect_stdout(stdout := StringIO()), \
+                    redirect_stderr(stderr := StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    cli.main(argv)
+                self.assertEqual(caught.exception.code, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), expected)
 
 
 class SessionChannelCompatibilityTests(unittest.TestCase):

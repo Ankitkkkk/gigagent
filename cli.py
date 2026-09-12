@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import uuid
+from urllib.error import URLError
 from urllib.parse import urlencode
 
 from cli_api import (CLIError, SessionTokenParser, fetch_session_token, get_api,
@@ -257,7 +258,10 @@ async def interactive(client):
 async def shell_command(client, args):
     from websockets.asyncio.client import connect
 
-    token = await asyncio.to_thread(fetch_session_token, client.url)
+    try:
+        token = await asyncio.to_thread(fetch_session_token, client.url)
+    except (OSError, URLError):
+        raise CLIError("Could not connect to the local agentchattr server") from None
     if args.command == "status":
         return await asyncio.to_thread(get_api, client.url, token, "/api/status")
     settings = await asyncio.to_thread(get_api, client.url, token, "/api/settings")
@@ -395,7 +399,7 @@ def main(argv=None):
     workspace_commands = {"sessions", "new", "spawn", "resume", "stop",
                           "unread", "retry", "history", "archive"}
     try:
-        if args.command in ("chat", "send"):
+        if args.command in ("chat", "send", "read", "status", "channels"):
             from websockets.asyncio.client import connect  # noqa: F401
         if args.command == "chat":
             import prompt_toolkit  # noqa: F401
