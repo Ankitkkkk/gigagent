@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ if str(Path(__file__).parent) not in sys.path:
 
 import providers
 from providers.base import LaunchContext, NullAdapter, ProviderAdapter
+from providers.claude import ClaudeAdapter
 from _workspace_helpers import FakeClock, make_launch, write_rollout
 
 
@@ -86,6 +88,48 @@ class GetAdapterTests(unittest.TestCase):
     def test_bad_adapter_spec_raises(self):
         with self.assertRaises(ValueError):
             providers.get_adapter("x", {"adapter": "no-colon-here"})
+
+
+class ClaudeAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.a = ClaudeAdapter({"command": "claude"}, home=self.home)
+
+    def test_conforms(self):
+        assert_adapter_conforms(self, self.a)
+        self.assertTrue(self.a.supports_resume)
+        self.assertTrue(self.a.can_locate_transcripts)
+
+    def test_allocates_uuid4_and_passes_it_on_launch(self):
+        sid = self.a.allocate_session_id()
+        self.assertEqual(uuid.UUID(sid).version, 4)
+        self.assertEqual(self.a.new_session_args(sid), ["--session-id", sid])
+        self.assertEqual(self.a.new_session_args(None), [])
+
+    def test_resume_args(self):
+        self.assertEqual(self.a.resume_args("abc", Path("/proj")), ["--resume", "abc"])
+
+    def test_locate_transcript_globs_any_project_dir(self):
+        sid = str(uuid.uuid4())
+        proj = self.home / ".claude" / "projects" / "-home-me-proj"
+        proj.mkdir(parents=True)
+        (proj / f"{sid}.jsonl").write_text("{}\n")
+        self.assertEqual(self.a.locate_transcript(sid, Path("/anything")), proj / f"{sid}.jsonl")
+        self.assertIsNone(self.a.locate_transcript(str(uuid.uuid4()), Path("/anything")))
+
+    def test_summarizer_is_tool_free(self):
+        cmd = self.a.summarizer_command(None, Path("/p"), Path("/o"), Path("/w"))
+        self.assertEqual(cmd[0], "claude")
+        self.assertIn("-p", cmd)
+        self.assertIn("--strict-mcp-config", cmd)
+        i = cmd.index("--tools")
+        self.assertEqual(cmd[i + 1], "")
+        self.assertIn("haiku", cmd)
+
+    def test_registered_as_builtin(self):
+        self.assertIsInstance(providers.get_adapter("claude", {"command": "claude"}), ClaudeAdapter)
 
 
 if __name__ == "__main__":

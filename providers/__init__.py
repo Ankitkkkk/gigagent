@@ -37,3 +37,6 @@ def get_adapter(provider_name: str, agent_cfg: dict | None = None) -> ProviderAd
 
 __all__ = ["AmbiguousSessionId", "LaunchContext", "NullAdapter", "ProviderAdapter",
            "get_adapter", "register_builtin"]
+
+from .claude import ClaudeAdapter  # noqa: E402
+register_builtin("claude", ClaudeAdapter)
