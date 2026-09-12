@@ -632,13 +632,15 @@ API in §2. The user-facing word is "session"; flags and commands use it.
 
 ### Startup: `python cli.py`
 
-1. **Server** (D7). Probe `GET /api/status` on the port from `config.toml`.
+1. **Server** (D7) — interactive chat only. Probe `GET /api/status` on the port from `config.toml`.
    Down → `tmux new-session -d -s agentchattr-server "<sys.executable> run.py"`
    from the repo root, then poll `/api/status` for up to 15 s. Print one line:
    `Started server in tmux session agentchattr-server.` If tmux is missing or
    the server never answers, exit 1 with `Start it manually: python run.py`
    and the log location. `--url` given → never auto-start; the user chose a
-   specific server.
+   specific server. Shell commands never auto-start: they probe the chosen
+   server and, if it is down, exit 1 with the manual-start hint — the same
+   failure behaviour scripts see today.
 2. **Picker**. `GET /api/workspaces`, newest `updated_at` first:
 
    ```
@@ -669,8 +671,8 @@ API in §2. The user-facing word is "session"; flags and commands use it.
 
 | Command | Behaviour |
 |---|---|
-| `/spawn <provider> [--name NAME] [--cwd PATH] [--history none\|literal\|summary]` | Missing `--cwd` → prompt, default = last cwd used in this workspace, else the CLI's cwd. Missing `--history` → prompt, default `literal` under 50 channel messages, else `summary`. `--name` sets a custom `registry_name`; default `<provider>-<n>`. `POST …/agents`; prints `registry_name`, state. While `history_state` is `pending` prints `summarizing…`; on `done` prints so; on `failed` prints the reason and prompts `[r]etry / [l]iteral / [n]one` (WebSocket `workspace` event, polling fallback every 2 s). |
-| `/resume <agent> [--fresh] [--name NAME] [--cwd PATH]` | `POST …/resume`. `--name` takes a new registry name when the old one is held; `--cwd` re-points a moved project. On `native_session_id` null without `--fresh`: prints the refusal and the exact `--fresh` command. |
+| `/spawn <provider> [--agent-name NAME] [--cwd PATH] [--history-mode none\|literal\|summary]` | Missing `--cwd` → prompt, default = last cwd used in this workspace, else the CLI's cwd. Missing `--history-mode` → prompt; until slice 3 ships only `none`/`literal` are offered with `literal` as the default (the size-based `summary` default applies once slice 3 exists); an explicit `summary` is refused with the server's "not available" message. `--agent-name` sets a custom `registry_name`; default `<provider>-<n>`. (`--name` keeps its existing meaning everywhere: the human sender; `--history` stays the numeric history limit.) `POST …/agents`; prints `registry_name`, state. While `history_state` is `pending` prints `summarizing…`; on `done` prints so; on `failed` prints the reason and prompts `[r]etry / [l]iteral / [n]one` (WebSocket `workspace` event, polling fallback every 2 s). |
+| `/resume <agent> [--fresh] [--agent-name NAME] [--cwd PATH]` | `POST …/resume`. `--agent-name` takes a new registry name when the old one is held; `--cwd` re-points a moved project. On `native_session_id` null without `--fresh`: prints the refusal and the exact `--fresh` command. |
 | `/stop <agent>` | `POST …/stop`. |
 | `/attach <agent>` | Runs `tmux attach -t agentchattr-<agent_id>` in the foreground. The WebSocket stays connected; messages arriving during attach are buffered and printed after detach (Ctrl+B D). If the tmux session is gone, prints `not running` and the resume hint. |
 | `/agents` | Extended: for each workspace agent — `registry_name`, provider, state, cwd, unread count, native id present or not. Non-workspace agents listed below as today. |
@@ -692,8 +694,8 @@ Same conventions as the existing `send`/`read`/`channels`/`status`: `--json`,
 ```
 cli.py sessions [--archived] [--json]
 cli.py new <name> [--json]
-cli.py spawn <provider> --session <id|name> --cwd PATH [--name NAME] [--history MODE] [--json]
-cli.py resume <agent> --session <id|name> [--fresh] [--name NAME] [--cwd PATH] [--json]
+cli.py spawn <provider> --session <id|name> --cwd PATH [--agent-name NAME] [--history-mode MODE] [--json]
+cli.py resume <agent> --session <id|name> [--fresh] [--agent-name NAME] [--cwd PATH] [--json]
 cli.py stop <agent> --session <id|name> [--json]
 cli.py attach <agent> --session <id|name>
 cli.py unread --session <id|name> [--agent X] [--json]
