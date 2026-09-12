@@ -835,16 +835,24 @@ class ControllerCommandTests(ControllerFixture, unittest.IsolatedAsyncioTestCase
         self.controller.plain_channel = True
         self.controller.workspace = None
         for text in ['/spawn claude', '/resume ag_a', '/stop ag_a', '/retry ag_a',
-                     '/history ag_a none', '/unread', '/rename name', '/archive', '/sessions']:
+                     '/unread', '/rename name', '/archive', '/sessions']:
             self.assertEqual(await self.handle(text), 'continue')
             self.assertIn('session', self.output[-1].lower())
         self.assertIsNone(await self.handle('/history'))
         self.assertEqual(self.api.mock_calls, [])
 
+    async def test_plain_mode_history_arguments_delegate_without_session_error_or_api(self):
+        self.controller.plain_channel = True
+        self.controller.workspace = None
+        for text in ['/history 50', '/history ag_a none', '/history "unterminated']:
+            self.assertIsNone(await self.handle(text))
+        self.assertEqual(self.output, [])
+        self.assertEqual(self.api.mock_calls, [])
+
     async def test_plain_mode_explanation_precedes_session_argument_parsing(self):
         self.controller.plain_channel = True
         self.controller.workspace = None
-        for text in ['/history 50', '/spawn', '/spawn "unterminated']:
+        for text in ['/spawn', '/spawn "unterminated']:
             self.assertEqual(await self.handle(text), 'continue')
             self.assertEqual(self.output[-1], 'This command requires a selected session; '
                              'start chat with --session or the session picker.')

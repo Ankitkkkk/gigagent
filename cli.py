@@ -381,6 +381,8 @@ def build_parser():
                     ("retry", "Retry unread delivery for an agent"),
                     ("history", "Change an agent history mode"),
                     ("archive", "Archive a terminal session")]
+    parser.json_commands = tuple(command for command, _ in command_help
+                                 if command not in ("chat", "attach"))
     for command, help_text in command_help:
         subparser = commands.add_parser(command, help=help_text)
         options(subparser)
@@ -427,6 +429,8 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     args.command = args.command or "chat"
+    json_unavailable = (f"--json is not available for {args.command}; available for "
+                        + ", ".join(parser.json_commands))
     if not 1 <= args.history <= 10000:
         parser.error("--history must be between 1 and 10000")
     if not 0 < args.timeout <= 300:
@@ -440,7 +444,7 @@ def main(argv=None):
         parser.error(f"{args.command} requires --session")
     if args.command == 'attach':
         if args.json:
-            parser.error('--json is not available for attach')
+            parser.error(json_unavailable)
         try:
             require_tmux_platform()
         except CLIError as error:
@@ -467,7 +471,7 @@ def main(argv=None):
         parser.exit(1, "Install terminal dependencies: python -m pip install -r requirements-cli.txt\n")
     if args.command == "chat":
         if args.json:
-            parser.error("--json is only available for send, read, channels, and status")
+            parser.error(json_unavailable)
         if not sys.stdin.isatty():
             parser.exit(1, "Interactive chat requires a terminal. Use read or send for scripts.\n")
     elif args.command == "send" and args.message == ["-"]:

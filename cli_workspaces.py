@@ -101,7 +101,7 @@ def attach_agent(agent, *, runner=subprocess.run, output=print, shell_session=No
     hint = f'/resume {label}' if shell_session is None else (
         f'python cli.py resume {label} --session {shlex.quote(_safe(shell_session))}')
     try:
-        probe = runner(['tmux', 'has-session', '-t', target], timeout=5,
+        probe = runner(['tmux', 'has-session', '-t', '=' + target], timeout=5,
                        capture_output=True)
         if probe.returncode:
             raise CLIError(f'not running; resume with {hint}')
@@ -187,7 +187,7 @@ def format_workspace_result(command, result):
     if command == "sessions":
         lines = []
         for ws in data.get("workspaces", []):
-            lines.append(_workspace_label(ws))
+            lines.append(_workspace_label(ws) + (' (archived)' if ws.get('archived') else ''))
             agents = ws.get("agents", [])
             if not agents:
                 lines.append("  no agents")

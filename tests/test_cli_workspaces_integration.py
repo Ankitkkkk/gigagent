@@ -224,6 +224,20 @@ class WorkspaceTmuxIntegrationTests(IsolatedCliServer):
         self.poll(lambda: current()['last_state'] == 'exited' and not self.tmux_exists(target))
 
 
+class LogExcerptTests(unittest.TestCase):
+    def test_token_straddling_excerpt_boundary_is_redacted_before_slicing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'server.log'
+            entry = 'GET /ws?token=boundary-secret&channel=general\n'
+            log = entry + 'x' * (12000 - len(entry[9:]))
+            self.assertTrue(log[-12000:].startswith('oken=boundary-secret'))
+            path.write_text(log)
+            excerpt = log_excerpt(path)
+        self.assertFalse('boundary-secret' in excerpt, 'boundary token must be redacted')
+        self.assertIn('[REDACTED]', excerpt)
+        self.assertLessEqual(len(excerpt), 12000)
+
+
 class ServerStartupIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='agentchattr-cli-start-')

@@ -197,7 +197,7 @@ class WorkspaceLauncher:
         except NameInUse as exc:
             if custom:
                 raise LaunchError(400, f"name in use: {exc.name} ({exc.reason})") from exc
-            action = "retry" if spawning else "stop that agent or resume with --name <new>"
+            action = "retry" if spawning else "stop that agent or resume with --agent-name <new>"
             raise LaunchError(
                 409, f"name {exc.name} in use; {action} ({exc.reason})"
             ) from exc

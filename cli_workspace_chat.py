@@ -537,7 +537,7 @@ class WorkspaceChatController:
         command = parts[0]
         if command in ('/quit', '/exit'):
             return 'quit'
-        if command == '/history' and len(parts) == 1:
+        if command == '/history' and (len(parts) == 1 or self.workspace is None):
             return None
         if self.workspace is not None and command in ('/agents', '/help'):
             if command == '/agents':

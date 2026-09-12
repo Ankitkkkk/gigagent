@@ -40,13 +40,14 @@ def isolated_environment(directory, additions=None):
 
 def log_excerpt(path):
     try:
-        text = Path(path).read_text(errors='replace')[-12000:]
+        text = Path(path).read_text(errors='replace')
     except OSError:
         return '(server log unavailable)'
     text = re.sub(r'([?&]token=)[^\s&\"\'<>]+', r'\1[REDACTED]', text,
                   flags=re.IGNORECASE)
-    return re.sub(r'(Session token:\s*)\S+', r'\1[REDACTED]', text,
+    text = re.sub(r'(Session token:\s*)\S+', r'\1[REDACTED]', text,
                   flags=re.IGNORECASE)
+    return text[-12000:]
 
 
 def stop_process(process):

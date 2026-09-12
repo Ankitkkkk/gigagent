@@ -243,7 +243,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(caught.exception.status, status)
                 self.assertIn("family conflict", caught.exception.message)
                 if status == 409:
-                    self.assertIn("resume with --name", caught.exception.message)
+                    self.assertIn("resume with --agent-name <new>", caught.exception.message)
 
     def test_unread_fetch_starts_after_read_mark(self):
         agent = self.launcher.spawn(self.ws["id"], "claude", str(self.proj), "literal")
@@ -503,7 +503,8 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaises(LaunchError) as cm:
             self.launcher.resume(self.ws["id"], ag["agent_id"])
         self.assertEqual(cm.exception.status, 409)
-        self.assertIn("--name", cm.exception.message)
+        self.assertIn("name claude-1 in use", cm.exception.message)
+        self.assertIn("resume with --agent-name <new>", cm.exception.message)
         got = self.launcher.resume(self.ws["id"], ag["agent_id"], name="claude-2")
         self.assertEqual(got["registry_name"], "claude-2")
         self.assertEqual(got["floor_id"], ag["floor_id"])

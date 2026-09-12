@@ -143,7 +143,7 @@ class AttachHelperTests(unittest.TestCase):
             code = self.helper()({'agent_id': 'ag_a'}, runner=runner)
         self.assertEqual(code, 7)
         self.assertEqual(runner.call_args_list[0].args[0],
-                         ['tmux', 'has-session', '-t', 'agentchattr-ag_a'])
+                         ['tmux', 'has-session', '-t', '=agentchattr-ag_a'])
         self.assertEqual(runner.call_args_list[0].kwargs,
                          {'timeout': 5, 'capture_output': True})
         self.assertEqual(runner.call_args_list[1].args[0],
@@ -158,6 +158,8 @@ class AttachHelperTests(unittest.TestCase):
             code = self.helper()({'agent_id': 'ag_a', 'tmux_session': 'server-target'},
                                  runner=runner, output=output.append)
         self.assertEqual(code, 0)
+        self.assertEqual(runner.call_args_list[0].args[0],
+                         ['tmux', 'has-session', '-t', '=server-target'])
         self.assertEqual(runner.call_args.args[0],
                          ['tmux', 'switch-client', '-t', 'server-target'])
         self.assertEqual(output, ['Switch back: tmux switch-client -l'])
@@ -494,6 +496,17 @@ class DispatchTests(unittest.TestCase):
 
 
 class FormattingTests(unittest.TestCase):
+    def test_sessions_archived_suffix_marks_only_archived_rows(self):
+        active = workspace()
+        archived = dict(workspace(archived=True), id='ws_old')
+        data = {'workspaces': [active, archived]}
+        original = json.dumps(data, sort_keys=True)
+        text = self.formatter()('sessions', self.result(data))
+        labels = [line for line in text.splitlines() if not line.startswith('  ')]
+        self.assertEqual(labels, ['billing (ws_a)', 'billing (ws_old) (archived)'])
+        self.assertEqual(text.count(' (archived)'), 1)
+        self.assertEqual(json.dumps(data, sort_keys=True), original)
+
     def result(self, data, selected=None):
         cls = getattr(cli_workspaces, "WorkspaceCommandResult", None)
         if cls is None:
@@ -537,6 +550,22 @@ class FormattingTests(unittest.TestCase):
 
 
 class MainValidationTests(unittest.TestCase):
+    def test_json_refusal_names_every_supported_command_for_chat_and_attach(self):
+        supported = ('send', 'read', 'channels', 'status', 'sessions', 'new',
+                     'spawn', 'resume', 'stop', 'unread', 'retry', 'history', 'archive')
+        for argv, command in [(['--json'], 'chat'), (['chat', '--json'], 'chat'),
+                              (['attach', 'ag_a', '--session', 'billing', '--json'], 'attach')]:
+            with self.subTest(command=command, argv=argv):
+                code, stdout, stderr, api_type, runner = self.run_main(argv)
+                self.assertEqual(code, 2)
+                diagnostic = stderr.split('error: ', 1)[-1]
+                self.assertIn(f'--json is not available for {command}', diagnostic)
+                for name in supported:
+                    self.assertIn(name, diagnostic)
+                self.assertEqual(stdout, '')
+                api_type.assert_not_called()
+                runner.assert_not_called()
+
     def run_main(self, argv, *, tty=False, input_text="", api=None, runner=None):
         stdout = StringIO()
         stderr = StringIO()
