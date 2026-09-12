@@ -58,6 +58,14 @@ class IdentityFileTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             wrapper.load_identity_file("/nonexistent/id.json")
 
+    def test_non_object_json_exits_with_identity_error(self):
+        for payload in (["claude-1", "tok"], None, "claude-1"):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
+                p = Path(tmp) / "id.json"
+                p.write_text(json.dumps(payload))
+                with self.assertRaisesRegex(SystemExit, r"identity file .* lacks registry_name/token"):
+                    wrapper.load_identity_file(str(p))
+
 
 @unittest.skipIf(sys.platform == "win32", "tmux fixture")
 class NoAttachTests(unittest.TestCase):

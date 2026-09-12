@@ -615,13 +615,13 @@ def load_identity_file(path: str) -> dict:
     try:
         data = json.loads(Path(path).read_text("utf-8"))
     except (OSError, ValueError) as exc:
-        print(f"  Error: cannot read identity file {path}: {exc}")
-        sys.exit(1)
+        sys.exit(f"  Error: cannot read identity file {path}: {exc}")
+    if not isinstance(data, dict):
+        sys.exit(f"  Error: identity file {path} lacks registry_name/token")
     name = data.get("registry_name") or data.get("name")
     token = data.get("token")
     if not name or not token:
-        print(f"  Error: identity file {path} lacks registry_name/token")
-        sys.exit(1)
+        sys.exit(f"  Error: identity file {path} lacks registry_name/token")
     try:
         _, slot_text = name.rsplit("-", 1)
         slot = int(slot_text)
