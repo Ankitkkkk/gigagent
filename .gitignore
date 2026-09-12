@@ -22,3 +22,4 @@ docs/*
 goals.py
 pr-reviews/
 agentchattr-*.zip
+.superpowers/
