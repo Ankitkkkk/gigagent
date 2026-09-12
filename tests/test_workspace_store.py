@@ -93,6 +93,27 @@ class WorkspaceStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.add(ws, history_mode="weird")
 
+    def test_add_agent_returns_a_deep_copy(self):
+        ws = self.store.create("x")
+        ag = self.add(ws)
+        ag["last_launch"]["nonce"] = "mutated"
+        ag["previous_cwds"].append("/other")
+        got = self.store.get_agent(ws["id"], ag["agent_id"])
+        self.assertEqual(got["last_launch"]["nonce"], "abc")
+        self.assertEqual(got["previous_cwds"], [])
+
+    def test_write_identity_uses_current_registry_name_not_a_stale_dict(self):
+        ws = self.store.create("x")
+        ag = self.add(ws)
+        self.store.write_identity(ws, ag, token="tok")
+        self.store.rename_agent("claude-1", "reviewer")
+        # ag is now stale: its registry_name is still "claude-1". A write built
+        # from it must not revert the shadow's registry_name back.
+        self.store.write_identity(ws, ag, token="tok2")
+        shadow = self.store.read_identity(ag["agent_id"])
+        self.assertEqual(shadow["registry_name"], "reviewer")
+        self.assertEqual(shadow["token"], "tok2")
+
     def test_rename_agent_and_find_by_registry_name(self):
         ws = self.store.create("x")
         ag = self.add(ws)

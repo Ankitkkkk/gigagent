@@ -193,11 +193,19 @@ class WorkspaceStore:
             ws["agents"].append(agent)
             self._touch(ws)
             self._commit()
-            return dict(agent)
+            return json.loads(json.dumps(agent))
 
     def _find_agent(self, ws: dict, agent_id: str) -> dict | None:
         for a in ws["agents"]:
             if a["agent_id"] == agent_id:
+                return a
+        return None
+
+    def _find_agent_by_id(self, agent_id: str) -> dict | None:
+        """Caller must hold self._lock. Live record, not a copy."""
+        for ws in self._workspaces:
+            a = self._find_agent(ws, agent_id)
+            if a:
                 return a
         return None
 
@@ -252,9 +260,9 @@ class WorkspaceStore:
             return None
 
     def rename_agent(self, old: str, new: str) -> int:
-        n = 0
-        renamed_ids = []
         with self._lock:
+            n = 0
+            renamed_ids = []
             for ws in self._workspaces:
                 for a in ws["agents"]:
                     if a["registry_name"] == old:
@@ -263,12 +271,15 @@ class WorkspaceStore:
                         n += 1
             if n:
                 self._commit()
-        for agent_id in renamed_ids:   # keep the fail-closed shadow in sync (spec §1)
-            shadow = self.read_identity(agent_id)
-            if shadow:
-                shadow["registry_name"] = new
-                self._write_identity_dict(agent_id, shadow)
-        return n
+            # keep the fail-closed shadow in sync (spec §1); same lock as the
+            # rename itself so a concurrent write_identity can't interleave
+            # with, or land after, this corrective write.
+            for agent_id in renamed_ids:
+                shadow = self.read_identity(agent_id)
+                if shadow:
+                    shadow["registry_name"] = new
+                    self._write_identity_dict(agent_id, shadow)
+            return n
 
     def mark_exited(self, registry_name: str, error: str | None = None) -> None:
         with self._lock:
@@ -438,31 +449,40 @@ class WorkspaceStore:
         return self._identity_dir / f"{agent_id}.json"
 
     def write_identity(self, ws: dict, agent: dict, token: str) -> Path:
-        data = {
-            "registry_name": agent["registry_name"],
-            "token": token,
-            "workspace_id": ws["id"],
-            "agent_id": agent["agent_id"],
-            "channel": ws["channel"],
-            "history_mode": agent["history_mode"],
-            "floor_id": agent["floor_id"],
-            "last_launch": agent.get("last_launch"),
-        }
-        existing = self.read_identity(agent["agent_id"]) or {}
-        if existing.get("wrapper_pid"):
-            data["wrapper_pid"] = existing["wrapper_pid"]
-        return self._write_identity_dict(agent["agent_id"], data)
+        with self._lock:
+            agent_id = agent["agent_id"]
+            # Look up the current record rather than trusting the caller's
+            # (possibly stale, pre-rename) `agent` dict for registry_name: a
+            # racing rename_agent() must never be reverted by a write built
+            # from an old snapshot.
+            current = self._find_agent_by_id(agent_id)
+            registry_name = current["registry_name"] if current else agent["registry_name"]
+            data = {
+                "registry_name": registry_name,
+                "token": token,
+                "workspace_id": ws["id"],
+                "agent_id": agent_id,
+                "channel": ws["channel"],
+                "history_mode": agent["history_mode"],
+                "floor_id": agent["floor_id"],
+                "last_launch": agent.get("last_launch"),
+            }
+            existing = self.read_identity(agent_id) or {}
+            if existing.get("wrapper_pid"):
+                data["wrapper_pid"] = existing["wrapper_pid"]
+            return self._write_identity_dict(agent_id, data)
 
     def _write_identity_dict(self, agent_id: str, data: dict) -> Path:
-        self._identity_dir.mkdir(parents=True, exist_ok=True)
-        path = self.identity_path(agent_id)
-        tmp = path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        return path
+        with self._lock:
+            self._identity_dir.mkdir(parents=True, exist_ok=True)
+            path = self.identity_path(agent_id)
+            tmp = path.with_suffix(".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            return path
 
     def read_identity(self, agent_id: str) -> dict | None:
         path = self.identity_path(agent_id)
