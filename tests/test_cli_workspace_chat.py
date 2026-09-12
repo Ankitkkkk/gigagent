@@ -2,6 +2,7 @@
 
 import asyncio
 import builtins
+import copy
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
@@ -271,6 +272,8 @@ class PickerFixture:
         self.assertEqual(token, 'token')
         self.calls.append((method, path, body))
         parsed = urlsplit(path)
+        if parsed.path == '/api/status':
+            return {'paused': False, 'data_dir': str(self.tmp_path)}
         if parsed.path == '/api/workspaces':
             if method == 'GET':
                 archived = parse_qs(parsed.query)['include_archived'] == ['1']
@@ -293,6 +296,8 @@ class PickerFixture:
                 raise self.refusal
             agent['last_state'] = 'starting'
             return dict(agent)
+        if parts[-1] == 'checkpoint':
+            return {'checked': 0}
         raise AssertionError(f'Unexpected request: {self.calls[-1]}')
 
     def answers(self, *answers):
@@ -665,6 +670,532 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertIn('Install terminal dependencies', self.err.getvalue())
         self.config_load.assert_not_called()
         self.opener.open.assert_not_called()
+
+
+class ControllerFixture:
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = self.tmp.name
+        self.output = []
+        self.client = ChatClient('http://127.0.0.1:18300', output=self.output.append)
+        self.api = Mock(spec=WorkspaceAPI)
+        self.agent = {'agent_id': 'ag_a', 'registry_name': 'claude-1',
+                      'provider': 'claude', 'cwd': self.cwd, 'last_state': 'exited',
+                      'native_session_id': 'native-a', 'unread_count': 0,
+                      'history_mode': 'literal', 'history_state': 'done'}
+        self.ws = {'id': 'ws_a', 'channel': 'ws-a', 'name': 'billing',
+                   'archived': False, 'agents': [copy.deepcopy(self.agent)]}
+        self.api.get.side_effect = lambda _: copy.deepcopy(self.ws)
+        self.api.list.return_value = {'workspaces': [self.ws]}
+        self.api.status.return_value = {'paused': False, 'data_dir': self.cwd}
+        self.api.action.return_value = dict(self.agent, last_state='starting')
+        self.controller = chat.WorkspaceChatController(self.client, self.api, no_resume=True)
+        self.controller.workspace = copy.deepcopy(self.ws)
+        self.controller.prompt = AsyncMock()
+
+    async def handle(self, text):
+        self.assertTrue(callable(getattr(self.controller, 'handle', None)),
+                        'session command controller is not implemented')
+        return await self.controller.handle(text)
+
+
+class ControllerCommandTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_spawn_parses_quoted_values_and_stores_real_record(self):
+        path = str(Path(self.cwd) / 'project space')
+        self.api.action.return_value = dict(self.agent, agent_id='ag_new',
+                                          registry_name='review person', last_state='starting')
+        self.assertEqual(await self.handle(
+            f'/spawn claude --agent-name "review person" --cwd {shlex.quote(path)} '
+            '--history-mode none'), 'continue')
+        self.api.action.assert_called_once_with('ws_a', 'spawn', body={
+            'provider': 'claude', 'cwd': path, 'name': 'review person', 'history_mode': 'none'})
+        self.assertEqual(self.controller.workspace['agents'][-1], self.api.action.return_value)
+        self.assertIn('review person starting', '\n'.join(self.output))
+
+    async def test_spawn_prompts_cwd_then_history_and_defaults(self):
+        self.controller.prompt = AsyncMock(side_effect=['', ''])
+        await self.handle('/spawn claude --agent-name reviewer')
+        self.assertEqual(self.api.action.call_args.kwargs['body'], {
+            'provider': 'claude', 'cwd': self.cwd, 'name': 'reviewer', 'history_mode': 'literal'})
+        self.assertEqual([c.kwargs['default'] for c in self.controller.prompt.await_args_list],
+                         [self.cwd, 'literal'])
+        self.assertIn('trust', '\n'.join(self.output).lower())
+        self.assertIn('/attach claude-1', '\n'.join(self.output))
+        self.controller.workspace['agents'] = []
+        self.controller.prompt = AsyncMock(side_effect=['', 'none'])
+        with patch.object(chat.Path, 'cwd', return_value=Path(self.cwd) / 'fallback'):
+            await self.handle('/spawn codex')
+        self.assertEqual(self.api.action.call_args.kwargs['body']['cwd'],
+                         str(Path(self.cwd) / 'fallback'))
+        self.assertEqual(self.api.action.call_args.kwargs['body']['history_mode'], 'none')
+
+    async def test_recorded_cwd_default_does_not_require_current_directory(self):
+        self.controller.prompt = AsyncMock(side_effect=['', 'literal'])
+        with patch.object(chat.Path, 'cwd', side_effect=FileNotFoundError):
+            await self.handle('/spawn codex')
+        self.api.action.assert_called_once_with('ws_a', 'spawn', body={
+            'provider': 'codex', 'cwd': self.cwd, 'history_mode': 'literal', 'name': None})
+
+    async def test_claude_existing_state_omits_trust_caveat(self):
+        (Path(self.cwd) / '.claude').mkdir()
+        await self.handle(f'/spawn claude --cwd {shlex.quote(self.cwd)} --history-mode literal')
+        self.assertNotIn('trust', '\n'.join(self.output).lower())
+
+    async def test_resume_flags_and_real_record_replace_selected_agent(self):
+        await self.handle('/resume ag_a --agent-name "replacement agent" --fresh --cwd "/moved project"')
+        self.api.action.assert_called_once_with('ws_a', 'resume', 'ag_a', body={
+            'fresh': True, 'name': 'replacement agent', 'cwd': '/moved project'})
+        self.assertEqual(self.controller.workspace['agents'], [self.api.action.return_value])
+
+    async def test_stop_history_retry_unread_rename_contracts(self):
+        await self.handle('/stop claude')
+        self.api.action.assert_called_with('ws_a', 'stop', 'ag_a')
+        await self.handle('/history claude-1 none')
+        self.api.action.assert_called_with('ws_a', 'history', 'ag_a', body={'mode': 'none'})
+        self.api.action.return_value = {'ok': True}
+        await self.handle('/retry ag_a')
+        self.api.action.assert_called_with('ws_a', 'retry', 'ag_a')
+        self.api.unread.return_value = {'agents': [{'agent_id': 'ag_a', 'registry_name': 'claude-1',
+            'count': 1, 'messages': [{'id': 7, 'sender': 'user', 'text': 'hello\x1b[2J',
+                                     'routed_to': ['ag_a']}]}]}
+        await self.handle('/unread claude')
+        self.api.unread.assert_called_with('ws_a', 'ag_a')
+        self.assertIn('unread 1', '\n'.join(self.output))
+        self.assertIn('#7 user hello', '\n'.join(self.output))
+        await self.handle('/unread')
+        self.api.unread.assert_called_with('ws_a', None)
+        renamed = dict(self.ws, name='new name')
+        self.api.rename.return_value = renamed
+        await self.handle('/rename "new name"')
+        self.api.rename.assert_called_once_with('ws_a', 'new name')
+        self.assertEqual(self.controller.workspace, renamed)
+        self.assertNotIn('\x1b', '\n'.join(self.output))
+
+    async def test_summary_refusal_has_exact_text(self):
+        for command in ['/history claude-1 summary', '/spawn claude --history-mode summary']:
+            await self.handle(command)
+        self.assertEqual(self.output, [
+            'summary history mode is not available in this version; use literal or none'] * 2)
+        self.api.action.assert_not_called()
+        self.controller.prompt.assert_not_awaited()
+
+    async def test_invalid_syntax_has_no_api_calls_or_prompt(self):
+        commands = ['/spawn', '/spawn "unterminated', '/spawn claude --bad',
+                    '/resume', '/resume ag_a extra', '/stop ag_a extra', '/retry',
+                    '/history claude literal extra', '/history claude invalid',
+                    '/history claude --mode none', '/unread --agent ag_a',
+                    '/rename', '/archive extra', '/sessions extra', '/spawn claude --help']
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(await self.handle(command), 'continue')
+        self.assertEqual(self.api.mock_calls, [])
+        self.controller.prompt.assert_not_awaited()
+        self.assertEqual(len(self.output), len(commands))
+
+    async def test_windows_spawn_resume_refuse_before_mutation_or_prompt(self):
+        with patch('cli_workspaces.os.name', 'nt'):
+            await self.handle('/spawn claude')
+            await self.handle('/resume ag_a')
+        self.assertEqual(self.output, [chat.WINDOWS_TMUX_ERROR] * 2)
+        self.api.action.assert_not_called()
+        self.controller.prompt.assert_not_awaited()
+
+    async def test_agent_resolution_is_workspace_scoped_and_ambiguous(self):
+        self.controller.workspace['agents'].append(dict(self.agent, agent_id='ag_b', registry_name='claude-2'))
+        await self.handle('/stop claude')
+        self.assertIn('ambiguous agent claude', self.output[-1])
+        self.assertIn('claude-1 (ag_a)', self.output[-1])
+        self.assertIn('claude-2 (ag_b)', self.output[-1])
+        await self.handle('/stop codex')
+        self.assertIn('agent not found: codex', self.output[-1])
+        self.api.action.assert_not_called()
+
+    async def test_legacy_history_and_messages_delegate_join_create_blocked(self):
+        for text in ['/history', 'hello "unterminated', '/continue', '/summary @claude']:
+            self.assertIsNone(await self.handle(text))
+        for text in ['/join general', '/create another']:
+            self.assertEqual(await self.handle(text), 'continue')
+            self.assertIn('/sessions', self.output[-1])
+            self.assertIn('--channel', self.output[-1])
+        self.assertEqual(self.api.mock_calls, [])
+
+    async def test_plain_mode_rejects_session_commands(self):
+        self.controller.plain_channel = True
+        self.controller.workspace = None
+        for text in ['/spawn claude', '/resume ag_a', '/stop ag_a', '/retry ag_a',
+                     '/history ag_a none', '/unread', '/rename name', '/archive', '/sessions']:
+            self.assertEqual(await self.handle(text), 'continue')
+            self.assertIn('session', self.output[-1].lower())
+        self.assertIsNone(await self.handle('/history'))
+        self.assertEqual(self.api.mock_calls, [])
+
+    async def test_expected_failure_verbatim_and_transport_failure_secret_safe(self):
+        self.api.action.side_effect = CLIError('specific refusal\x1b[2J', 400)
+        await self.handle('/stop claude')
+        self.assertEqual(self.output, ['specific refusal[2J'])
+        self.api.action.side_effect = OSError('http://local?token=SECRET')
+        await self.handle('/stop claude')
+        self.assertNotIn('SECRET', '\n'.join(self.output))
+        self.assertIn('Session request failed', self.output[-1])
+
+    async def test_resume_recovery_hints_preserve_flags_and_match_refusal(self):
+        cases = [('native session id unknown; use --fresh', 409, '--fresh'),
+                 ('cwd missing; use --cwd PATH', 400, '--cwd PATH'),
+                 ('name in use: held', 400, '--agent-name NAME')]
+        for error, status, hint in cases:
+            with self.subTest(error=error):
+                self.api.action.side_effect = CLIError(error, status)
+                await self.handle('/resume claude-1 --agent-name "new name" --cwd "/new cwd"')
+                self.assertIn('/resume claude-1', self.output[-1])
+                self.assertIn(hint, self.output[-1])
+                if hint == '--fresh':
+                    self.assertEqual(shlex.split(self.output[-1]), ['/resume', 'claude-1', '--fresh',
+                        '--agent-name', 'new name', '--cwd', '/new cwd'])
+        self.output.clear()
+        self.api.action.side_effect = CLIError('server unavailable', 503)
+        await self.handle('/resume ag_a')
+        self.assertEqual(self.output, ['server unavailable'])
+
+
+class ControllerEventTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
+    async def initialize(self):
+        await self.controller.initialize(AsyncMock(return_value='1'))
+        self.output.clear()
+
+    def workspace_event(self, **changes):
+        ws = copy.deepcopy(self.ws)
+        ws['agents'][0].update(changes)
+        return {'type': 'workspace', 'data': ws}
+
+    async def test_selected_channel_survives_repeated_settings_omission(self):
+        await self.initialize()
+        for channels in [['general'], ['general', 'ws-a'], ['general']]:
+            self.client.handle_event({'type': 'settings', 'data': {'channels': channels}})
+            self.assertEqual(self.client.channel, 'ws-a')
+        self.assertFalse(any('using #general' in line for line in self.output))
+
+    async def test_matching_event_updates_state_and_filters_unrelated(self):
+        await self.initialize()
+        event = self.workspace_event(last_state='running')
+        unrelated = copy.deepcopy(event)
+        unrelated['data']['id'] = 'ws_other'
+        self.client.handle_event(unrelated)
+        self.assertEqual(self.output, [])
+        self.client.handle_event(event)
+        self.assertEqual(self.controller.workspace['agents'][0]['last_state'], 'running')
+        self.assertIn('claude-1 running', '\n'.join(self.output))
+        count = len(self.output)
+        self.client.handle_event(copy.deepcopy(event))
+        self.assertEqual(len(self.output), count)
+
+    async def test_pending_done_and_launch_failure_use_cached_http_directory(self):
+        await self.initialize()
+        self.client.handle_event({'type': 'status', 'data': {'paused': False}})
+        self.client.handle_event(self.workspace_event(history_state='pending', last_state='starting'))
+        self.assertIn('catching up…', '\n'.join(self.output))
+        self.client.handle_event(self.workspace_event(history_state='pending', last_state='exited', last_error='boom'))
+        self.assertIn(f'failed to start; see {self.cwd}/logs/wrapper-ag_a.log', '\n'.join(self.output))
+        self.assertIn('boom', '\n'.join(self.output))
+        self.client.handle_event(self.workspace_event(history_state='done', last_state='running'))
+        self.assertIn('history done', self.output[-1])
+        self.assertNotIn('summarizing', '\n'.join(self.output))
+
+    async def test_fresh_unknown_id_and_failed_history_note_are_visible_safe(self):
+        await self.initialize()
+        self.client.handle_event(self.workspace_event(last_state='starting', last_launch={'kind': 'fresh'},
+            native_session_id=None, history_state='failed', history_note='history problem\x1b[2J'))
+        rendered = '\n'.join(self.output)
+        for value in ['fresh', 'id unknown', 'history failed', 'history problem']:
+            self.assertIn(value, rendered)
+        self.assertNotIn('\x1b', rendered)
+
+    async def test_agents_includes_stopped_members_then_external_live_agents(self):
+        await self.initialize()
+        self.client.status = {'paused': False, 'claude-1': {'available': False},
+                              'external-1': {'available': True, 'role': 'reviewer'}}
+        await self.controller.handle('/agents')
+        rendered = '\n'.join(self.output)
+        for text in ['claude-1 exited', 'claude', self.cwd, 'unread 0', 'id present', '@external-1: online (reviewer)']:
+            self.assertIn(text, rendered)
+        self.assertLess(rendered.index('claude-1'), rendered.index('external-1'))
+        self.assertNotIn('@claude-1:', rendered)
+
+    async def test_completion_and_help_include_session_commands_and_providers(self):
+        self.assertTrue(callable(getattr(self.controller, 'completion_words', None)),
+                        'session completion is missing')
+        self.controller.providers = ['configured-provider']
+        await self.initialize()
+        words = self.controller.completion_words()
+        for text in ['/spawn', '/resume', '/stop', '/unread', '/retry', '/history', '/rename',
+                     '/archive', '/sessions', 'claude-1', 'ag_a', 'claude', 'configured-provider']:
+            self.assertIn(text, words)
+        self.assertNotIn('/attach', words)
+        await self.controller.handle('/help')
+        self.assertIn('/spawn', '\n'.join(self.output))
+        self.assertIn('/history AGENT MODE', '\n'.join(self.output))
+        for command in ['/jobs', '/rules', '/channels']:
+            self.assertIn(command, '\n'.join(self.output))
+        self.assertNotIn('/attach', '\n'.join(self.output))
+        self.assertEqual(self.api.action.call_count, 0)
+
+    async def test_provided_startup_directory_avoids_extra_status_call(self):
+        self.assertIn('data_dir', __import__('inspect').signature(chat.WorkspaceChatController).parameters,
+                      'startup metadata handoff is missing')
+        self.controller = chat.WorkspaceChatController(self.client, self.api, no_resume=True,
+            data_dir='/startup/data', providers=['custom'])
+        await self.initialize()
+        self.api.status.assert_not_called()
+        self.client.handle_event(self.workspace_event(last_state='starting'))
+        self.client.handle_event(self.workspace_event(last_state='exited', last_error='launch failed'))
+        self.assertIn('/startup/data/logs/wrapper-ag_a.log', '\n'.join(self.output))
+
+    async def test_action_matching_prior_event_does_not_duplicate_status(self):
+        await self.initialize()
+        self.client.handle_event(self.workspace_event(last_state='starting'))
+        count = len(self.output)
+        await self.handle('/resume ag_a')
+        self.assertEqual(len(self.output), count)
+
+    async def test_resume_starting_clears_previous_failed_launch_hint(self):
+        await self.initialize()
+        self.client.handle_event(self.workspace_event(last_state='starting'))
+        self.client.handle_event(self.workspace_event(last_state='exited', last_error='boom'))
+        await self.handle('/resume ag_a --fresh')
+        self.assertIn('starting', self.output[-1])
+        self.assertNotIn('failed to start', self.output[-1])
+
+
+class ControllerLifecycleTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_quit_defers_checkpoint_to_close_once(self):
+        self.assertEqual(await self.handle('/quit'), 'quit')
+        self.api.action.assert_not_called()
+        await self.controller.close()
+        await self.controller.close()
+        self.api.action.assert_called_once_with('ws_a', 'checkpoint')
+
+    async def test_switch_checkpoints_before_picker_and_eof_clears_selection(self):
+        self.controller.prompt = AsyncMock(side_effect=EOFError)
+        self.assertEqual(await self.handle('/sessions'), 'quit')
+        self.assertIsNone(self.controller.workspace)
+        await self.controller.close()
+        self.assertEqual([c[0] for c in self.api.mock_calls], ['action', 'list'])
+        self.api.action.assert_called_once_with('ws_a', 'checkpoint')
+
+    async def test_switch_new_selection_changes_channel_and_checkpoints_new_on_close(self):
+        other = dict(self.ws, id='ws_b', channel='ws-b', name='other')
+        self.api.list.return_value = {'workspaces': [other]}
+        self.api.get.side_effect = lambda _: copy.deepcopy(other)
+        self.controller.prompt = AsyncMock(return_value='1')
+        self.assertEqual(await self.handle('/sessions'), 'continue')
+        self.assertEqual(self.controller.workspace['id'], 'ws_b')
+        self.assertEqual(self.client.channel, 'ws-b')
+        await self.controller.close()
+        self.assertEqual([call.args for call in self.api.action.call_args_list],
+                         [('ws_a', 'checkpoint'), ('ws_b', 'checkpoint')])
+
+    async def test_archive_default_no_never_mutates(self):
+        for answer in ['', 'n', 'N']:
+            self.controller.prompt = AsyncMock(return_value=answer)
+            self.assertEqual(await self.handle('/archive'), 'continue')
+            self.controller.prompt.assert_awaited_once_with('Archive session? [y/N]', default='n')
+        self.api.action.assert_not_called()
+        self.assertEqual(self.controller.workspace['id'], 'ws_a')
+
+    async def test_archive_yes_uses_server_checkpoint_then_picker_eof_no_repeat(self):
+        self.controller.prompt = AsyncMock(side_effect=['Y', EOFError()])
+        self.api.action.return_value = dict(self.ws, archived=True)
+        self.assertEqual(await self.handle('/archive'), 'quit')
+        self.api.action.assert_called_once_with('ws_a', 'archive')
+        self.assertIsNone(self.controller.workspace)
+        await self.controller.close()
+        self.api.action.assert_called_once_with('ws_a', 'archive')
+
+    async def test_checkpoint_failure_warns_once_but_close_finishes(self):
+        self.assertTrue(callable(getattr(self.controller, 'close', None)), 'checkpoint close missing')
+        for error in [CLIError('specific checkpoint failure\x1b[2J'), OSError('token=SECRET')]:
+            self.controller = chat.WorkspaceChatController(self.client, self.api)
+            self.controller.workspace = self.ws
+            self.api.action.side_effect = error
+            await self.controller.close()
+            await self.controller.close()
+        self.assertEqual(self.api.action.call_count, 2)
+        self.assertEqual(len(self.output), 2)
+        self.assertIn('Warning:', self.output[0])
+        self.assertIn('specific checkpoint failure', self.output[0])
+        self.assertNotIn('SECRET', '\n'.join(self.output))
+        self.assertNotIn('\x1b', '\n'.join(self.output))
+
+    async def test_nested_prompt_cancellation_does_not_mutate(self):
+        for command in ['/spawn claude', f'/spawn claude --cwd {shlex.quote(self.cwd)}', '/archive']:
+            for error, expected in [(EOFError(), 'quit'), (KeyboardInterrupt(), 'continue')]:
+                with self.subTest(command=command, error=type(error).__name__):
+                    self.controller.prompt = AsyncMock(side_effect=error)
+                    self.assertEqual(await self.handle(command), expected)
+        self.api.action.assert_not_called()
+
+    async def test_interactive_quit_and_eof_checkpoint_before_receiver_shutdown(self):
+        for ending in ['/quit', EOFError(), '/spawn claude']:
+            with self.subTest(ending=ending):
+                events = []
+                self.controller = chat.WorkspaceChatController(self.client, self.api,
+                    selector='billing', no_resume=True, data_dir=self.cwd)
+                self.api.action.reset_mock()
+                self.api.action.side_effect = lambda *args, **kwargs: events.append(args[1]) or {'checked': 1}
+                started = asyncio.Event()
+                async def receiver():
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        events.append('receiver cancelled')
+                self.client.receive_forever = receiver
+                answers = iter([ending, EOFError()])
+                async def prompt(*args, **kwargs):
+                    await started.wait()
+                    answer = next(answers)
+                    if isinstance(answer, BaseException):
+                        raise answer
+                    return answer
+                prompt_session = Mock(prompt_async=prompt)
+                with patch('prompt_toolkit.PromptSession', return_value=prompt_session):
+                    await cli.interactive(self.client, self.controller)
+                self.assertEqual(events, ['checkpoint', 'receiver cancelled'])
+                self.api.action.assert_called_once_with('ws_a', 'checkpoint')
+
+
+class ControllerPollingTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
+    async def poll(self, iterations=1):
+        self.assertTrue(callable(getattr(self.controller, 'poll_forever', None)), 'poll fallback missing')
+        sleep = AsyncMock(side_effect=[None] * iterations + [asyncio.CancelledError()])
+        with patch('cli_workspace_chat.asyncio.sleep', sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.controller.poll_forever()
+        self.assertEqual([c.args for c in sleep.await_args_list], [(2,)] * (iterations + 1))
+
+    async def test_connected_running_done_never_refreshes(self):
+        self.client.websocket = object()
+        self.controller.workspace['agents'][0]['last_state'] = 'running'
+        await self.poll(3)
+        self.api.get.assert_not_called()
+        self.controller.prompt.assert_not_awaited()
+
+    async def test_starting_pending_and_disconnected_independently_refresh(self):
+        cases = [('starting', 'done', object()), ('running', 'pending', object()),
+                 ('running', 'done', None)]
+        for state, history, socket in cases:
+            with self.subTest(state=state, history=history, disconnected=socket is None):
+                self.controller.workspace = copy.deepcopy(self.ws)
+                self.controller.workspace['agents'][0].update(last_state=state, history_state=history)
+                self.client.websocket = socket
+                self.api.get.reset_mock()
+                await self.poll()
+                self.api.get.assert_called_once_with('ws_a')
+        self.controller.prompt.assert_not_awaited()
+
+    async def test_poll_unchanged_results_do_not_repeat_status_lines(self):
+        await self.poll(3)
+        self.assertEqual(self.api.get.call_count, 3)
+        self.assertEqual(len(self.output), 1)
+
+    async def test_reconnect_settings_refreshes_selected_state_once(self):
+        await self.controller.initialize(AsyncMock(return_value='1'))
+        self.output.clear()
+        self.api.get.reset_mock()
+        self.client.websocket = object()
+        self.controller.workspace['agents'][0]['last_state'] = 'running'
+        refreshed = copy.deepcopy(self.controller.workspace)
+        refreshed['agents'][0]['unread_count'] = 4
+        self.api.get.side_effect = lambda _: copy.deepcopy(refreshed)
+        self.client.handle_event({'type': 'settings', 'data': {'channels': ['general']}})
+        self.api.get.assert_not_called()
+        self.assertEqual(self.client.channel, 'ws-a')
+        await self.poll(3)
+        self.api.get.assert_called_once_with('ws_a')
+        self.assertEqual(self.controller.workspace['agents'][0]['unread_count'], 4)
+
+    async def test_stale_result_discarded_after_selection_changes_even_back_to_same_id(self):
+        self.assertTrue(callable(getattr(self.controller, 'poll_forever', None)), 'poll fallback missing')
+        for return_to_same in (False, True):
+            with self.subTest(return_to_same=return_to_same):
+                entered = threading.Event()
+                release = threading.Event()
+                old = copy.deepcopy(self.ws)
+                def get(_):
+                    entered.set()
+                    if not release.wait(3):
+                        raise AssertionError('test failed to release HTTP response')
+                    return old
+                self.api.get.side_effect = get
+                self.controller._select(copy.deepcopy(self.ws))
+                sleep = AsyncMock(side_effect=[None, asyncio.CancelledError()])
+                with patch('cli_workspace_chat.asyncio.sleep', sleep):
+                    task = asyncio.create_task(self.controller.poll_forever())
+                    try:
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                        selected = dict(self.ws, id='ws_b', channel='ws-b', name='new selection')
+                        self.controller._select(selected)
+                        if return_to_same:
+                            selected = dict(self.ws, name='selected again')
+                            self.controller._select(selected)
+                        release.set()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                        self.assertEqual(self.controller.workspace, selected)
+                    finally:
+                        release.set()
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_poll_errors_are_sanitized_deduplicated_and_recover(self):
+        self.api.get.side_effect = OSError('http://localhost?token=SECRET')
+        await self.poll(2)
+        self.assertEqual(len(self.output), 1)
+        self.assertNotIn('SECRET', self.output[0])
+        self.api.get.side_effect = None
+        self.api.get.return_value = copy.deepcopy(self.ws)
+        await self.poll()
+        self.assertIn('claude-1 exited', self.output[-1])
+
+    async def test_failed_reconnect_refresh_retries_until_selected_state_is_current(self):
+        await self.controller.initialize(AsyncMock(return_value='1'))
+        self.client.websocket = object()
+        self.controller.workspace['agents'][0]['last_state'] = 'running'
+        refreshed = copy.deepcopy(self.controller.workspace)
+        refreshed['agents'][0]['unread_count'] = 9
+        self.api.get.reset_mock()
+        self.api.get.side_effect = [OSError('offline'), refreshed]
+        self.client.handle_event({'type': 'settings', 'data': {'channels': ['general']}})
+        await self.poll(3)
+        self.assertEqual(self.api.get.call_count, 2)
+        self.assertEqual(self.controller.workspace['agents'][0]['unread_count'], 9)
+
+    async def test_interactive_cancels_receiver_and_poll_after_checkpoint(self):
+        events = []
+        receiver_started = asyncio.Event()
+        poll_started = asyncio.Event()
+        async def background(started, label):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append(label)
+        self.client.receive_forever = lambda: background(receiver_started, 'receiver cancelled')
+        self.controller.poll_forever = lambda: background(poll_started, 'poll cancelled')
+        self.controller.selector = 'billing'
+        self.api.action.side_effect = lambda *args, **kwargs: events.append('checkpoint') or {'checked': 1}
+        async def prompt(*args, **kwargs):
+            await receiver_started.wait()
+            await poll_started.wait()
+            raise EOFError
+        with patch('prompt_toolkit.PromptSession', return_value=Mock(prompt_async=prompt)):
+            try:
+                async with asyncio.timeout(.5):
+                    await cli.interactive(self.client, self.controller)
+            except TimeoutError:
+                self.fail('interactive did not start and own both background tasks')
+        self.assertEqual(events[0], 'checkpoint')
+        self.assertCountEqual(events[1:], ['receiver cancelled', 'poll cancelled'])
 
 
 if __name__ == '__main__':

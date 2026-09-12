@@ -55,6 +55,8 @@ class ChatClient:
         self.websocket = None
         self.ready = asyncio.Event()
         self.pending_channel = None
+        self.on_workspace = None
+        self.on_settings = None
 
     def show(self, text):
         self.output(terminal_text(text))
@@ -91,7 +93,9 @@ class ChatClient:
             self.channels = data.get("channels", ["general"])
             if self.username is None:
                 self.username = data.get("username", "user")
-            if self.pending_channel in self.channels:
+            if self.on_settings is not None:
+                self.on_settings(data)
+            elif self.pending_channel in self.channels:
                 self.channel = self.pending_channel
                 self.pending_channel = None
                 self.history()
@@ -102,6 +106,8 @@ class ChatClient:
             self.agent_names = list(data)
         elif kind == "status":
             self.status = data
+        elif kind == "workspace" and self.on_workspace is not None:
+            self.on_workspace(data)
         elif kind == "jobs":
             self.jobs = data
         elif kind == "rules":
@@ -236,7 +242,8 @@ async def interactive(client, controller=None):
     commands = ["/channels", "/join", "/create", "/agents", "/history",
                 "/jobs", "/rules", "/help", "/quit", "/continue", "/summary"]
     session = PromptSession(completer=WordCompleter(
-        lambda: commands + ["@" + n for n in client.agent_names] + client.channels,
+        lambda: commands + ["@" + n for n in client.agent_names] + client.channels
+                + (controller.completion_words() if controller is not None else []),
         WORD=True))
 
     async def prompt(text, default=""):
@@ -249,7 +256,10 @@ async def interactive(client, controller=None):
             return
         client.show("agentchattr terminal | /help for commands | /quit to exit")
         receiver = asyncio.create_task(client.receive_forever())
+        tasks = [receiver]
         try:
+            if controller is not None and not controller.plain_channel:
+                tasks.append(asyncio.create_task(controller.poll_forever()))
             while True:
                 try:
                     text = await session.prompt_async(lambda: f"#{terminal_text(client.channel)} > ")
@@ -257,11 +267,19 @@ async def interactive(client, controller=None):
                     continue
                 except EOFError:
                     break
-                if not await client.submit(text):
+                action = await controller.handle(text) if controller is not None else None
+                if action == 'quit':
+                    break
+                if action is None and not await client.submit(text):
                     break
         finally:
-            receiver.cancel()
-            await asyncio.gather(receiver, return_exceptions=True)
+            try:
+                if controller is not None:
+                    await controller.close()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def shell_command(client, args):
@@ -432,11 +450,12 @@ def main(argv=None):
         parser.error(str(error))
     try:
         if args.command == "chat":
-            ensure_server(url, explicit_url=args.url is not None, config=config,
-                          output=client.show)
+            startup_status = ensure_server(url, explicit_url=args.url is not None, config=config,
+                                           output=client.show)
             controller = WorkspaceChatController(
                 client, WorkspaceAPI(url, timeout=args.timeout), selector=args.session,
-                no_resume=args.no_resume, plain_channel=args.channel is not None)
+                no_resume=args.no_resume, plain_channel=args.channel is not None,
+                data_dir=startup_status.get('data_dir'), providers=config.get('agents', {}))
             asyncio.run(interactive(client, controller))
         elif args.command in workspace_commands:
             api = WorkspaceAPI(url, timeout=args.timeout)
