@@ -15,6 +15,7 @@ from cli_api import (CLIError, SessionTokenParser, fetch_session_token, get_api,
                      local_url)
 from cli_workspaces import (WorkspaceAPI, format_workspace_result,
                             run_workspace_command)
+from cli_workspace_chat import WorkspaceChatController, ensure_server
 from config_loader import load_config
 
 
@@ -227,7 +228,7 @@ class ChatClient:
         return True
 
 
-async def interactive(client):
+async def interactive(client, controller=None):
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.patch_stdout import patch_stdout
@@ -237,7 +238,15 @@ async def interactive(client):
     session = PromptSession(completer=WordCompleter(
         lambda: commands + ["@" + n for n in client.agent_names] + client.channels,
         WORD=True))
+
+    async def prompt(text, default=""):
+        # Confirmation defaults apply to empty answers, not editable input.
+        answer = await session.prompt_async(text)
+        return answer if answer.strip() else default
+
     with patch_stdout():
+        if controller is not None and not await controller.initialize(prompt):
+            return
         client.show("agentchattr terminal | /help for commands | /quit to exit")
         receiver = asyncio.create_task(client.receive_forever())
         try:
@@ -413,7 +422,8 @@ def main(argv=None):
     elif args.command == "send" and args.message == ["-"]:
         args.message = [sys.stdin.read()]
     with redirect_stdout(sys.stderr):
-        url = args.url or f"http://127.0.0.1:{load_config()['server']['port']}"
+        config = load_config() if args.command == "chat" or not args.url else None
+        url = args.url or f"http://127.0.0.1:{config['server']['port']}"
     try:
         output = print if args.command == "chat" else lambda text: None
         channel = (args.channel or "general").removeprefix("#")
@@ -422,7 +432,12 @@ def main(argv=None):
         parser.error(str(error))
     try:
         if args.command == "chat":
-            asyncio.run(interactive(client))
+            ensure_server(url, explicit_url=args.url is not None, config=config,
+                          output=client.show)
+            controller = WorkspaceChatController(
+                client, WorkspaceAPI(url, timeout=args.timeout), selector=args.session,
+                no_resume=args.no_resume, plain_channel=args.channel is not None)
+            asyncio.run(interactive(client, controller))
         elif args.command in workspace_commands:
             api = WorkspaceAPI(url, timeout=args.timeout)
 
