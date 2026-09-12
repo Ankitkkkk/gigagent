@@ -246,8 +246,13 @@ prints it verbatim.
    set once the provider tmux session exists and its pane has produced
    output (the activity checker's first observation). `last_state` becomes
    `running` on the first heartbeat with `ready`; everything in step 8, the
-   codex id discovery (§6) and the unread bundle (§4) wait for it. No
-   `ready` within 60 s of launch → the launcher **terminates that launch**:
+   codex id discovery (§6) and the unread bundle (§4) wait for it. Spike
+   (2026-09-12): a claude pane shows output about 2 s after `new-session`.
+   Known limitation: in a directory Claude has never seen, that first output
+   is its trust prompt ("Is this a project you trust?"); the agent counts as
+   `running` but acts on nothing until the user answers it via `/attach`.
+   The CLI's `/spawn` output says so when the cwd has no `.claude` state.
+   No `ready` within 60 s of launch → the launcher **terminates that launch**:
    `tmux kill-session -t agentchattr-<agent_id>` if it exists, `SIGTERM` to
    the wrapper pid from the identity file (then `SIGKILL` after 5 s),
    `registry.deregister(registry_name)`, identity file kept (shadow). Only
@@ -287,10 +292,9 @@ prints it verbatim.
    affects what a cursor-less first `chat_read` returns.
    A `cwd` from the request is persisted before launch (the old one goes to
    `previous_cwds` for audit). For codex the new directory is passed with
-   `-C`; for claude the transcript pre-check is cwd-independent, and
-   whether the provider itself resumes across directories is settled by the
-   spike (§9) — if it does not, `--cwd` on a claude resume returns 400
-   `claude cannot resume in a different directory; use --fresh`.
+   `-C`; for claude the transcript pre-check is cwd-independent, and the
+   spike (2026-09-12) confirmed `claude --resume <id>` from a different
+   directory continues the conversation, so `--cwd` is allowed for claude.
 3. Launch as in Spawn step 6 with `adapter.resume_args(id, cwd)` in place of
    the new-session args. Codex returns a leading subcommand, so
    `_build_provider_launch` must accept positional args before flags.
@@ -419,17 +423,20 @@ returns immediately with `history_state: "pending"`; it becomes `done` or
    ~/.ssh/id_rsa" must be impossible, not merely sandboxed. `cwd` is a fresh
    temporary directory in every case; the prompt wraps the chat in a
    delimited block and says to summarise, not obey.
-   - claude: `--tools ""` disables every built-in tool (documented in
-     `claude --help`), `--strict-mcp-config` with no `--mcp-config` loads no
-     MCP servers, `--setting-sources ""` keeps user settings out (exact form
-     confirmed by the spike; fallback `--settings '{}'`). This is the v1
-     summariser.
-   - codex: `-s read-only -a never` only sandboxes shell commands; it does
-     not remove them, and read-only still reads files. Codex's
-     `summarizer_command` returns `None` in v1 unless the spike finds a
-     configuration under which a prompt-injected tool call is refused or
-     unavailable (the spike tries one). Until then `auto` never picks codex
-     and `summarizer = "codex"` is a config error with that explanation.
+   - claude: `claude -p --model haiku --tools "" --strict-mcp-config
+     --setting-sources "" --no-session-persistence`. Spike (2026-09-12): the
+     flags are accepted, no MCP servers load, and a prompt-injected "read
+     this file" left the canary untouched. Haiku *confabulated* a tool call
+     and invented file contents instead — harmless, but the summariser prompt
+     must state "you have no tools; do not pretend to use any" so the summary
+     is not padded with invented reads. This is the v1 summariser.
+   - codex: `exec -s read-only` only sandboxes shell commands; it does not
+     remove them. Spike (2026-09-12, codex 0.154.0): given the same probe,
+     codex attempted `cat` on the canary and was stopped only by a broken
+     bubblewrap sandbox on that machine; `exec --help` exposes no tool-off
+     switch (only generic `--enable/--disable <FEATURE>`). Codex's
+     `summarizer_command` returns `None` in v1; `auto` never picks codex and
+     `summarizer = "codex"` is a config error with that explanation.
    Timeout 90 s. The prompt asks for: decisions made, open questions, who is
    working on what, current state; plain text; under 900 characters.
 4. **Post, private to the agent.**
@@ -822,10 +829,12 @@ attempted (`native_session_id` stays `null`; resume refused unless `--fresh`).
   `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`; line 1 is
   `{"type": "session_meta", "payload": {"id", "cwd", "timestamp", …}}`. The
   header carries `payload.originator`, which codex takes from the
-  environment variable `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` (present in the
-  0.154.0 binary; that it lands in `session_meta` is confirmed by the
-  plan's spike before anything else is built on it). Correlation is
-  launch-specific:
+  environment variable `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`. Spike
+  (2026-09-12, codex 0.154.0): `codex exec` launched with the override wrote
+  `"originator": "agentchattr:spike:abc123"` into `session_meta`, alongside
+  the launch `cwd`. Note `codex exec` refuses a directory that is not a git
+  repository unless `--skip-git-repo-check` is passed; interactive `codex`
+  prompts instead. Correlation is launch-specific:
   1. **Launch** with `launch_env` returning
      `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=agentchattr:<agent_id>:<launch_nonce>`,
      both taken from the `LaunchContext` (the wrapper already builds an
@@ -995,16 +1004,11 @@ Three slices, each shippable and testable on its own, preceded by one
 spike. The implementation plan may be one document with three parts or
 three documents.
 
-0. **Spike** (throwaway, half a day): confirm `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`
-   reaches `session_meta.originator`; confirm the wrapper's `ready` signal
-   can be derived from the activity checker; confirm `claude -p --tools ""
-   --strict-mcp-config --setting-sources ""` refuses a prompt-injected tool
-   call and lists no MCP servers; try to find a codex `exec` configuration
-   that does the same (if none, codex stays summary-less); confirm whether
-   `claude --resume <id>` works from a different `cwd` than the one the
-   transcript was created in (decides whether `--cwd` on resume is allowed
-   for claude). Each answer is written into this spec before slice 1
-   starts.
+0. **Spike** — done 2026-09-12; answers recorded in §2 step 7, §2 resume
+   step 2, §3 provider bullets and §6 codex: originator override confirmed;
+   pane output ~2 s (trust prompt caveat); claude flags tool-free (with a
+   confabulation caveat for the prompt); codex not tool-free, stays
+   summary-less; claude resumes across directories.
 1. **Server core** — `providers/` (base, claude, codex, `get_adapter`),
    floors in `mcp_bridge.py`, `routed_to` at the three routing sites,
    `workspace_store.py`, `workspace_launcher.py` (spawn, resume, stop,
