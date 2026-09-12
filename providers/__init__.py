@@ -40,3 +40,6 @@ __all__ = ["AmbiguousSessionId", "LaunchContext", "NullAdapter", "ProviderAdapte
 
 from .claude import ClaudeAdapter  # noqa: E402
 register_builtin("claude", ClaudeAdapter)
+
+from .codex import CodexAdapter  # noqa: E402
+register_builtin("codex", CodexAdapter)

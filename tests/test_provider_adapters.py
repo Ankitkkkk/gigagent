@@ -13,8 +13,9 @@ if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 
 import providers
-from providers.base import LaunchContext, NullAdapter, ProviderAdapter
+from providers.base import AmbiguousSessionId, LaunchContext, NullAdapter, ProviderAdapter
 from providers.claude import ClaudeAdapter
+from providers.codex import CodexAdapter, ORIGINATOR_ENV, originator_for
 from _workspace_helpers import FakeClock, make_launch, write_rollout
 
 
@@ -130,6 +131,68 @@ class ClaudeAdapterTests(unittest.TestCase):
 
     def test_registered_as_builtin(self):
         self.assertIsInstance(providers.get_adapter("claude", {"command": "claude"}), ClaudeAdapter)
+
+
+class CodexAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.clock = FakeClock()
+        self.a = CodexAdapter({"command": "codex"}, home=self.home,
+                              sleep=self.clock.sleep, clock=self.clock)
+
+    def test_conforms(self):
+        assert_adapter_conforms(self, self.a)
+        self.assertTrue(self.a.supports_resume)
+        self.assertTrue(self.a.can_locate_transcripts)
+        self.assertIsNone(self.a.allocate_session_id())
+
+    def test_launch_env_is_launch_specific(self):
+        l1 = make_launch(agent_id="ag_1", nonce="aaa")
+        l2 = make_launch(agent_id="ag_1", nonce="bbb")
+        self.assertEqual(self.a.launch_env(l1), {ORIGINATOR_ENV: "agentchattr:ag_1:aaa"})
+        self.assertNotEqual(self.a.launch_env(l1), self.a.launch_env(l2))
+
+    def test_discovers_exactly_its_own_rollout(self):
+        launch = make_launch(agent_id="ag_1", nonce="aaa", cwd="/proj")
+        write_rollout(self.home, "11111111-1111-4111-8111-111111111111", originator_for(launch), "/proj")
+        write_rollout(self.home, "22222222-2222-4222-8222-222222222222", "codex-tui", "/proj")       # unrelated, same cwd
+        write_rollout(self.home, "33333333-3333-4333-8333-333333333333", "agentchattr:ag_1:old", "/proj")  # earlier launch
+        self.assertEqual(self.a.discover_session_id(launch, timeout=10),
+                         "11111111-1111-4111-8111-111111111111")
+
+    def test_two_concurrent_launches_same_cwd_each_find_their_own(self):
+        l1 = make_launch(agent_id="ag_1", nonce="aaa", cwd="/proj")
+        l2 = make_launch(agent_id="ag_2", nonce="bbb", cwd="/proj")
+        write_rollout(self.home, "11111111-1111-4111-8111-111111111111", originator_for(l1), "/proj")
+        write_rollout(self.home, "22222222-2222-4222-8222-222222222222", originator_for(l2), "/proj")
+        self.assertEqual(self.a.discover_session_id(l1, 10), "11111111-1111-4111-8111-111111111111")
+        self.assertEqual(self.a.discover_session_id(l2, 10), "22222222-2222-4222-8222-222222222222")
+
+    def test_none_after_timeout(self):
+        launch = make_launch(agent_id="ag_9", nonce="zzz")
+        self.assertIsNone(self.a.discover_session_id(launch, timeout=5))
+        self.assertGreaterEqual(self.clock.t, 5)
+
+    def test_duplicate_originator_is_ambiguous(self):
+        launch = make_launch(agent_id="ag_1", nonce="aaa")
+        write_rollout(self.home, "11111111-1111-4111-8111-111111111111", originator_for(launch), "/proj")
+        write_rollout(self.home, "22222222-2222-4222-8222-222222222222", originator_for(launch), "/proj")
+        with self.assertRaises(AmbiguousSessionId) as cm:
+            self.a.discover_session_id(launch, 10)
+        self.assertEqual(cm.exception.count, 2)
+
+    def test_resume_args_and_locate(self):
+        self.assertEqual(self.a.resume_args("abc", Path("/proj")), ["resume", "-C", "/proj", "abc"])
+        p = write_rollout(self.home, "abc", "x", "/proj")
+        self.assertEqual(self.a.locate_transcript("abc", Path("/proj")), p)
+
+    def test_summarizer_is_none_in_v1(self):
+        self.assertIsNone(self.a.summarizer_command(None, Path("/p"), Path("/o"), Path("/w")))
+
+    def test_registered_as_builtin(self):
+        self.assertIsInstance(providers.get_adapter("codex", {"command": "codex"}), CodexAdapter)
 
 
 if __name__ == "__main__":
