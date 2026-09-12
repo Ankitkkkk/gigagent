@@ -1,6 +1,9 @@
 import asyncio
+from contextlib import redirect_stderr
+import io
 import json
 from pathlib import Path
+import shlex
 import sys
 import unittest
 from unittest.mock import AsyncMock
@@ -71,6 +74,31 @@ class CliTests(unittest.TestCase):
             self.assertEqual(args.channel, "work")
             self.assertTrue(args.json)
             self.assertEqual(args.history, 30)
+
+    def test_no_resume_accepts_bare_and_explicit_chat_only(self):
+        for argv in [["--session", "billing", "--no-resume"],
+                     ["chat", "--session", "billing", "--no-resume"]]:
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
+                try:
+                    args = build_parser().parse_args(argv)
+                except SystemExit as error:
+                    self.fail(f"Interactive chat rejected --no-resume (exit {error.code})")
+                self.assertTrue(args.no_resume)
+                self.assertEqual(args.session, "billing")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            build_parser().parse_args(["sessions", "--no-resume"])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_readme_cli_examples_parse_offline(self):
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        examples = [line for line in readme.splitlines() if line.startswith("python cli.py")]
+        self.assertIn("python cli.py --session billing --no-resume", examples)
+        for line in examples:
+            with self.subTest(example=line), redirect_stderr(io.StringIO()):
+                try:
+                    build_parser().parse_args(shlex.split(line)[2:])
+                except SystemExit as error:
+                    self.fail(f"README example rejected (exit {error.code}): {line}")
 
 
 class CliSendTests(unittest.IsolatedAsyncioTestCase):

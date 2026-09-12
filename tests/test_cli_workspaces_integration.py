@@ -10,16 +10,15 @@ import socket
 import subprocess
 import sys
 import tempfile
-import time
+from time import monotonic, sleep
 import unittest
 from unittest.mock import patch
 from urllib.request import ProxyHandler, Request, build_opener
 
-from _cli_server import (IsolatedCliServer, ROOT, cli, isolated_environment,
+from _cli_server import (IsolatedCliServer, cli, isolated_environment,
                          log_excerpt, temporary_ports)
 from cli_api import CLIError
 from cli_workspace_chat import WorkspaceChatController, ensure_server
-from cli_workspaces import WorkspaceAPI
 from config_loader import load_config
 
 SUMMARY_ERROR = 'summary history mode is not available in this version; use literal or none'
@@ -298,8 +297,16 @@ class ServerStartupIntegrationTests(unittest.TestCase):
                 self.assertIn(flag, words)
                 self.assertEqual(words[words.index(flag) + 1], str(value))
             for port in self.ports[1:]:
-                with socket.create_connection(('127.0.0.1', port), timeout=5):
-                    pass
+                deadline = monotonic() + 5
+                while (remaining := deadline - monotonic()) > 0:
+                    try:
+                        with socket.create_connection(('127.0.0.1', port),
+                                                      timeout=min(.25, remaining)):
+                            break
+                    except OSError:
+                        sleep(min(.05, max(0, deadline - monotonic())))
+                else:
+                    self.fail(f'MCP listener on port {port} unavailable after 5 seconds')
             # Upload directories are created lazily: exercise the configured path.
             svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
             body = (b'--cli-boundary\r\nContent-Disposition: form-data; name="file"; '

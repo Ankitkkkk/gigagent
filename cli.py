@@ -363,6 +363,8 @@ def build_parser():
                             help="Machine-readable output for shell commands")
 
     options(parser)
+    parser.add_argument("--no-resume", action="store_true", default=argparse.SUPPRESS,
+                        help="Do not offer to resume stopped agents")
     commands = parser.add_subparsers(dest="command")
     command_help = [("chat", "Interactive chat (default)"),
                     ("send", "Send a message; use - to read stdin"),
