@@ -72,9 +72,11 @@ the picker warns and resume is blocked until the user re-points it.
 
 - `id` — tool-owned, stable, uuid4 with `ws_` prefix.
 - `name` — user-defined, editable, defaults to `id`.
-- `channel` — created with the workspace: slug of the initial name plus the
-  first four hex characters of `id`, so two workspaces with the same name never
-  share a channel. Renaming the workspace does not rename the channel.
+- `channel` — created with the workspace and registered as a real channel in
+  the room settings: `ws-` + the first 11 characters of the name's slug + `-`
+  + the first four hex characters of `id` (20 characters, the channel-name
+  limit), so two workspaces with the same name never share a channel.
+  Renaming the workspace does not rename the channel.
 - `agent_id` — stable handle for one agent membership. API routes use it, not
   `registry_name`, because the registry may rename an instance (slot-1 rename
   when a second instance of the same base registers) or assign a different slot
@@ -110,9 +112,14 @@ One predicate, applied everywhere an agent receives channel messages:
 
 ```
 visible(agent, msg) =
-    msg.id >= floor_id(agent, msg.channel)
+    (agent is not a member of msg.channel's workspace
+        or msg.id >= floor_id(agent, msg.channel))
     and (msg.metadata.audience is absent or agent.agent_id in it)
 ```
+
+The audience clause binds every agent, member or not: a non-member has no
+`agent_id` in any audience and therefore never sees a private summary. The
+floor binds members only.
 
 - **Floor.** Message ids start at 0 (`store.py:17`), so the floor is
   inclusive: `literal` → `floor_id = 0`; `none` and `summary` →
@@ -199,9 +206,12 @@ prints it verbatim.
    `provider` is a key in `[agents]`; `cwd` is absolute, exists, is a directory;
    the provider `command` is on `PATH`; `tmux` is on `PATH`.
 2. **Identity**: `registry.register(provider, label=f"{workspace.name} {provider}",
-   preferred_name=<custom name or f"{provider}-{next free n}">)`. `preferred_name`
-   is a small registry addition: take that name if its slot is free, else 400
-   `name in use` for a custom name. Returns `registry_name` and token; the
+   preferred_name=<custom name or f"{provider}-{next free n}">)`. "Next free"
+   skips names held by any saved workspace agent, running or not, so a stopped
+   agent's name is never handed to a new spawn and lookups by name stay
+   unambiguous. `preferred_name` is a small registry addition: take that name
+   if its slot is free, else 400 `name in use` for a custom name (also when a
+   saved agent holds it). Returns `registry_name` and token; the
    server writes `data/identity/<agent_id>.json` holding `registry_name`,
    token, `workspace_id`, `agent_id`, `channel`, `history_mode`, `floor_id`
    and `last_launch` — the policy shadow used when the workspace store
@@ -480,7 +490,10 @@ already on disk when routing runs, recipients are not written into the
 message; they are recorded in a side table in the workspace record,
 `routing: {"<msg_id>": ["<agent_id>", …]}`, one entry per routed message
 in a workspace channel, pruned when every member's `read_mark` has passed
-the id. Recipients are computed by
+the id. The workspace also keeps `routing_high_water`, the last message id
+the observer processed; on server start, messages above it (persisted, then
+a crash before routing) are replayed for explicit mentions. Broadcast
+recipients depend on who was running at the time and are not reconstructed. Recipients are computed by
 `workspace_store.resolve_recipients(channel, mention_tokens, targets)`:
   every workspace member in that channel whose current `registry_name`
   matches an **explicit** mention token, plus every member whose
