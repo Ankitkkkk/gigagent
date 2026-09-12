@@ -12,9 +12,8 @@ Agents and humans talk in a shared chat room with multiple channels — when any
 
 ## Terminal Chat and Shell Commands
 
-Agentchattr also works from a terminal without opening a browser. Start the
-server and agents with the existing launchers, then run these commands from the
-repository directory in another terminal:
+Agentchattr also works from a terminal without opening a browser. After setting
+up the Python environment, run these commands from the source repository:
 
 ```sh
 python -m pip install -r requirements-cli.txt
@@ -26,6 +25,36 @@ Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
 `python run.py` in a separate terminal. `python cli.py chat` explicitly starts
 interactive mode.
 
+From this source checkout, `python cli.py` opens a session picker. Create a
+session or select an existing one; the picker can also show archived sessions
+and asks before restoring one. Terminal sessions group a channel, working
+directories, and persistent agent identities.
+
+```sh
+python cli.py
+python cli.py --channel general
+python cli.py --session billing --no-resume
+python cli.py new billing --json
+python cli.py spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal
+python cli.py resume reviewer --session billing --fresh
+python cli.py attach reviewer --session billing
+python cli.py unread --session billing
+python cli.py archive billing --yes
+```
+
+`--session` accepts an exact session ID, exact name, or unique name prefix.
+Duplicate names and ambiguous prefixes require a more specific selector, such
+as the full ID. Agent selectors accept a registry name, stable agent ID, or a
+provider unique within that session. `--agent-name` names an agent; `--name`
+remains the human sender name. `--history N` (also `--limit N`) remains a numeric
+message limit; `--history-mode` selects agent catch-up policy.
+
+Use `--channel` for plain channel chat; it cannot be combined with `--session`.
+Shell `send` and `read` default to `general` without either flag and accept
+`--session billing` to target that session's channel. `sessions` lists active
+sessions; `sessions --archived` includes archived ones. Archiving from a script
+requires `--yes` and checkpoints and stops that session's agents on the server.
+
 Interactive chat supports live messages, `@mentions`, channel switching, recent
 history, agent status, and reconnection after server restarts. Incoming replies
 do not overwrite the input prompt. Messages entered while disconnected are
@@ -34,16 +63,38 @@ rejected rather than queued for later delivery.
 | Interactive command | Action |
 | --- | --- |
 | `/channels` | List channels |
-| `/join NAME` | Switch channels and show recent history |
-| `/create NAME` | Create and switch to a channel |
+| `/join NAME` | Switch channels in plain channel mode |
+| `/create NAME` | Create and switch channels in plain channel mode |
 | `/agents` | Show agent availability and roles |
 | `/history` | Show recent messages in the current channel |
+| `/spawn PROVIDER` | Prompt for working directory and history policy, then start an agent |
+| `/resume AGENT [--fresh] [--cwd PATH]` | Resume an agent, optionally starting a fresh conversation |
+| `/attach AGENT`, `/stop AGENT` | Open or stop an agent terminal |
+| `/unread [AGENT]`, `/retry AGENT` | Inspect unread messages or retry their delivery |
+| `/history AGENT MODE` | Set agent history policy to `literal` or `none` |
+| `/rename "New name"` | Rename the selected session |
+| `/sessions` | Checkpoint and return to the session picker |
+| `/archive` | Confirm archival, stop session agents, and return to the picker |
 | `/jobs`, `/rules` | List jobs or rules |
 | `/help` | Show commands |
-| `/quit` | Exit without stopping the server or agents |
+| `/quit` | Checkpoint the selected session and exit; server and agents keep running |
 
 Tab completes commands, agent handles, and channel names. Ctrl+C clears the
 input; Ctrl+D exits. Other slash commands are forwarded to the server.
+Leaving with `/sessions`, `/quit`, or Ctrl+D checkpoints the selected session.
+It does not stop its agents. Selecting a session can offer to resume stopped
+agents; `--no-resume` suppresses that question. If a project moved, use
+`/resume AGENT --cwd /absolute/new/project`. An unknown native conversation ID
+is shown as `id unknown`; if ordinary resume is unavailable, use `--fresh` to
+start a new provider conversation while keeping the session agent identity.
+
+History prompts offer `none` and `literal`, defaulting to `literal`. Explicit
+`summary` is unavailable in this version; summary generation and failed-summary
+recovery prompts are deferred. Literal catch-up may show `catching up…`.
+New Claude projects without `.claude` state may require accepting a trust
+prompt through `/attach AGENT`. Detach from tmux with Ctrl+B, then D; the agent
+keeps running. Attaching inside tmux switches clients; switch back with
+`tmux switch-client -l`.
 
 For scripts and one-shot commands:
 
@@ -65,11 +116,30 @@ before retrying a send. Messages are not retried automatically.
 Use `--url http://127.0.0.1:18300` to select another local instance. Otherwise,
 the port comes from the shared configuration, including `AGENTCHATTR_PORT`.
 `--timeout 15` bounds shell requests. Options work before or after the subcommand.
+For `attach`, it bounds API resolution; foreground tmux attachment lasts until
+you detach or the agent terminal exits.
 The terminal client connects to localhost only.
 
-This terminal version covers chat and read-only job/rule lists. Session
-management, decision buttons, attachment uploads, and other graphical workflows
-still use the web UI. Server and agent launchers remain separate processes.
+Interactive chat without an explicit `--url` can start a missing local server
+in the `agentchattr-server` tmux session. Shell commands and explicit `--url`
+never auto-start it. Server logs are at `<resolved data_dir>/logs/server.log`;
+startup failures include that path and a manual `python run.py` hint. Connecting
+to an existing server with a different data directory prints a warning.
+The client bootstraps the local browser session token and uses authenticated
+HTTP/WebSocket requests; no token needs to be copied into shell commands.
+
+Spawn, resume, attach, and server auto-start require tmux on Linux/macOS.
+Windows supports other HTTP/chat commands against an existing server; use
+`wrapper_windows.py` for manual agent launch. Real provider authentication,
+trust dialogs, and terminal behavior depend on the installed provider CLI.
+Decision buttons, attachment uploads, and other graphical workflows still use
+the web UI.
+
+These commands require a source checkout. `build_release.py` has a pre-existing
+packaging gap: it does not yet ship the CLI files, `requirements-cli.txt`, or
+terminal-session core modules (`workspace_store.py`, `workspace_unread.py`,
+`workspace_launcher.py`, and `providers/`). Release archives do not provide
+this workflow yet.
 
 ## Quickstart (Windows)
 

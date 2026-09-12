@@ -2,67 +2,13 @@
 
 import asyncio
 import json
-import os
-from pathlib import Path
-import socket
-import subprocess
-import sys
-import tempfile
-import time
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import cli
+from _cli_server import IsolatedCliServer, cli
 
 
-class CliIntegrationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory(prefix="agentchattr-cli-test-")
-        cls.addClassCleanup(cls.temp.cleanup)
-        cls.log = open(Path(cls.temp.name) / "server.log", "w+")
-        cls.addClassCleanup(cls.log.close)
-        sockets = [socket.socket() for _ in range(3)]
-        try:
-            for sock in sockets:
-                sock.bind(("127.0.0.1", 0))
-            ports = [sock.getsockname()[1] for sock in sockets]
-        finally:
-            for sock in sockets:
-                sock.close()
-        cls.url = f"http://127.0.0.1:{ports[0]}"
-        cls.process = subprocess.Popen([
-            sys.executable, "run.py", "--port", str(ports[0]),
-            "--mcp-http-port", str(ports[1]), "--mcp-sse-port", str(ports[2]),
-            "--data-dir", cls.temp.name + "/data", "--upload-dir", cls.temp.name + "/uploads",
-        ], cwd=ROOT, stdout=cls.log, stderr=cls.log,
-            env={k: v for k, v in os.environ.items() if not k.startswith("AGENTCHATTR_")})
-        cls.addClassCleanup(cls.stop_server)
-        for _ in range(100):
-            if cls.process.poll() is not None:
-                raise RuntimeError("Isolated server exited during startup")
-            try:
-                cli.fetch_session_token(cls.url)
-                return
-            except OSError:
-                time.sleep(0.1)
-        raise RuntimeError("Isolated server did not start within 10 seconds")
-
-    @classmethod
-    def stop_server(cls):
-        cls.process.terminate()
-        try:
-            cls.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            cls.process.kill()
-            cls.process.wait()
-
-    def command(self, *args, input=None):
-        return subprocess.run([sys.executable, "cli.py", "--url", self.url, *args],
-                              cwd=ROOT, text=True, capture_output=True, input=input, timeout=20)
-
+class CliIntegrationTests(IsolatedCliServer):
     def test_send_acknowledgment_read_and_status(self):
         result = self.command("send", "--name", "TerminalTester", "--json", "@claude inspect terminal test")
         self.assertEqual(result.returncode, 0, result.stderr)

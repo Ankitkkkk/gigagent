@@ -76,8 +76,12 @@ Use matching overrides for every wrapper connecting to that instance.
   sessions, and rules. `core.js` exposes `Hub` events and `store.js` exposes
   reactive `Store` state.
 - `tests/`: Python unittest regressions and a separate browser test script.
-- `cli.py`: interactive human terminal client and one-shot `send`, `read`,
-  `channels`, and `status` commands. Optional terminal dependencies live in
+- `cli.py`: interactive human terminal client and shell chat/session commands.
+  `cli_api.py` owns authenticated localhost HTTP and token handling;
+  `cli_workspaces.py` owns API-backed session/agent resolution and shell actions;
+  `cli_workspace_chat.py` owns server auto-start, session selection, interactive
+  lifecycle commands, checkpoints, and terminal handoff. User-facing "session"
+  maps to API "workspace". Optional terminal dependencies live in
   `requirements-cli.txt`. Shell sends use WebSocket request IDs and server
   acknowledgments; preserve those when changing message handling.
 
@@ -138,6 +142,28 @@ Install `requirements-cli.txt` to exercise the interactive terminal tests.
 `tests/test_cli_integration.py` starts an isolated server on temporary ports and
 uses temporary data, with no provider CLIs. Its prompt test uses simulated
 terminal input; real terminal rendering and Windows behavior need manual checks.
+`tests/_cli_server.py` is the shared setup-only fixture; do not inherit test
+methods into another suite. `tests/test_cli_workspaces_integration.py` covers
+real session HTTP/chat, prompt-toolkit pipe input, and tmux lifecycle using only
+an inert PATH-shim `kilo`. It also checks auto-start against a pre-existing
+isolated tmux server with changed port/data/upload environment overrides.
+
+Keep three temporary ports, temporary data/uploads, and unique `TMUX_TMPDIR`
+for integration tests. Remove inherited `TMUX` so it cannot select a developer
+socket. Register child cleanup before readiness waits, terminate/kill then wait,
+and kill only the isolated tmux server. Redact token query values and startup
+token lines from failure log excerpts before temporary-directory cleanup.
+Never replace the inert shim with paid Claude/Codex sessions. Foreground attach
+and buffered WebSocket output use controlled terminal tests in
+`tests/test_cli_workspace_chat.py`; the real tmux test covers lifecycle only.
+
+```sh
+.venv/bin/python -m unittest discover -s tests -p 'test_cli*integration.py' -v
+```
+
+CLI usage currently requires a source checkout: `build_release.py` does not
+yet include CLI files/dependencies or terminal-session core modules/providers.
+That pre-existing packaging gap remains outside this CLI slice.
 
 Run focused regressions for narrow changes and the full suite for shared
 routing, identity, persistence, transport, or workflow changes. Tests include
