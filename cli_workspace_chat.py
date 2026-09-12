@@ -335,6 +335,7 @@ class WorkspaceChatController:
         self._refresh_requested = False
         self._closed = False
         self._selection_version = 0
+        self._state_revision = 0
         self._poll_error = None
 
     async def initialize(self, prompt):
@@ -389,6 +390,19 @@ class WorkspaceChatController:
         self.client.history()
         return 'continue'
 
+    def _snapshot_version(self):
+        return self._selection_version, self._state_revision
+
+    def _accept_snapshot(self, version):
+        if self._closed or self.workspace is None or version[0] != self._selection_version:
+            return False
+        if version[1] != self._state_revision:
+            # Events and HTTP responses are independent snapshots. A fresh read
+            # reconciles an overlap without repeating a completed mutation.
+            self._refresh_requested = True
+            return False
+        return True
+
     async def poll_forever(self):
         while True:
             await asyncio.sleep(2)
@@ -401,19 +415,19 @@ class WorkspaceChatController:
                                     for a in workspace.get('agents', [])))
             if not needs_refresh:
                 continue
-            version = self._selection_version
+            version = self._snapshot_version()
             self._refresh_requested = False
             try:
                 data = await asyncio.to_thread(self.api.get, workspace['id'])
             except Exception:
-                if version == self._selection_version:
+                if version[0] == self._selection_version:
                     message = 'Session refresh failed or timed out. Check the local server.'
                     if message != self._poll_error:
                         self.client.show(message)
                     self._poll_error = message
                     self._refresh_requested = True
                 continue
-            if version == self._selection_version and not self._closed:
+            if self._accept_snapshot(version):
                 self._poll_error = None
                 self.on_workspace(data)
 
@@ -426,8 +440,11 @@ class WorkspaceChatController:
         return sorted(words)
 
     def _agent_status(self, agent):
-        line = (_agent_line(agent) + f' · {agent.get("provider", "unknown")} · cwd {agent.get("cwd") or "unknown"}'
-                f' · unread {agent.get("unread_count", 0)}')
+        line = _agent_line(agent) + f' · {agent.get("provider", "unknown")}'
+        if _agent_cwd(agent) is not None:
+            line += f' · cwd {agent["cwd"]}'
+        if not agent.get('unread_count'):
+            line += ' · unread 0'
         if agent.get('native_session_id'):
             line += ' · id present'
         if agent.get('history_state') in ('done', 'failed'):
@@ -446,6 +463,7 @@ class WorkspaceChatController:
             return
         previous = {a['agent_id']: a for a in self.workspace['agents']}
         self.workspace = data
+        self._state_revision += 1
         states = {}
         for agent in data.get('agents', []):
             agent_id = agent['agent_id']
@@ -529,13 +547,13 @@ class WorkspaceChatController:
         args = None
         switching = False
         try:
+            if self.plain_channel or self.workspace is None:
+                raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
             try:
                 words = shlex.split(text)
             except ValueError as error:
                 raise CLIError(str(error)) from None
             args = _parse_command(command, words[1:])
-            if self.plain_channel or self.workspace is None:
-                raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
             mode = getattr(args, 'history_mode', None)
             if mode is not None:
                 _validate_history(mode)
@@ -561,16 +579,24 @@ class WorkspaceChatController:
                 if mode is None:
                     mode = (await self.prompt('History mode [none/literal]:', default='literal')).strip() or 'literal'
                     _validate_history(mode)
+                version = self._snapshot_version()
                 agent = await asyncio.to_thread(self.api.action, ws_id, 'spawn', body={
                     'provider': args.provider, 'cwd': args.cwd, 'history_mode': mode,
                     'name': args.agent_name})
-                self._store_agent(agent)
+                if self._accept_snapshot(version):
+                    self._store_agent(agent)
                 if args.provider == 'claude' and not (Path(args.cwd) / '.claude').exists():
                     self.client.show(f'Claude may be waiting at a trust prompt; use '
                                      f'/attach {shlex.quote(str(_agent_label(agent)))} to answer it.')
             elif command == '/rename':
-                self.workspace = await asyncio.to_thread(self.api.rename, ws_id, args.name)
-                self.client.show(f'Session renamed: {self.workspace.get("name", ws_id)}')
+                version = self._snapshot_version()
+                result = await asyncio.to_thread(self.api.rename, ws_id, args.name)
+                if self._accept_snapshot(version):
+                    self.workspace = result
+                    self._state_revision += 1
+                    self.client.show(f'Session renamed: {self.workspace.get("name", ws_id)}')
+                else:
+                    self.client.show('Session rename completed; refreshing session state.')
             elif command == '/unread':
                 agent_id = resolve_agent(self.workspace, args.agent)['agent_id'] if args.agent else None
                 data = await asyncio.to_thread(self.api.unread, ws_id, agent_id)
@@ -582,10 +608,11 @@ class WorkspaceChatController:
                     kwargs['body'] = {'fresh': args.fresh, 'name': args.agent_name, 'cwd': args.cwd}
                 elif command == '/history':
                     kwargs['body'] = {'mode': mode}
+                version = self._snapshot_version()
                 result = await asyncio.to_thread(self.api.action, ws_id, command[1:], agent_id, **kwargs)
                 if command == '/retry':
                     self.client.show('Retry requested.')
-                else:
+                elif self._accept_snapshot(version):
                     self._store_agent(result)
         except CLIError as error:
             self.client.show(str(error))
@@ -597,7 +624,7 @@ class WorkspaceChatController:
             return 'quit'
         except KeyboardInterrupt:
             return 'continue'
-        except Exception:
+        except (OSError, TimeoutError):
             # Transport exception text can contain authenticated URLs.
             self.client.show('Session request failed or timed out. Check the local server and retry.')
             if switching and self.workspace is None:

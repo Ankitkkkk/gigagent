@@ -781,17 +781,28 @@ class ControllerCommandTests(ControllerFixture, unittest.IsolatedAsyncioTestCase
         self.controller.prompt.assert_not_awaited()
 
     async def test_invalid_syntax_has_no_api_calls_or_prompt(self):
-        commands = ['/spawn', '/spawn "unterminated', '/spawn claude --bad',
-                    '/resume', '/resume ag_a extra', '/stop ag_a extra', '/retry',
-                    '/history claude literal extra', '/history claude invalid',
-                    '/history claude --mode none', '/unread --agent ag_a',
-                    '/rename', '/archive extra', '/sessions extra', '/spawn claude --help']
-        for command in commands:
+        cases = [('/spawn', 'the following arguments are required: provider'),
+                 ('/spawn "unterminated', 'No closing quotation'),
+                 ('/spawn claude --bad', 'unrecognized arguments: --bad'),
+                 ('/resume', 'the following arguments are required: agent'),
+                 ('/resume ag_a extra', 'unrecognized arguments: extra'),
+                 ('/stop ag_a extra', 'unrecognized arguments: extra'),
+                 ('/retry', 'the following arguments are required: agent'),
+                 ('/history claude literal extra', 'unrecognized arguments: extra'),
+                 ('/history claude invalid', 'history mode must be literal or none'),
+                 ('/history claude --mode none', 'unrecognized arguments: --mode'),
+                 ('/unread --agent ag_a', 'unrecognized arguments: --agent'),
+                 ('/rename', 'the following arguments are required: name'),
+                 ('/archive extra', 'unrecognized arguments: extra'),
+                 ('/sessions extra', 'unrecognized arguments: extra'),
+                 ('/spawn claude --help', 'unrecognized arguments: --help')]
+        for command, error in cases:
             with self.subTest(command=command):
                 self.assertEqual(await self.handle(command), 'continue')
+                self.assertEqual(self.output[-1], error)
         self.assertEqual(self.api.mock_calls, [])
         self.controller.prompt.assert_not_awaited()
-        self.assertEqual(len(self.output), len(commands))
+        self.assertEqual(len(self.output), len(cases))
 
     async def test_windows_spawn_resume_refuse_before_mutation_or_prompt(self):
         with patch('cli_workspaces.os.name', 'nt'):
@@ -829,6 +840,22 @@ class ControllerCommandTests(ControllerFixture, unittest.IsolatedAsyncioTestCase
             self.assertIn('session', self.output[-1].lower())
         self.assertIsNone(await self.handle('/history'))
         self.assertEqual(self.api.mock_calls, [])
+
+    async def test_plain_mode_explanation_precedes_session_argument_parsing(self):
+        self.controller.plain_channel = True
+        self.controller.workspace = None
+        for text in ['/history 50', '/spawn', '/spawn "unterminated']:
+            self.assertEqual(await self.handle(text), 'continue')
+            self.assertEqual(self.output[-1], 'This command requires a selected session; '
+                             'start chat with --session or the session picker.')
+        self.assertEqual(self.api.mock_calls, [])
+        self.controller.prompt.assert_not_awaited()
+
+    async def test_local_record_bug_is_not_disguised_as_transport_failure(self):
+        self.api.action.return_value = {'last_state': 'running'}
+        with self.assertRaises(KeyError):
+            await self.handle('/stop claude')
+        self.assertEqual(self.output, [])
 
     async def test_expected_failure_verbatim_and_transport_failure_secret_safe(self):
         self.api.action.side_effect = CLIError('specific refusal\x1b[2J', 400)
@@ -920,6 +947,14 @@ class ControllerEventTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
             self.assertIn(text, rendered)
         self.assertLess(rendered.index('claude-1'), rendered.index('external-1'))
         self.assertNotIn('@claude-1:', rendered)
+
+    async def test_agent_line_has_single_unread_and_missing_cwd_presentation(self):
+        self.controller.workspace['agents'][0].update(unread_count=3, cwd='/missing/task4-cwd')
+        await self.handle('/agents')
+        self.assertEqual(len(self.output), 1)
+        self.assertEqual(self.output[0].count('unread 3'), 1)
+        self.assertEqual(self.output[0].count('⚠ cwd missing'), 1)
+        self.assertNotIn('· cwd ', self.output[0])
 
     async def test_completion_and_help_include_session_commands_and_providers(self):
         self.assertTrue(callable(getattr(self.controller, 'completion_words', None)),
@@ -1196,6 +1231,114 @@ class ControllerPollingTests(ControllerFixture, unittest.IsolatedAsyncioTestCase
                 self.fail('interactive did not start and own both background tasks')
         self.assertEqual(events[0], 'checkpoint')
         self.assertCountEqual(events[1:], ['receiver cancelled', 'poll cancelled'])
+
+
+class ControllerSnapshotOrderingTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
+    async def initialize(self):
+        await self.controller.initialize(AsyncMock(return_value='1'))
+        self.client.websocket = object()
+        self.api.get.reset_mock()
+        self.output.clear()
+
+    async def delayed_response(self, method, result, operation, meanwhile):
+        entered = threading.Event()
+        release = threading.Event()
+        def respond(*args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('HTTP response was not released')
+            return result
+        method.side_effect = respond
+        task = asyncio.create_task(operation())
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            await meanwhile()
+            release.set()
+            return await task
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def poll_once(self):
+        with patch('cli_workspace_chat.asyncio.sleep',
+                   AsyncMock(side_effect=[None, asyncio.CancelledError()])):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.controller.poll_forever()
+
+    async def test_delayed_poll_preserves_newer_event_and_reconciles_again(self):
+        await self.initialize()
+        old = copy.deepcopy(self.ws)
+        old['agents'][0]['last_state'] = 'running'
+        newer = copy.deepcopy(self.ws)
+        self.controller.on_settings({})
+        async def event():
+            self.client.handle_event({'type': 'workspace', 'data': newer})
+        await self.delayed_response(self.api.get, old, self.poll_once, event)
+        self.assertEqual(self.controller.workspace['agents'][0]['last_state'], 'exited')
+        self.assertTrue(self.controller._refresh_requested)
+        self.api.get.side_effect = None
+        self.api.get.return_value = copy.deepcopy(newer)
+        await self.poll_once()
+        self.assertEqual(self.api.get.call_count, 2)
+        self.assertFalse(self.controller._refresh_requested)
+
+    async def test_delayed_agent_mutations_preserve_newer_events_without_replay(self):
+        cases = ['/resume ag_a', '/stop ag_a', '/history ag_a none',
+                 f'/spawn codex --cwd {shlex.quote(self.cwd)} --history-mode none']
+        for command in cases:
+            with self.subTest(command=command):
+                await self.initialize()
+                self.api.action.reset_mock()
+                result = dict(self.agent, last_state='running')
+                if command.startswith('/spawn'):
+                    result.update(agent_id='ag_new', registry_name='codex-1', provider='codex')
+                newer = copy.deepcopy(self.ws)
+                newest_agent = dict(result, last_state='exited', unread_count=7)
+                newer['agents'] = [newest_agent]
+                async def event():
+                    self.client.handle_event({'type': 'workspace', 'data': newer})
+                await self.delayed_response(self.api.action, result,
+                                           lambda: self.handle(command), event)
+                self.assertEqual(self.controller.workspace, newer)
+                self.assertTrue(self.controller._refresh_requested)
+                self.api.get.side_effect = None
+                self.api.get.return_value = copy.deepcopy(newer)
+                await self.poll_once()
+                self.api.action.assert_called_once()
+                self.api.get.assert_called_once_with('ws_a')
+                self.assertEqual(self.controller.workspace, newer)
+
+    async def test_delayed_rename_preserves_newer_workspace_and_reconciles(self):
+        await self.initialize()
+        result = dict(self.ws, name='requested name')
+        newer = copy.deepcopy(self.ws)
+        newer['name'] = 'later rename'
+        newer['agents'][0]['last_state'] = 'running'
+        async def event():
+            self.client.handle_event({'type': 'workspace', 'data': newer})
+        await self.delayed_response(self.api.rename, result,
+                                   lambda: self.handle('/rename "requested name"'), event)
+        self.assertEqual(self.controller.workspace, newer)
+        self.assertTrue(self.controller._refresh_requested)
+        self.api.get.side_effect = None
+        self.api.get.return_value = copy.deepcopy(newer)
+        await self.poll_once()
+        self.api.rename.assert_called_once_with('ws_a', 'requested name')
+        self.api.get.assert_called_once_with('ws_a')
+
+    async def test_command_state_update_supersedes_inflight_poll(self):
+        await self.initialize()
+        old = copy.deepcopy(self.ws)
+        old['agents'][0]['last_state'] = 'running'
+        self.controller.on_settings({})
+        async def stop():
+            self.api.action.return_value = copy.deepcopy(self.agent)
+            await self.handle('/stop ag_a')
+        await self.delayed_response(self.api.get, old, self.poll_once, stop)
+        self.assertEqual(self.controller.workspace['agents'][0]['last_state'], 'exited')
+        self.assertTrue(self.controller._refresh_requested)
+        self.api.action.assert_called_once_with('ws_a', 'stop', 'ag_a')
 
 
 if __name__ == '__main__':
