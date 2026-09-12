@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -138,20 +139,34 @@ class WorkspaceApiTests(unittest.TestCase):
         s, msgs = self.call("GET", "/api/messages?limit=5", bearer=token)
         self.assertEqual(s, 200)
 
-    def test_workspace_change_broadcasts_workspace_view(self):
+    def test_workspace_change_broadcasts_only_changed_workspace(self):
+        s, changed = self.call("POST", "/api/workspaces", {"name": "changed-event"})
+        self.assertEqual(s, 200)
+        s, untouched = self.call("POST", "/api/workspaces", {"name": "untouched-event"})
+        self.assertEqual(s, 200)
         client = websocket_connect(
             self.url.replace("http://", "ws://") + f"/ws?token={self.token}", open_timeout=3
         )
         self.addCleanup(client.close)
-        s, created = self.call("POST", "/api/workspaces", {"name": "events"})
+        s, changed = self.call("PATCH", f"/api/workspaces/{changed['id']}", {"name": "renamed-event"})
         self.assertEqual(s, 200)
-        for _ in range(20):
+        workspace_ids = []
+        for _ in range(30):
             event = json.loads(client.recv(timeout=3))
-            if event.get("type") == "workspace" and event.get("data", {}).get("id") == created["id"]:
+            if event.get("type") == "workspace":
+                workspace_ids.append(event["data"]["id"])
                 break
         else:
             self.fail("workspace event not received")
-        self.assertNotIn("routing", event["data"])
+        try:
+            while True:
+                event = json.loads(client.recv(timeout=0.2))
+                if event.get("type") == "workspace":
+                    workspace_ids.append(event["data"]["id"])
+        except TimeoutError:
+            pass
+        self.assertEqual(workspace_ids, [changed["id"]])
+        self.assertNotIn(untouched["id"], workspace_ids)
 
 
 class WorkspaceHistoryRouteTests(unittest.TestCase):
@@ -255,6 +270,91 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         launcher.on_heartbeat("fake-1", ready=True, pid=456)
         entries = [json.loads(line) for line in queue.read_text().splitlines()]
         self.assertEqual(len(entries), 1)
+
+    def test_workspace_view_populates_agent_and_hides_routing_bookkeeping(self):
+        ws = self.ws_store.create("view")
+        agent = self.add_agent(ws, "literal", 0, state="running")
+        record = self.ws_store.get(ws["id"])
+        record["routing"] = {"4": [agent["agent_id"]]}
+        record["routing_done"] = [5]
+        record["routing_high_water"] = 3
+
+        class Launcher:
+            def unread_for(self, ws_id, agent_id):
+                if ws_id == ws["id"] and agent_id == agent["agent_id"]:
+                    return [{"id": 4}, {"id": 5}]
+                return []
+
+        self.app.workspace_launcher = Launcher()
+        view = self.app._ws_view(record)
+
+        self.assertEqual(view["agents"][0]["unread_count"], 2)
+        self.assertEqual(view["agents"][0]["tmux_session"], f"agentchattr-{agent['agent_id']}")
+        self.assertNotIn("routing", view)
+        self.assertNotIn("routing_done", view)
+        self.assertNotIn("routing_high_water", view)
+
+    def _assert_route_yields_while_checkpoint_runs(self, route):
+        started = threading.Event()
+        release = threading.Event()
+
+        class Launcher:
+            def checkpoint(self, ws_id):
+                started.set()
+                release.wait(timeout=1)
+                return {"checked": 0}
+
+        self.app.workspace_launcher = Launcher()
+
+        async def exercise():
+            try:
+                task = asyncio.create_task(route())
+                self.assertTrue(await asyncio.to_thread(started.wait, 0.5))
+                await asyncio.sleep(0.01)
+                self.assertFalse(task.done())
+                release.set()
+                return await task
+            finally:
+                release.set()
+
+        return asyncio.run(exercise())
+
+    def test_checkpoint_route_keeps_event_loop_responsive(self):
+        ws = self.ws_store.create("checkpoint-thread")
+        result = self._assert_route_yields_while_checkpoint_runs(
+            lambda: self.app.checkpoint_workspace(ws["id"])
+        )
+        self.assertEqual(result, {"checked": 0})
+
+    def test_archive_route_keeps_event_loop_responsive(self):
+        ws = self.ws_store.create("archive-thread")
+        result = self._assert_route_yields_while_checkpoint_runs(
+            lambda: self.app.archive_workspace(ws["id"])
+        )
+        self.assertTrue(result["archived"])
+
+    def test_workspace_broadcast_logs_failed_view(self):
+        ws = self.ws_store.create("broadcast-error")
+        self.add_agent(ws, "literal", 0, state="running")
+
+        class Launcher:
+            def unread_for(self, ws_id, agent_id):
+                raise RuntimeError("unread failed")
+
+        self.app.workspace_launcher = Launcher()
+
+        async def exercise():
+            saved_loop = self.app._event_loop
+            self.app._event_loop = asyncio.get_running_loop()
+            try:
+                self.app._on_workspace_change()
+                await asyncio.sleep(0.02)
+            finally:
+                self.app._event_loop = saved_loop
+
+        with self.assertLogs(self.app.log, level="ERROR") as logs:
+            asyncio.run(exercise())
+        self.assertTrue(any("workspace broadcast failed" in line for line in logs.output))
 
 
 if __name__ == "__main__":

@@ -56,6 +56,33 @@ class WorkspaceStoreTests(unittest.TestCase):
         created = self.store.create("works")
         self.assertEqual([ws["id"] for ws in self.store.list(include_archived=True)], [created["id"]])
 
+    def test_workspace_change_callbacks_identify_scoped_and_global_commits(self):
+        self.assertTrue(hasattr(self.store, "on_workspace_change"))
+        scoped = []
+        legacy = []
+        self.store.on_workspace_change(scoped.append)
+        self.store.on_change(lambda: legacy.append("changed"))
+
+        ws = self.store.create("x")
+        agent = self.add(ws)
+        self.store.rename(ws["id"], "renamed")
+        self.store.set_archived(ws["id"], True)
+        self.store.set_archived(ws["id"], False)
+        self.store.update_agent(ws["id"], agent["agent_id"], last_state="running")
+        self.store.update_agent_if_launch(
+            ws["id"], agent["agent_id"], "abc", native_verified=True
+        )
+        self.store.record_routing(ws["channel"], 0, [agent["agent_id"]])
+        self.store.compact_routing(ws["id"], [0])
+        self.store.ack(ws["id"], agent["agent_id"], [0])
+        self.store.rename_agent("claude-1", "reviewer")
+        self.store.update_agent(ws["id"], agent["agent_id"], last_state="starting")
+        self.store.mark_exited("reviewer")
+        self.store.remove_agent(ws["id"], agent["agent_id"])
+
+        self.assertEqual(scoped, [ws["id"]] * 10 + [None, ws["id"], None, ws["id"]])
+        self.assertEqual(len(legacy), len(scoped))
+
     def test_list_is_newest_first_and_hides_archived(self):
         a = self.store.create("a")
         b = self.store.create("b")

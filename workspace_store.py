@@ -41,6 +41,7 @@ class WorkspaceStore:
         self._lock = threading.RLock()
         self._workspaces: list[dict] = []
         self._on_change: list = []
+        self._on_workspace_change: list = []
         self.warning: str | None = None
         self._load()
 
@@ -73,16 +74,24 @@ class WorkspaceStore:
     def on_change(self, cb):
         self._on_change.append(cb)
 
-    def _fire(self):
+    def on_workspace_change(self, cb):
+        self._on_workspace_change.append(cb)
+
+    def _fire(self, ws_id: str | None = None):
         for cb in list(self._on_change):
             try:
                 cb()
             except Exception:
                 log.exception("workspace on_change callback failed")
+        for cb in list(self._on_workspace_change):
+            try:
+                cb(ws_id)
+            except Exception:
+                log.exception("workspace on_workspace_change callback failed")
 
-    def _commit(self):
+    def _commit(self, ws_id: str | None = None):
         self._save()
-        self._fire()
+        self._fire(ws_id)
 
     # ---------- workspaces ----------
 
@@ -108,7 +117,7 @@ class WorkspaceStore:
             }
             self._workspaces.append(ws)
             try:
-                self._commit()
+                self._commit(ws_id)
             except Exception:
                 self._workspaces.pop()
                 raise
@@ -148,7 +157,7 @@ class WorkspaceStore:
                 return None
             ws["name"] = name.strip() or ws["id"]
             self._touch(ws)
-            self._commit()
+            self._commit(ws_id)
             return json.loads(json.dumps(ws))
 
     def set_archived(self, ws_id: str, archived: bool) -> dict | None:
@@ -158,7 +167,7 @@ class WorkspaceStore:
                 return None
             ws["archived"] = bool(archived)
             self._touch(ws)
-            self._commit()
+            self._commit(ws_id)
             return json.loads(json.dumps(ws))
 
     # ---------- agents ----------
@@ -199,7 +208,7 @@ class WorkspaceStore:
             ws["agents"].append(agent)
             self._touch(ws)
             try:
-                self._commit()
+                self._commit(ws_id)
             except Exception:
                 ws["agents"].remove(agent)
                 if previous_updated_at is missing:
@@ -239,7 +248,7 @@ class WorkspaceStore:
                 raise ValueError(f"last_state must be one of {AGENT_STATES}")
             a.update(fields)
             self._touch(ws)
-            self._commit()
+            self._commit(ws_id)
             return json.loads(json.dumps(a))
 
     def remove_agent(self, ws_id: str, agent_id: str) -> bool:
@@ -253,7 +262,7 @@ class WorkspaceStore:
             if len(ws["agents"]) == before:
                 return False
             self._touch(ws)
-            self._commit()
+            self._commit(ws_id)
             return True
 
     def update_agent_if_launch(self, ws_id: str, agent_id: str, nonce: str, **fields) -> bool:
@@ -267,7 +276,7 @@ class WorkspaceStore:
                 return False
             a.update(fields)
             self._touch(ws)
-            self._commit()
+            self._commit(ws_id)
             return True
 
     _LIVE = ("starting", "running")
@@ -382,7 +391,7 @@ class WorkspaceStore:
                         done = set(ws.setdefault("routing_done", []))
                         done.add(int(msg_id))
                         ws["routing_done"] = sorted(done)
-                    self._commit()
+                    self._commit(ws["id"])
                     return
 
     def routing_high_water(self, ws_id: str) -> int:
@@ -426,7 +435,7 @@ class WorkspaceStore:
             if moved:
                 ws["routing_high_water"] = high
                 ws["routing_done"] = sorted(d for d in done if d > high)
-                self._commit()
+                self._commit(ws_id)
 
     def routing_for(self, ws_id: str) -> dict[int, list[str]]:
         with self._lock:
@@ -459,7 +468,7 @@ class WorkspaceStore:
                 return
             a["read_mark"], a["acked_above_mark"] = mark, acked
             self._prune_routing_locked(ws)
-            self._commit()
+            self._commit(ws_id)
 
     def ack_by_name(self, registry_name: str, channel: str, returned_ids: list[int]) -> None:
         with self._lock:

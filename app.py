@@ -322,7 +322,7 @@ def configure(cfg: dict, session_token: str = ""):
     # Terminal sessions (spec §1): records live next to the channel store.
     workspace_store = WorkspaceStore(Path(data_dir) / "workspaces.json", Path(data_dir) / "identity")
     workspace_store.on_change(_on_registry_change)
-    workspace_store.on_change(_on_workspace_change)
+    workspace_store.on_workspace_change(_on_workspace_change)
     _on_registry_change()
 
     # Sessions
@@ -1146,11 +1146,19 @@ def _on_registry_change():
         asyncio.run_coroutine_threadsafe(broadcast_status(), _event_loop)
 
 
-def _on_workspace_change():
+def _on_workspace_change(ws_id: str | None = None):
     if _event_loop and workspace_store is not None:
         async def _send():
-            for ws in workspace_store.list(include_archived=True):
-                await _broadcast(json.dumps({"type": "workspace", "data": _ws_view(ws)}))
+            try:
+                if ws_id is None:
+                    workspaces = workspace_store.list(include_archived=True)
+                else:
+                    ws = workspace_store.get(ws_id)
+                    workspaces = [ws] if ws is not None else []
+                for ws in workspaces:
+                    await _broadcast(json.dumps({"type": "workspace", "data": _ws_view(ws)}))
+            except Exception:
+                log.exception("workspace broadcast failed")
         asyncio.run_coroutine_threadsafe(_send(), _event_loop)
 
 
@@ -2729,11 +2737,12 @@ def _launcher_or_503():
 
 def _ws_view(ws: dict) -> dict:
     """Record plus live state and unread_count per agent."""
-    out = json.loads(json.dumps(ws))
+    out = ws
     for a in out["agents"]:
         a["unread_count"] = len(workspace_launcher.unread_for(ws["id"], a["agent_id"])) if workspace_launcher else 0
         a["tmux_session"] = f"agentchattr-{a['agent_id']}"
-    out.pop("routing", None)
+    for key in ("routing", "routing_done", "routing_high_water"):
+        out.pop(key, None)
     return out
 
 
@@ -2788,11 +2797,13 @@ async def archive_workspace(ws_id: str):
     if err:
         return err
     if workspace_launcher:
-        workspace_launcher.checkpoint(ws_id)
-        for a in ws["agents"]:
-            if a["last_state"] in ("starting", "running"):
-                workspace_launcher.stop(ws_id, a["agent_id"])
-            workspace_store.delete_identity(a["agent_id"])
+        def _archive_agents():
+            workspace_launcher.checkpoint(ws_id)
+            for a in ws["agents"]:
+                if a["last_state"] in ("starting", "running"):
+                    workspace_launcher.stop(ws_id, a["agent_id"])
+                workspace_store.delete_identity(a["agent_id"])
+        await asyncio.to_thread(_archive_agents)
     return _ws_view(workspace_store.set_archived(ws_id, True))
 
 
@@ -2809,7 +2820,7 @@ async def checkpoint_workspace(ws_id: str):
         return err
     from workspace_launcher import LaunchError
     try:
-        return workspace_launcher.checkpoint(ws_id)
+        return await asyncio.to_thread(workspace_launcher.checkpoint, ws_id)
     except LaunchError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
 
