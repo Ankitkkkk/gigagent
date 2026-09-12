@@ -10,6 +10,67 @@ Agents and humans talk in a shared chat room with multiple channels — when any
 
 ![screenshot](screenshot.png)
 
+## Terminal Chat and Shell Commands
+
+Agentchattr also works from a terminal without opening a browser. Start the
+server and agents with the existing launchers, then run these commands from the
+repository directory in another terminal:
+
+```sh
+python -m pip install -r requirements-cli.txt
+python cli.py
+```
+
+Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
+`.venv\Scripts\python.exe` on Windows). To start only the server, run
+`python run.py` in a separate terminal. `python cli.py chat` explicitly starts
+interactive mode.
+
+Interactive chat supports live messages, `@mentions`, channel switching, recent
+history, agent status, and reconnection after server restarts. Incoming replies
+do not overwrite the input prompt. Messages entered while disconnected are
+rejected rather than queued for later delivery.
+
+| Interactive command | Action |
+| --- | --- |
+| `/channels` | List channels |
+| `/join NAME` | Switch channels and show recent history |
+| `/create NAME` | Create and switch to a channel |
+| `/agents` | Show agent availability and roles |
+| `/history` | Show recent messages in the current channel |
+| `/jobs`, `/rules` | List jobs or rules |
+| `/help` | Show commands |
+| `/quit` | Exit without stopping the server or agents |
+
+Tab completes commands, agent handles, and channel names. Ctrl+C clears the
+input; Ctrl+D exits. Other slash commands are forwarded to the server.
+
+For scripts and one-shot commands:
+
+```sh
+python cli.py send --channel general --name Pat "@claude review the latest changes"
+python cli.py read --channel general --limit 20
+python cli.py status
+python cli.py channels
+python cli.py read --json
+python cli.py send --json - < task.txt
+```
+
+`send` waits for a server acknowledgment after persistence (or command handling).
+Shell commands return exit code 0 on success, 1 for request failures, and 2 for
+invalid command-line arguments. `--json` emits JSON to stdout; errors go to
+stderr. Delivery can be uncertain after a transport failure, so inspect history
+before retrying a send. Messages are not retried automatically.
+
+Use `--url http://127.0.0.1:18300` to select another local instance. Otherwise,
+the port comes from the shared configuration, including `AGENTCHATTR_PORT`.
+`--timeout 15` bounds shell requests. Options work before or after the subcommand.
+The terminal client connects to localhost only.
+
+This terminal version covers chat and read-only job/rule lists. Session
+management, decision buttons, attachment uploads, and other graphical workflows
+still use the web UI. Server and agent launchers remain separate processes.
+
 ## Quickstart (Windows)
 
 **1. Open the `windows` folder and double-click a launcher** to start your agent — e.g. `start_claude.bat`, `start_codex.bat`, `start_gemini.bat`, etc.

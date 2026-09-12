@@ -1155,6 +1155,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 sender = event.get("sender") or room_settings.get("username", "user")
                 channel = event.get("channel", "general")
 
+                async def acknowledge(result):
+                    if event.get("request_id"):
+                        await websocket.send_text(json.dumps({
+                            "type": "message_sent", "request_id": event["request_id"],
+                            "data": result,
+                        }))
+
                 if not text and not attachments:
                     continue
 
@@ -1165,16 +1172,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     if cmd == "/clear":
                         store.clear(channel=channel)
                         await broadcast_clear(channel=channel)
+                        await acknowledge({"command": cmd, "channel": channel, "ok": True})
                         continue
                     if cmd == "/continue":
-                        router.continue_routing()
+                        router.continue_routing(channel=channel)
                         store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
                         await broadcast_status()
+                        await acknowledge({"command": cmd, "channel": channel, "ok": True})
                         continue
                     # Broadcast slash commands — expand without storing the raw command.
                     # _handle_new_message will store the expanded version.
                     if cmd in ("/hatmaking", "/artchallenge", "/roastreview", "/poetry"):
                         await _handle_new_message({"sender": sender, "text": text, "channel": channel})
+                        await acknowledge({"command": cmd, "channel": channel, "ok": True})
                         continue
 
                 # Store message — the on_message callback handles broadcast + triggers
@@ -1182,8 +1192,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 if reply_to is not None:
                     reply_to = int(reply_to)
 
-                store.add(sender, text, attachments=attachments, reply_to=reply_to,
-                          channel=channel)
+                saved = store.add(sender, text, attachments=attachments, reply_to=reply_to,
+                                  channel=channel)
+                await acknowledge(saved)
 
             elif event.get("type") == "delete":
                 ids = event.get("ids", [])

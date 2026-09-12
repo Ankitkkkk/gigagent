@@ -149,12 +149,17 @@ visible(agent, msg) =
   makes the next `chat_read` skip the agent's own message) but never touch
   either field. The set stays small because it only ever holds routed ids
   that were read out of order.
-- **Out of scope, stated.** `GET /api/messages` and `GET /api/export` are
-  unauthenticated loopback endpoints for the browser. An agent with shell
-  access can `curl` them, exactly as it can read `data/messages.jsonl`. The
-  policy governs the MCP tool path; it is not a sandbox. Cheap hardening
-  included in v1: both endpoints return 403 when the request carries an
-  agent bearer token, so an agent cannot use its own credentials to bypass.
+- **HTTP read path.** The security middleware (`app.py:239-243`) lets a
+  registered agent call `GET /api/messages` with its bearer token. That is
+  a supported agent read path, so it applies the same predicate: when the
+  request carries an agent token, the response is filtered through
+  `visible()` for that agent (fail-closed rule included). Browser requests
+  with the session token are unchanged. `GET /api/export` returns 403 to an
+  agent bearer token (it is a browser-only bulk download).
+- **Out of scope, stated.** An agent with shell access can fetch the
+  browser session token from `/` on loopback, or read
+  `data/messages.jsonl` directly. The policy governs the agent-facing read
+  paths; it is not a sandbox.
 
 ## 2. Server: store, API, launcher
 
@@ -466,14 +471,17 @@ added to `acked_above_mark` and `read_mark` compacts when contiguous (D5,
 
 ### Recording who a message was for
 
-Two things are recorded on every routed message, in the same `store.add`:
-
-- `metadata.routed_to` — instance names after registry resolution, as the
-  router produces today. Used for live delivery.
-- `metadata.routed_agent_ids` — stable workspace `agent_id`s. Used for
-  unread. Computed at the three routing sites (WebSocket send and job-thread
-  messages in `app.py`, MCP `chat_send` in `mcp_bridge.py`) by
-  `workspace_store.resolve_recipients(channel, mention_tokens, targets)`:
+Every channel message — WebSocket send, MCP `chat_send`, `/api/send` — is
+routed in one place: the store observer `_handle_new_message` in `app.py`,
+which runs after the message is persisted. (The two job-thread routing
+sites in `app.py` and `mcp_bridge.py` route job messages, which are not
+channel messages and are outside the unread model.) Because the message is
+already on disk when routing runs, recipients are not written into the
+message; they are recorded in a side table in the workspace record,
+`routing: {"<msg_id>": ["<agent_id>", …]}`, one entry per routed message
+in a workspace channel, pruned when every member's `read_mark` has passed
+the id. Recipients are computed by
+`workspace_store.resolve_recipients(channel, mention_tokens, targets)`:
   every workspace member in that channel whose current `registry_name`
   matches an **explicit** mention token, plus every member whose
   `provider` matches an explicit family token (`@claude`), **including
@@ -496,7 +504,7 @@ Two things are recorded on every routed message, in the same `store.add`:
   no live instance is skipped by `agents.trigger` exactly as now.
 
 `store.update_message` rewrites and fsyncs the whole JSONL and is not used
-for this.
+for this; the side table is why.
 
 ### Definition
 
@@ -507,7 +515,7 @@ unread(A) = { m in C :
               visible(A, m)
               and m.id > A.read_mark
               and m.id not in A.acked_above_mark
-              and A.agent_id in m.metadata.routed_agent_ids
+              and A.agent_id in routing[m.id]
               and m.sender != A.registry_name
               and m.type in (chat, summary) }
 ```
@@ -912,9 +920,10 @@ Windows-only test skips today.
   message id 0 visible under `literal`; audience filtering; floor and
   `read_mark` survive deregister, rename and resume under a new name;
   missing `floor_id` fails closed and `/history` restores reads;
-  `/api/messages` and `/api/export` return 403 with an agent bearer token.
-- `test_unread.py` — `routed_to` and `routed_agent_ids` persisted at all
-  three routing sites; a `@claude-2` mention
+  `/api/messages` with an agent bearer token is filtered by the predicate;
+  `/api/export` returns 403 to an agent bearer token.
+- `test_unread.py` — recipients recorded in the workspace routing table
+  from `_handle_new_message` for WebSocket, MCP and `/api/send` messages; a `@claude-2` mention
   while claude-2 is stopped is recorded for it; a family `@claude` mention
   reaches stopped claude members; `@all` while claude-2 is stopped is
   **not** recorded for it; a no-mention message under

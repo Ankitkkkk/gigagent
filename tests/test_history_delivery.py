@@ -73,6 +73,25 @@ class HistoryDeliveryTests(unittest.TestCase):
         self.assertFalse(any(f['type'] == 'history' for f in frames))
         self.assertEqual(sum(f['type'] == 'history_complete' for f in frames), 1)
 
+    def test_continue_resumes_selected_channel_and_acknowledges_request(self):
+        frames = []
+        class Socket:
+            query_params = {'token': 'test'}
+            sent = False
+            async def accept(self): pass
+            async def send_text(self, raw): frames.append(json.loads(raw))
+            async def receive_text(self):
+                if self.sent:
+                    raise WebSocketDisconnect()
+                self.sent = True
+                return json.dumps({'type': 'message', 'text': '/continue',
+                                   'channel': 'work', 'request_id': 'cli-request'})
+        asyncio.run(app.websocket_endpoint(Socket()))
+        app.router.continue_routing.assert_called_once_with(channel='work')
+        acknowledgments = [f for f in frames if f['type'] == 'message_sent']
+        self.assertEqual(acknowledgments, [{'type': 'message_sent',
+            'request_id': 'cli-request', 'data': {'command': '/continue', 'channel': 'work', 'ok': True}}])
+
     def test_history_setting_is_applied_per_channel_without_deleting_messages(self):
         self.settings['history_limit'] = '3'
         for i in range(12):
