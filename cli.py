@@ -4,14 +4,14 @@ import argparse
 import asyncio
 from collections import OrderedDict
 from contextlib import redirect_stdout
-from html.parser import HTMLParser
 import json
 import re
 import sys
 import uuid
-from urllib.parse import urlencode, urlsplit
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.parse import urlencode
 
+from cli_api import (CLIError, SessionTokenParser, fetch_session_token, get_api,
+                     local_url)
 from config_loader import load_config
 
 
@@ -32,57 +32,6 @@ def terminal_text(value):
     """Keep chat content from emitting terminal control sequences."""
     return "".join(c for c in str(value) if c in "\n\t" or
                    (c.isprintable() and c != "\x1b"))
-
-
-def local_url(value):
-    parsed = urlsplit(value)
-    if (parsed.scheme != "http" or parsed.hostname not in
-            ("localhost", "127.0.0.1", "::1") or parsed.username or
-            parsed.password or parsed.path not in ("", "/") or
-            parsed.query or parsed.fragment):
-        raise ValueError("Use a local server URL such as http://127.0.0.1:8300")
-    _ = parsed.port  # Validate the port before trying to connect.
-    return value.rstrip("/")
-
-
-class SessionTokenParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.in_script = False
-        self.parts = []
-        self.token = None
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "script":
-            self.in_script = True
-            self.parts = []
-
-    def handle_data(self, data):
-        if self.in_script:
-            self.parts.append(data)
-
-    def handle_endtag(self, tag):
-        if tag == "script" and self.in_script:
-            script = "".join(self.parts).strip()
-            prefix = "window.__SESSION_TOKEN__="
-            if script.startswith(prefix):
-                token, _ = json.JSONDecoder().raw_decode(script[len(prefix):])
-                if isinstance(token, str) and token:
-                    self.token = token
-            self.in_script = False
-
-
-def fetch_session_token(url):
-    # Use the same local bootstrap as the browser, without persisting its token.
-    opener = build_opener(ProxyHandler({}))
-    with opener.open(url + "/", timeout=5) as response:
-        if response.geturl().rstrip("/") != url:
-            raise ValueError("Unexpected redirect from the local server")
-        parser = SessionTokenParser()
-        parser.feed(response.read().decode("utf-8"))
-    if not parser.token:
-        raise ValueError("The server did not provide an agentchattr session token")
-    return parser.token
 
 
 class ChatClient:
@@ -301,12 +250,6 @@ async def interactive(client):
         finally:
             receiver.cancel()
             await asyncio.gather(receiver, return_exceptions=True)
-
-
-def get_api(url, token, path):
-    request = Request(url + path, headers={"X-Session-Token": token})
-    with build_opener(ProxyHandler({})).open(request, timeout=5) as response:
-        return json.load(response)
 
 
 async def shell_command(client, args):
