@@ -65,6 +65,11 @@ Use matching overrides for every wrapper connecting to that instance.
   `summaries.py`, and `schedules.py` manage their respective persisted records.
 - `session_store.py`, `session_engine.py`, and `session_templates/`: session
   persistence, templates, role casting, phases, and turn sequencing.
+- `providers/` — provider adapters (spec §6). Add a vendor by subclassing `providers.base.ProviderAdapter`
+  in a module on PYTHONPATH (or in `adapters/`, gitignored) and setting `adapter = "module:Class"` in that
+  agent's `[agents.<name>]` table.
+- `workspace_store.py`, `workspace_unread.py`, `workspace_launcher.py` — terminal sessions (the user-facing
+  word is "session"; code says "workspace"). Design: docs/superpowers/specs/2026-09-12-terminal-sessions-design.md
 - `archive.py`: versioned ZIP history export/import and deduplication.
 - `static/`: plain HTML, CSS, and JavaScript without a frontend build step.
   `chat.js` contains the main client; feature scripts handle channels, jobs,

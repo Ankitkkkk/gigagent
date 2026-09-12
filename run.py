@@ -81,6 +81,29 @@ def main():
     mcp_bridge._ROLES_FILE = data_dir / "roles.json"
     mcp_bridge._load_roles()
 
+    # Terminal sessions: server-owned launcher (spec §2)
+    import app as app_module
+    from workspace_launcher import WorkspaceLauncher
+    app_module.workspace_launcher = WorkspaceLauncher(
+        store=app_module.workspace_store, messages=store, registry=registry, agents=app_agents,
+        config=config, data_dir=data_dir, root=ROOT)
+    app_module.wire_workspace_hooks()
+    app_module.workspace_launcher.reconcile()
+    for _ws in app_module.workspace_store.list(include_archived=True):
+        app_module._ensure_channel(_ws["channel"])
+    app_module._replay_unrouted()
+
+    def _launcher_tick():
+        while True:
+            time.sleep(5)
+            try:
+                app_module.workspace_launcher.tick()
+                app_module._compact_routing_marks()
+            except Exception:
+                logging.getLogger(__name__).exception("launcher tick failed")
+
+    threading.Thread(target=_launcher_tick, daemon=True).start()
+
     # Start MCP servers in background threads
     http_port = config.get("mcp", {}).get("http_port", 8200)
     sse_port = config.get("mcp", {}).get("sse_port", 8201)
@@ -164,4 +187,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
