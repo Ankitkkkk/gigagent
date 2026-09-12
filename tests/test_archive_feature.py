@@ -7,7 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from fastapi import UploadFile
+from fastapi import Request, UploadFile
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -264,7 +264,7 @@ class ImportExportApiTests(unittest.TestCase):
 
     def test_export_endpoint_returns_zip_with_manifest(self):
         seed_history(self.store, self.jobs, self.rules, self.summaries)
-        response = asyncio.run(app.export_history())
+        response = asyncio.run(app.export_history(Request({"type": "http", "headers": []})))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.media_type, "application/zip")

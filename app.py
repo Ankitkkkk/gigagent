@@ -408,10 +408,12 @@ def configure(cfg: dict, session_token: str = ""):
                         result = registry.deregister(name, reclaimable=True)
                         if result:
                             mcp_bridge.purge_identity(name)
+                            _on_agent_deregistered(name)
                             registry.clean_renames_for(name)
                             renamed = result.get("_renamed_back")
                             if renamed:
                                 mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+                                _propagate_agent_rename(renamed["old"], renamed["new"])
                                 store.rename_sender(renamed["old"], renamed["new"])
                                 _migrate_agent_last_channel(renamed["old"], renamed["new"])
                                 if _event_loop:
@@ -521,6 +523,7 @@ def configure(cfg: dict, session_token: str = ""):
                 log.exception("schedule runner error")
 
     threading.Thread(target=_schedule_runner, daemon=True).start()
+    wire_workspace_hooks()
 
 
 # --- Store → WebSocket bridge ---
@@ -532,6 +535,51 @@ _last_active_channel: str = "general"  # last channel any message was sent in
 # instead of the global last-active channel (which is usually #general and made
 # leave spam land in the wrong place).
 _agent_last_channel: dict[str, str] = {}
+
+
+workspace_launcher = None   # WorkspaceLauncher, set by run.py (Task 12)
+
+
+def wire_workspace_hooks():
+    """Point mcp_bridge's visibility hooks at the workspace store (spec §1)."""
+    import mcp_bridge
+    if workspace_store is None:
+        mcp_bridge.workspace_policy = None
+        mcp_bridge.workspace_ack = None
+        return
+    mcp_bridge.workspace_policy = workspace_store.policy_for
+    mcp_bridge.workspace_ack = workspace_store.ack_by_name
+
+
+def _propagate_agent_rename(old_name: str, new_name: str):
+    """Call beside every migrate_identity so workspace records follow renames."""
+    if workspace_store is not None and old_name != new_name:
+        workspace_store.rename_agent(old_name, new_name)
+
+
+def _on_agent_deregistered(name: str):
+    """Deregister (manual or crash timeout) → the workspace agent is exited (spec §7)."""
+    if workspace_store is not None:
+        workspace_store.mark_exited(name)
+
+
+def _filter_messages_for_agent(registry_name: str, msgs: list[dict]) -> list[dict] | None:
+    """Spec §1 HTTP read path: same predicate as MCP reads. None = blocked."""
+    if workspace_store is None:
+        return msgs
+    from workspace_unread import is_blocked, visible
+    cache: dict[str, dict | None] = {}
+    out = []
+    for m in msgs:
+        ch = m.get("channel", "general")
+        if ch not in cache:
+            cache[ch] = workspace_store.policy_for(registry_name, ch)
+        pol = cache[ch]
+        if pol is not None and is_blocked(pol):
+            return None
+        if visible(pol, m):          # audience enforced for non-members too
+            out.append(m)
+    return out
 
 
 def _migrate_agent_last_channel(old_name: str, new_name: str):
@@ -1443,6 +1491,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Migrate presence + cursors to new name
                             import mcp_bridge
                             mcp_bridge.migrate_identity(agent_name, new_id)
+                            _propagate_agent_rename(agent_name, new_id)
                             # Update sender on all historical messages
                             store.rename_sender(agent_name, new_id)
                             _migrate_agent_last_channel(agent_name, new_id)
@@ -1483,6 +1532,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 registry.confirm_pending(new_id)
                                 import mcp_bridge
                                 mcp_bridge.migrate_identity(agent_name, new_id)
+                                _propagate_agent_rename(agent_name, new_id)
                                 # Update sender on all historical messages
                                 store.rename_sender(agent_name, new_id)
                                 _migrate_agent_last_channel(agent_name, new_id)
@@ -1587,8 +1637,10 @@ async def upload_image(file: UploadFile = File(...)):
 # --- Export / Import ---
 
 @app.get("/api/export")
-async def export_history():
+async def export_history(request: Request):
     """Download a zip archive of project history."""
+    if _resolve_authenticated_agent(request):
+        return JSONResponse({"error": "export is a browser-only download"}, status_code=403)
     import archive as _archive
     import time as _time
     try:
@@ -1646,11 +1698,16 @@ async def import_history(file: UploadFile = File(...)):
 
 
 @app.get("/api/messages")
-async def get_messages(since_id: int = 0, limit: int = 50, channel: str = ""):
+async def get_messages(request: Request, since_id: int = 0, limit: int = 50, channel: str = ""):
     ch = channel if channel else None
-    if since_id:
-        return store.get_since(since_id, channel=ch)
-    return store.get_recent(limit, channel=ch)
+    msgs = store.get_since(since_id, channel=ch) if since_id else store.get_recent(limit, channel=ch)
+    agent = _resolve_authenticated_agent(request)
+    if agent:
+        from workspace_unread import BLOCKED_TEXT
+        msgs = _filter_messages_for_agent(agent["name"], msgs)
+        if msgs is None:
+            return JSONResponse({"error": BLOCKED_TEXT}, status_code=403)
+    return msgs
 
 
 @app.post("/api/send")
@@ -1683,6 +1740,7 @@ async def api_send(request: Request):
 async def get_status():
     status = agents.get_status()
     status["paused"] = any(router.is_paused(ch) for ch in room_settings.get("channels", ["general"]))
+    status["data_dir"] = str(Path(config.get("server", {}).get("data_dir", "./data")).resolve())
     return status
 
 
@@ -2265,6 +2323,7 @@ async def register_agent(request: Request):
     renamed = result.pop("_renamed_slot1", None)
     if renamed:
         mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+        _propagate_agent_rename(renamed["old"], renamed["new"])
         store.rename_sender(renamed["old"], renamed["new"])
         _migrate_agent_last_channel(renamed["old"], renamed["new"])
         if _event_loop:
@@ -2305,11 +2364,13 @@ async def deregister_agent(name: str, request: Request):
     # Clean up runtime state (presence, activity, cursors, rename chains)
     import mcp_bridge
     mcp_bridge.purge_identity(name)
+    _on_agent_deregistered(name)
     registry.clean_renames_for(name)
     # If the remaining instance was renamed back (e.g. "claude-1" → "claude"), migrate state
     renamed = result.pop("_renamed_back", None)
     if renamed:
         mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+        _propagate_agent_rename(renamed["old"], renamed["new"])
         store.rename_sender(renamed["old"], renamed["new"])
         _migrate_agent_last_channel(renamed["old"], renamed["new"])
         if _event_loop:
@@ -2353,6 +2414,7 @@ async def rename_agent_label(name: str, request: Request):
 
     import mcp_bridge
     mcp_bridge.migrate_identity(name, new_id)
+    _propagate_agent_rename(name, new_id)
     # Update sender on all historical messages
     store.rename_sender(name, new_id)
     _migrate_agent_last_channel(name, new_id)
@@ -2386,6 +2448,8 @@ async def heartbeat(agent_name: str, request: Request):
             was_active = mcp_bridge._activity.get(current_name, False)
             mcp_bridge.set_active(current_name, active_val)
             _activity_changed = was_active != active_val
+        if "ready" in body and workspace_launcher is not None:
+            workspace_launcher.on_heartbeat(current_name, ready=bool(body["ready"]), pid=body.get("pid"))
     except Exception:
         pass  # No body = plain heartbeat
     # Immediately broadcast on activity state change (don't wait for background checker)
