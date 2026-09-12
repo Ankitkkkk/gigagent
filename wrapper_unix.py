@@ -56,6 +56,16 @@ def _pane_id(tmux_session: str) -> str | None:
     return pane or None
 
 
+def pane_has_output(session_name: str) -> bool:
+    """True once the provider's pane has printed anything (readiness signal)."""
+    try:
+        result = subprocess.run(["tmux", "capture-pane", "-t", session_name, "-p"],
+                                capture_output=True, timeout=2)
+    except Exception:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def _drop_buffer(name: str) -> None:
     subprocess.run(["tmux", "delete-buffer", "-b", name],
                    capture_output=True, timeout=TMUX_COMMAND_TIMEOUT)
@@ -197,6 +207,7 @@ def run_agent(
     session_name=None,
     inject_env=None,
     inject_delay: float = 0.3,
+    attach: bool = True,
 ):
     """Run agent inside a tmux session, inject via tmux send-keys."""
     _check_tmux()
@@ -230,8 +241,9 @@ def run_agent(
     start_watcher(inject_fn)
 
     print(f"  Using tmux session: {session_name}")
-    print(f"  Detach: Ctrl+B, D  (agent keeps running)")
-    print(f"  Reattach: tmux attach -t {session_name}\n")
+    if attach:
+        print(f"  Detach: Ctrl+B, D  (agent keeps running)")
+        print(f"  Reattach: tmux attach -t {session_name}\n")
 
     while True:
         try:
@@ -251,15 +263,17 @@ def run_agent(
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
 
-            # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
-            subprocess.run(["tmux", "attach-session", "-t", session_name])
+            if attach:
+                # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
+                subprocess.run(["tmux", "attach-session", "-t", session_name])
+            else:
+                print(f"  Running detached in tmux session {session_name}")
 
             # Check: did the agent exit, or did the user just detach?
             if _session_exists(session_name):
-                # Session still alive — user detached, agent running in background.
-                # Keep the wrapper alive so the local proxy and heartbeats survive.
-                print(f"\n  Detached. {agent.capitalize()} still running in tmux.")
-                print(f"  Reattach: tmux attach -t {session_name}")
+                if attach:
+                    print(f"\n  Detached. {agent.capitalize()} still running in tmux.")
+                    print(f"  Reattach: tmux attach -t {session_name}")
                 while _session_exists(session_name):
                     time.sleep(1)
                 break

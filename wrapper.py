@@ -575,8 +575,67 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def parse_wrapper_args(argv: list[str], agent_names: list[str]):
+    """Wrapper flags; anything unknown (flags or positionals) is passed to the provider."""
     import argparse
+    parser = argparse.ArgumentParser(description="Agent wrapper with chat auto-trigger")
+    parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
+    parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
+    parser.add_argument("--label", type=str, default=None, help="Custom display label")
+    # Workspace launcher flags (spec §2 "Wrapper changes")
+    parser.add_argument("--cwd", default=None, help="Working directory for the provider (overrides config)")
+    parser.add_argument("--identity-file", default=None,
+                        help="JSON with registry_name+token from the server; skips /api/register")
+    parser.add_argument("--no-attach", action="store_true", help="Never attach to the tmux session")
+    parser.add_argument("--tmux-name", default=None, help="tmux session name (default agentchattr-<name>)")
+    parser.add_argument("--provider-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="Extra environment for the provider process (repeatable)")
+    # Per-project isolation flags (consumed by apply_cli_overrides(); listed for --help)
+    parser.add_argument("--data-dir",      default=None, help="Override server.data_dir (path)")
+    parser.add_argument("--port",          default=None, help="Override server.port (int)")
+    parser.add_argument("--mcp-http-port", default=None, help="Override mcp.http_port (int)")
+    parser.add_argument("--mcp-sse-port",  default=None, help="Override mcp.sse_port (int)")
+    parser.add_argument("--upload-dir",    default=None, help="Override images.upload_dir (path)")
+    return parser.parse_known_args(argv)
+
+
+def parse_provider_env(items: list[str]) -> dict[str, str]:
+    out = {}
+    for item in items or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            print(f"  Error: --provider-env expects KEY=VALUE, got {item!r}")
+            sys.exit(1)
+        out[key] = value
+    return out
+
+
+def load_identity_file(path: str) -> dict:
+    """Identity handed over by the workspace launcher. Same shape as /api/register's reply."""
+    try:
+        data = json.loads(Path(path).read_text("utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"  Error: cannot read identity file {path}: {exc}")
+        sys.exit(1)
+    name = data.get("registry_name") or data.get("name")
+    token = data.get("token")
+    if not name or not token:
+        print(f"  Error: identity file {path} lacks registry_name/token")
+        sys.exit(1)
+    try:
+        _, slot_text = name.rsplit("-", 1)
+        slot = int(slot_text)
+    except ValueError:
+        slot = 1
+    return {"name": name, "token": token, "slot": slot, "agent_id": data.get("agent_id")}
+
+
+def _resolve_project_dir(cwd: str) -> Path:
+    p = Path(cwd)
+    return p.resolve() if p.is_absolute() else (ROOT / p).resolve()
+
+
+def main():
     import urllib.error
     import urllib.request
 
@@ -590,38 +649,31 @@ def main():
 
     agent_names = list(config.get("agents", {}).keys())
 
-    parser = argparse.ArgumentParser(description="Agent wrapper with chat auto-trigger")
-    parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
-    parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
-    parser.add_argument("--label", type=str, default=None, help="Custom display label")
-    # Per-project isolation flags (must match the server's flags so wrappers
-    # launched separately connect to the right instance). Values are consumed
-    # by apply_cli_overrides() above; listing here so --help shows them.
-    parser.add_argument("--data-dir",      default=None, help="Override server.data_dir (path)")
-    parser.add_argument("--port",          default=None, help="Override server.port (int)")
-    parser.add_argument("--mcp-http-port", default=None, help="Override mcp.http_port (int)")
-    parser.add_argument("--mcp-sse-port",  default=None, help="Override mcp.sse_port (int)")
-    parser.add_argument("--upload-dir",    default=None, help="Override images.upload_dir (path)")
-    args, extra = parser.parse_known_args()
+    args, extra = parse_wrapper_args(sys.argv[1:], agent_names)
+    provider_env = parse_provider_env(args.provider_env)
 
     agent = args.agent
     agent_cfg = config.get("agents", {}).get(agent, {})
-    cwd = agent_cfg.get("cwd", ".")
+    cwd = args.cwd or agent_cfg.get("cwd", ".")
     command = agent_cfg.get("command", agent)
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
     server_port = config.get("server", {}).get("port", 8300)
     mcp_cfg = config.get("mcp", {})
 
-    try:
-        registration = _register_instance(server_port, agent, args.label)
-    except Exception as exc:
-        print(f"  Registration failed ({exc}).")
-        print("  Wrapper cannot continue without a registered identity.")
-        sys.exit(1)
+    if args.identity_file:
+        registration = load_identity_file(args.identity_file)
+    else:
+        try:
+            registration = _register_instance(server_port, agent, args.label)
+        except Exception as exc:
+            print(f"  Registration failed ({exc}).")
+            print("  Wrapper cannot continue without a registered identity.")
+            sys.exit(1)
 
     assigned_name = registration["name"]
     assigned_token = registration["token"]
+    unix_session_name = args.tmux_name or f"agentchattr-{assigned_name}"
     print(f"  Registered as: {assigned_name} (slot {registration.get('slot', '?')})")
 
     proxy = None
@@ -684,7 +736,7 @@ def main():
             _apply_mcp_inject(
                 inject_cfg, instance_name, data_dir, proxy_url,
                 token=new_token, mcp_cfg=mcp_cfg,
-                project_dir=(ROOT / cwd).resolve(),
+                project_dir=_resolve_project_dir(cwd),
             )
         except Exception:
             pass
@@ -730,7 +782,7 @@ def main():
         sys.exit(1)
     command = resolved
 
-    project_dir = (ROOT / cwd).resolve()
+    project_dir = _resolve_project_dir(cwd)
 
     # Gemini: ensure the project directory is trusted so MCPs are allowed.
     # Gemini blocks ALL MCPs for untrusted folders — even system-settings ones.
@@ -749,6 +801,8 @@ def main():
         mcp_cfg=mcp_cfg,
         project_dir=project_dir,
     )
+    inject_env = dict(inject_env or {})
+    inject_env.update(provider_env)
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
     if not needs_proxy:
@@ -760,6 +814,21 @@ def main():
     print(f"  @{assigned_name} mentions auto-inject MCP reads")
     print(f"  Starting {command} in {cwd}...\n")
 
+    _ready = [False]   # set once the provider pane shows output (spec §2 step 7)
+
+    def _readiness_probe():
+        if sys.platform == "win32":
+            _ready[0] = True   # console wrapper has no pane to inspect
+            return
+        from wrapper_unix import pane_has_output
+        while not _ready[0]:
+            time.sleep(1)
+            try:
+                if pane_has_output(unix_session_name):
+                    _ready[0] = True
+            except Exception:
+                pass
+
     def _heartbeat():
         while True:
             current_name, _ = get_identity()
@@ -769,8 +838,8 @@ def main():
                 req = urllib.request.Request(
                     url,
                     method="POST",
-                    data=b"",
-                    headers=_auth_headers(current_token),
+                    data=json.dumps({"ready": _ready[0], "pid": os.getpid()}).encode(),
+                    headers=_auth_headers(current_token, include_json=True),
                 )
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     resp_data = json.loads(resp.read())
@@ -794,6 +863,7 @@ def main():
             time.sleep(5)
 
     threading.Thread(target=_heartbeat, daemon=True).start()
+    threading.Thread(target=_readiness_probe, daemon=True).start()
 
     _watcher_inject_fn = None
     _watcher_thread = None
@@ -887,7 +957,6 @@ def main():
     else:
         from wrapper_unix import get_activity_checker, run_agent
 
-        unix_session_name = f"agentchattr-{assigned_name}"
         _set_activity_checker(get_activity_checker(
             unix_session_name, trigger_flag=_trigger_flag,
             provider=_provider_from_command(command),
@@ -896,7 +965,7 @@ def main():
     run_kwargs = dict(
         command=command,
         extra_args=launch_args,
-        cwd=cwd,
+        cwd=str(project_dir),
         env=env,
         queue_file=queue_file,
         agent=agent,
@@ -912,6 +981,7 @@ def main():
         run_kwargs["enter_backend"] = agent_cfg.get("enter_backend", "console_input")
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
+        run_kwargs["attach"] = not args.no_attach
 
     try:
         run_agent(**run_kwargs)
