@@ -228,6 +228,20 @@ class WorkspaceStore:
             self._commit()
             return json.loads(json.dumps(a))
 
+    def remove_agent(self, ws_id: str, agent_id: str) -> bool:
+        """Only remove a spawn that failed before it ever ran."""
+        with self._lock:
+            ws = self._find(ws_id)
+            if not ws:
+                return False
+            before = len(ws["agents"])
+            ws["agents"] = [a for a in ws["agents"] if a["agent_id"] != agent_id]
+            if len(ws["agents"]) == before:
+                return False
+            self._touch(ws)
+            self._commit()
+            return True
+
     def update_agent_if_launch(self, ws_id: str, agent_id: str, nonce: str, **fields) -> bool:
         """Compare-and-update under the store lock: write only while the agent's
         current launch nonce is still `nonce`. Background work from an earlier
@@ -490,6 +504,14 @@ class WorkspaceStore:
             return json.loads(path.read_text("utf-8"))
         except (OSError, ValueError):
             return None
+
+    def restore_identity(self, agent_id: str, data: dict | None) -> None:
+        """Restore an identity shadow exactly after a failed relaunch."""
+        with self._lock:
+            if data is None:
+                self.delete_identity(agent_id)
+            else:
+                self._write_identity_dict(agent_id, data)
 
     def delete_identity(self, agent_id: str) -> None:
         try:
