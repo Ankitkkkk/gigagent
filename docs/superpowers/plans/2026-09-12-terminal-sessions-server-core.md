@@ -1164,6 +1164,15 @@ class WorkspaceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.find_agent_by_registry_name("claude-1")[1]["agent_id"], new["agent_id"])
         self.assertEqual(self.store.policy_for("claude-1", ws["channel"])["floor_id"], 9)
 
+    def test_update_agent_if_launch_is_conditional(self):
+        ws = self.store.create("x")
+        ag = self.add(ws)
+        nonce = ag["last_launch"]["nonce"]
+        self.assertTrue(self.store.update_agent_if_launch(ws["id"], ag["agent_id"], nonce, native_verified=True))
+        self.store.update_agent(ws["id"], ag["agent_id"], last_launch=dict(ag["last_launch"], nonce="newer"))
+        self.assertFalse(self.store.update_agent_if_launch(ws["id"], ag["agent_id"], nonce, native_session_id="stale"))
+        self.assertEqual(self.store.get_agent(ws["id"], ag["agent_id"])["native_session_id"], "sid-1")
+
     def test_mark_exited(self):
         ws = self.store.create("x")
         ag = self.add(ws)
@@ -1230,6 +1239,22 @@ class WorkspaceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.resolve_recipients(ch, [], ["claude-1", "codex-1"]), [running["agent_id"]])
         self.assertEqual(self.store.resolve_recipients("general", ["claude-1"], []), [])
 
+    def test_routing_watermark_only_advances_through_contiguous_ids(self):
+        ws = self.store.create("x")
+        ag = self.add(ws)
+        ch = ws["channel"]
+        channel_ids = [3, 5, 8]                                # ids 4, 6, 7 belong to other channels
+        self.store.record_routing(ch, 5, [ag["agent_id"]])    # observer for 5 finished first
+        self.store.record_routing(ch, 8, [])
+        self.store.compact_routing(ws["id"], channel_ids)
+        self.assertEqual(self.store.routing_high_water(ws["id"]), -1)          # 3 not done → no move
+        self.assertEqual(self.store.unrouted_ids(ws["id"], channel_ids), [3])
+        self.store.record_routing(ch, 3, [])
+        self.store.compact_routing(ws["id"], channel_ids)
+        self.assertEqual(self.store.routing_high_water(ws["id"]), 8)
+        self.assertEqual(self.store.unrouted_ids(ws["id"], channel_ids), [])
+        self.assertEqual(self.store.get(ws["id"]).get("routing_done", []), [])
+
     def test_routing_recorded_and_acks_compact(self):
         ws = self.store.create("x")
         ag = self.add(ws)
@@ -1250,11 +1275,14 @@ class WorkspaceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_agent(ws["id"], ag["agent_id"])["read_mark"], 147)
         self.assertEqual(self.store.routing_for(ws["id"]), {})
 
-    def test_member_names_includes_stopped(self):
+    def test_member_names_includes_stopped_and_archived(self):
         ws = self.store.create("x")
         ag = self.add(ws)
         self.store.update_agent(ws["id"], ag["agent_id"], last_state="exited")
         self.assertEqual(self.store.member_names(), ["claude-1"])
+        self.store.set_archived(ws["id"], True)
+        self.assertEqual(self.store.member_names(), ["claude-1"])                       # still reserved
+        self.assertEqual(self.store.member_names(include_archived=False), [])
 
 
 if __name__ == "__main__":
@@ -1522,6 +1550,20 @@ class WorkspaceStore:
             self._commit()
             return json.loads(json.dumps(a))
 
+    def update_agent_if_launch(self, ws_id: str, agent_id: str, nonce: str, **fields) -> bool:
+        """Compare-and-update under the store lock: write only while the agent's
+        current launch nonce is still `nonce`. Background work from an earlier
+        launch can never land on a later one (spec §6)."""
+        with self._lock:
+            ws = self._find(ws_id)
+            a = self._find_agent(ws, agent_id) if ws else None
+            if not a or (a.get("last_launch") or {}).get("nonce") != nonce:
+                return False
+            a.update(fields)
+            self._touch(ws)
+            self._commit()
+            return True
+
     _LIVE = ("starting", "running")
 
     def find_agent_by_registry_name(self, name: str) -> tuple[dict, dict] | None:
@@ -1586,11 +1628,14 @@ class WorkspaceStore:
                     out.append(entry)
             return out
 
-    def member_names(self) -> list[str]:
+    def member_names(self, include_archived: bool = True) -> list[str]:
+        """Every saved registry name. Archived records count by default: their
+        names must never be handed to a new agent, or policy_for could resolve
+        the newcomer against the archived record."""
         with self._lock:
             names = []
             for ws in self._workspaces:
-                if ws.get("archived"):
+                if ws.get("archived") and not include_archived:
                     continue
                 names.extend(a["registry_name"] for a in ws["agents"])
             return sorted(set(names))
@@ -1612,16 +1657,22 @@ class WorkspaceStore:
     # ---------- routing table + acks ----------
 
     def record_routing(self, channel: str, msg_id: int, agent_ids: list[str]) -> None:
-        """Record recipients (may be empty) and advance the workspace's routing high-water mark.
+        """Record recipients (may be empty) and mark `msg_id` as routed.
 
-        The mark is what makes a crash between store.add and the routing observer
-        recoverable: replay starts after it (spec §4)."""
+        Observers can finish out of order (they await broadcasts), so a plain
+        max() watermark would skip a gap after a crash. `routing_done` holds the
+        processed ids above `routing_high_water`; compact_routing() advances the
+        mark only through ids that are contiguous *in this channel* (message ids
+        are global, so the caller supplies the channel's id sequence)."""
         with self._lock:
             for ws in self._workspaces:
                 if ws["channel"] == channel and not ws.get("archived"):
                     if agent_ids:
                         ws.setdefault("routing", {})[str(msg_id)] = sorted(set(agent_ids))
-                    ws["routing_high_water"] = max(int(ws.get("routing_high_water", -1)), int(msg_id))
+                    if int(msg_id) > int(ws.get("routing_high_water", -1)):
+                        done = set(ws.setdefault("routing_done", []))
+                        done.add(int(msg_id))
+                        ws["routing_done"] = sorted(done)
                     self._commit()
                     return
 
@@ -1629,6 +1680,39 @@ class WorkspaceStore:
         with self._lock:
             ws = self._find(ws_id)
             return int(ws.get("routing_high_water", -1)) if ws else -1
+
+    def unrouted_ids(self, ws_id: str, channel_msg_ids: list[int]) -> list[int]:
+        """Channel message ids above the mark that no observer has processed."""
+        with self._lock:
+            ws = self._find(ws_id)
+            if not ws:
+                return []
+            high = int(ws.get("routing_high_water", -1))
+            done = set(ws.get("routing_done", []))
+            return [i for i in sorted(channel_msg_ids) if i > high and i not in done]
+
+    def compact_routing(self, ws_id: str, channel_msg_ids: list[int]) -> None:
+        """Advance the mark through processed ids that are contiguous in the channel."""
+        with self._lock:
+            ws = self._find(ws_id)
+            if not ws:
+                return
+            high = int(ws.get("routing_high_water", -1))
+            done = set(ws.get("routing_done", []))
+            moved = False
+            for i in sorted(channel_msg_ids):
+                if i <= high:
+                    continue
+                if i in done:
+                    high = i
+                    done.discard(i)
+                    moved = True
+                else:
+                    break
+            if moved:
+                ws["routing_high_water"] = high
+                ws["routing_done"] = sorted(d for d in done if d > high)
+                self._commit()
 
     def routing_for(self, ws_id: str) -> dict[int, list[str]]:
         with self._lock:
@@ -1761,7 +1845,7 @@ class WorkspaceStore:
 - [ ] **Step 5: Run to verify it passes**
 
 Run: `python -m unittest tests.test_workspace_store -v`
-Expected: 17 tests, OK.
+Expected: 19 tests, OK.
 
 - [ ] **Step 6: Commit**
 
@@ -2382,6 +2466,18 @@ class RoutingRecipientsTests(unittest.TestCase):
         self.assertEqual(self.ws_store.routing_high_water(self.ws["id"]), plain["id"])
         self.assertEqual(self.routed(routed_mid), [self.stopped["agent_id"]])
 
+    def test_replay_fills_a_gap_left_by_out_of_order_observers(self):
+        first = app_module.store.add("ankit", "@claude-1 first", channel=self.ws["channel"])
+        second = app_module.store.add("ankit", "@claude-1 second", channel=self.ws["channel"])
+        asyncio.run(app_module._handle_new_message(second))      # observer for the later message finished
+        app_module._compact_routing_marks()
+        self.assertEqual(self.ws_store.routing_high_water(self.ws["id"]), -1)   # gap: first not done
+        self.assertEqual(self.routed(first["id"]), [])
+        app_module._replay_unrouted()                             # "server restart"
+        self.assertEqual(self.routed(first["id"]), [self.stopped["agent_id"]])
+        self.assertEqual(self.routed(second["id"]), [self.stopped["agent_id"]])
+        self.assertEqual(self.ws_store.routing_high_water(self.ws["id"]), second["id"])
+
 
 class RoutingDefaultAllTests(RoutingRecipientsTests):
     """Same fixture with routing.default = "all": a no-mention message is a broadcast."""
@@ -2445,7 +2541,7 @@ with
 ```python
         all_names = set(base_names + instance_names)
         if workspace_store is not None:
-            all_names |= set(workspace_store.member_names())   # stopped members still parse
+            all_names |= set(workspace_store.member_names(include_archived=False))   # stopped members still parse
         router.update_agents(sorted(all_names))
 ```
 
@@ -2464,27 +2560,46 @@ In `_handle_new_message`, immediately after `targets = list(dict.fromkeys(target
 Add next to `_on_workspace_change` (Task 12 adds that; put this helper beside `_on_registry_change` now):
 
 ```python
+def _channel_ids_above_mark(ws: dict) -> list[int]:
+    high = workspace_store.routing_high_water(ws["id"])
+    return [m["id"] for m in store.get_since(high, channel=ws["channel"])]
+
+
 def _replay_unrouted():
-    """Server start: messages persisted after the last routed one never reached the
-    observer (crash window). Replay explicit mentions for them. Broadcast
-    recipients depend on who was running at the time and cannot be reconstructed;
-    those messages get an empty routing entry, which still advances the mark."""
+    """Server start: messages persisted whose observer never finished (crash window,
+    including gaps left by out-of-order observers). Replay explicit mentions for
+    them. Broadcast recipients depend on who was running at the time and cannot be
+    reconstructed; those messages get an empty routing entry so the mark can move."""
     if workspace_store is None or store is None or router is None:
         return
     for ws in workspace_store.list(include_archived=False):
-        high = workspace_store.routing_high_water(ws["id"])
-        for m in store.get_since(high, channel=ws["channel"]):
-            if m.get("type", "chat") not in ("chat", "summary"):
+        ids = _channel_ids_above_mark(ws)
+        pending = set(workspace_store.unrouted_ids(ws["id"], ids))
+        for m in store.get_since(workspace_store.routing_high_water(ws["id"]), channel=ws["channel"]):
+            if m["id"] not in pending:
                 continue
-            tokens = router.mention_tokens(m.get("text", ""))
-            explicit = [t for t in tokens if t not in ("all", "both")]
-            agent_ids = workspace_store.resolve_recipients(ws["channel"], explicit, [])
+            if m.get("type", "chat") in ("chat", "summary"):
+                tokens = router.mention_tokens(m.get("text", ""))
+                explicit = [t for t in tokens if t not in ("all", "both")]
+                agent_ids = workspace_store.resolve_recipients(ws["channel"], explicit, [])
+            else:
+                agent_ids = []
             workspace_store.record_routing(ws["channel"], m["id"], agent_ids)
+        workspace_store.compact_routing(ws["id"], ids)
+
+
+def _compact_routing_marks():
+    """Called from the launcher tick: move each workspace's mark through contiguous
+    processed ids so routing_done stays a few seconds long."""
+    if workspace_store is None or store is None:
+        return
+    for ws in workspace_store.list(include_archived=False):
+        workspace_store.compact_routing(ws["id"], _channel_ids_above_mark(ws))
 ```
 
 - [ ] **Step 5: Run to verify it passes, then the whole suite**
 
-Run: `python -m unittest tests.test_unread_routing -v` → 15 tests (one skip) OK. If `configure()` raises `KeyError` for a config key the test config lacks, copy that key's default from `config.toml` into `cfg()` in the test.
+Run: `python -m unittest tests.test_unread_routing -v` → 17 tests (one skip) OK. If `configure()` raises `KeyError` for a config key the test config lacks, copy that key's default from `config.toml` into `cfg()` in the test.
 Run: `python -m unittest discover -s tests -v` → green.
 
 - [ ] **Step 6: Commit**
@@ -3257,6 +3372,9 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(ag2["registry_name"], "claude-2")         # saved name skipped
         with self.assertRaises(LaunchError):
             self.launcher.spawn(other["id"], provider="claude", cwd=str(self.proj), history_mode="none", name="claude-1")
+        self.store.set_archived(self.ws["id"], True)                 # archived names stay reserved
+        ag3 = self.launcher.spawn(other["id"], provider="claude", cwd=str(self.proj), history_mode="none")
+        self.assertEqual(ag3["registry_name"], "claude-3")
 
     def test_popen_failure_on_spawn_removes_entry(self):
         self.launcher._popen = FakePopen(self.popen_calls, fail=True)
@@ -3806,14 +3924,12 @@ class WorkspaceLauncher:
     def _update_if_launch(self, ws_id: str, agent_id: str, nonce: str, **fields) -> bool:
         """Write only if the agent's current launch is still the one this work belongs to.
 
-        Stop + fresh while a discovery thread is running must not let the old
-        launch's result land on the new conversation (spec §6)."""
-        current = self.store.get_agent(ws_id, agent_id)
-        if not current or (current.get("last_launch") or {}).get("nonce") != nonce:
+        Compare-and-update happens inside the store lock (WorkspaceStore.update_agent_if_launch),
+        so a fresh launch racing this thread cannot slip between the check and the write."""
+        ok = self.store.update_agent_if_launch(ws_id, agent_id, nonce, **fields)
+        if not ok:
             log.info("dropping stale background result for %s (launch changed)", agent_id)
-            return False
-        self.store.update_agent(ws_id, agent_id, **fields)
-        return True
+        return ok
 
     def _after_ready(self, ws_id: str, agent_id: str, nonce: str) -> None:
         ws = self.store.get(ws_id)
@@ -3993,7 +4109,7 @@ class WorkspaceLauncher:
 
 - [ ] **Step 5: Run to verify it passes**
 
-Run: `python -m unittest tests.test_workspace_launcher -v` → 22 tests OK. Note for the engineer: `_after_ready` calls `self._sleep(VERIFY_DELAY)` on the claude path; the test's `FakeClock.sleep` only advances time, so the background thread finishes immediately.
+Run: `python -m unittest tests.test_workspace_launcher -v` → 22 tests OK. (`test_stopped_agent_name_is_never_reused_by_a_new_spawn` needs the routing compaction in `tick()` only for its own bookkeeping; nothing else.) Note for the engineer: `_after_ready` calls `self._sleep(VERIFY_DELAY)` on the claude path; the test's `FakeClock.sleep` only advances time, so the background thread finishes immediately.
 
 - [ ] **Step 6: Commit**
 
@@ -4409,6 +4525,7 @@ After `mcp_bridge._load_roles()` add:
             time.sleep(5)
             try:
                 app_module.workspace_launcher.tick()
+                app_module._compact_routing_marks()
             except Exception:
                 logging.getLogger(__name__).exception("launcher tick failed")
 

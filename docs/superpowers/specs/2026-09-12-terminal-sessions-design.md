@@ -490,10 +490,13 @@ already on disk when routing runs, recipients are not written into the
 message; they are recorded in a side table in the workspace record,
 `routing: {"<msg_id>": ["<agent_id>", …]}`, one entry per routed message
 in a workspace channel, pruned when every member's `read_mark` has passed
-the id. The workspace also keeps `routing_high_water`, the last message id
-the observer processed; on server start, messages above it (persisted, then
-a crash before routing) are replayed for explicit mentions. Broadcast
-recipients depend on who was running at the time and are not reconstructed. Recipients are computed by
+the id. The workspace also keeps `routing_high_water` plus `routing_done`,
+the processed ids above it; the mark advances only through ids contiguous in
+that channel's own sequence, because observers can finish out of order. On
+server start, every channel message above the mark that is not in
+`routing_done` is replayed for explicit mentions. Broadcast recipients depend
+on who was running at the time and are not reconstructed. Saved registry
+names — archived records included — are never handed to a new agent. Recipients are computed by
 `workspace_store.resolve_recipients(channel, mention_tokens, targets)`:
   every workspace member in that channel whose current `registry_name`
   matches an **explicit** mention token, plus every member whose
