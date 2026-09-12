@@ -46,6 +46,10 @@ class Router:
                 mentions.add(name)
         return list(mentions)
 
+    def mention_tokens(self, text: str) -> list[str]:
+        """Raw lowercase @tokens in order, including 'all'/'both'. No expansion."""
+        return [m.group(1).lower() for m in self._mention_re.finditer(text)]
+
     def _is_agent(self, sender: str) -> bool:
         return sender.lower() in self.agent_names
 

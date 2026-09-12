@@ -22,6 +22,7 @@ from schedules import ScheduleStore, parse_schedule_spec
 from router import Router
 from agents import AgentTrigger
 from registry import RuntimeRegistry
+from workspace_store import WorkspaceStore
 from session_store import SessionStore, validate_session_template
 from session_engine import SessionEngine
 
@@ -33,6 +34,7 @@ app = FastAPI(title="agentchattr")
 store: MessageStore | None = None
 rules: RuleStore | None = None
 summaries: SummaryStore | None = None
+workspace_store: WorkspaceStore | None = None
 jobs: JobStore | None = None
 schedules: ScheduleStore | None = None
 router: Router | None = None
@@ -259,7 +261,7 @@ def _install_security_middleware(token: str, cfg: dict):
 
 
 def configure(cfg: dict, session_token: str = ""):
-    global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, config
+    global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, config, workspace_store
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -317,6 +319,10 @@ def configure(cfg: dict, session_token: str = ""):
         online_checker=lambda: set(registry.get_active_names()) if registry else set(),
     )
     agents = AgentTrigger(registry, data_dir=data_dir)
+    # Terminal sessions (spec §1): records live next to the channel store.
+    workspace_store = WorkspaceStore(Path(data_dir) / "workspaces.json", Path(data_dir) / "identity")
+    workspace_store.on_change(_on_registry_change)
+    _on_registry_change()
 
     # Sessions
     ROOT = Path(__file__).parent
@@ -690,6 +696,25 @@ def _resolve_draft_lineage(text: str, channel: str) -> tuple[str, int]:
 
 
 async def _handle_new_message(msg: dict):
+    """Store observer. Wraps the real handler so every workspace-channel message is
+    marked processed (spec §4) no matter which early return it takes."""
+    channel = msg.get("channel", "general")
+    marked = [False]
+
+    def mark(agent_ids):
+        if workspace_store is not None and "id" in msg and not marked[0]:
+            workspace_store.record_routing(channel, msg["id"], list(agent_ids))
+            marked[0] = True
+
+    if msg.get("type", "chat") not in ("chat", "summary"):
+        mark([])            # system/join/leave/drafts: processed, nobody addressed
+    try:
+        await _handle_new_message_inner(msg, mark)
+    finally:
+        mark([])            # any early return or exception: processed, nobody addressed
+
+
+async def _handle_new_message_inner(msg: dict, mark):
     """Broadcast message to web clients + check for @mention triggers."""
     # For broadcast slash commands, suppress the raw message — only the expanded
     # version should appear. Delete from store if it was persisted (MCP path),
@@ -859,6 +884,11 @@ async def _handle_new_message(msg: dict):
         else:
             targets.append(t)
     targets = list(dict.fromkeys(targets))  # dedupe, preserve order
+
+    # Spec §4: record stable recipients for unread tracking (side table, not the message).
+    if msg_type in ("chat", "summary"):
+        tokens = router.mention_tokens(text)
+        mark(workspace_store.resolve_recipients(channel, tokens, targets) if workspace_store else [])
 
     if router.is_paused(channel):
         # Only emit the loop guard notice once per pause
@@ -1057,12 +1087,51 @@ def _on_registry_change():
         base_names = list(registry.get_bases().keys())
         # Only include active instances in routing (pending ones are inert)
         instance_names = registry.get_active_names()
-        all_names = list(set(base_names + instance_names))
-        router.update_agents(all_names)
+        all_names = set(base_names + instance_names)
+        if workspace_store is not None:
+            all_names |= set(workspace_store.member_names(include_archived=False))   # stopped members still parse
+        router.update_agents(sorted(all_names))
     # Broadcast to WebSocket clients
     if _event_loop:
         asyncio.run_coroutine_threadsafe(broadcast_agents(), _event_loop)
         asyncio.run_coroutine_threadsafe(broadcast_status(), _event_loop)
+
+
+def _channel_ids_above_mark(ws: dict) -> list[int]:
+    high = workspace_store.routing_high_water(ws["id"])
+    return [m["id"] for m in store.get_since(high, channel=ws["channel"])]
+
+
+def _replay_unrouted():
+    """Server start: messages persisted whose observer never finished (crash window,
+    including gaps left by out-of-order observers). Replay explicit mentions for
+    them. Broadcast recipients depend on who was running at the time and cannot be
+    reconstructed; those messages get an empty routing entry so the mark can move."""
+    if workspace_store is None or store is None or router is None:
+        return
+    for ws in workspace_store.list(include_archived=False):
+        ids = _channel_ids_above_mark(ws)
+        pending = set(workspace_store.unrouted_ids(ws["id"], ids))
+        for m in store.get_since(workspace_store.routing_high_water(ws["id"]), channel=ws["channel"]):
+            if m["id"] not in pending:
+                continue
+            if m.get("type", "chat") in ("chat", "summary"):
+                tokens = router.mention_tokens(m.get("text", ""))
+                explicit = [t for t in tokens if t not in ("all", "both")]
+                agent_ids = workspace_store.resolve_recipients(ws["channel"], explicit, [])
+            else:
+                agent_ids = []
+            workspace_store.record_routing(ws["channel"], m["id"], agent_ids)
+        workspace_store.compact_routing(ws["id"], ids)
+
+
+def _compact_routing_marks():
+    """Called from the launcher tick: move each workspace's mark through contiguous
+    processed ids so routing_done stays a few seconds long."""
+    if workspace_store is None or store is None:
+        return
+    for ws in workspace_store.list(include_archived=False):
+        workspace_store.compact_routing(ws["id"], _channel_ids_above_mark(ws))
 
 
 # --- WebSocket ---
