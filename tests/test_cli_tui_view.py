@@ -566,10 +566,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_hidden_focus_request_does_not_corrupt_focus_name(self):
         async with tui_harness(size=(70, 16)) as ui:
             before = ui.state.focus_name
-            try:
-                ui.view.focus_named('navigation')
-            except ValueError:
-                pass
+            self.assertFalse(ui.view.focus_named('navigation'))
             self.assertEqual(ui.state.focus_name, before)
 
     async def test_inspector_alt_sequence_does_not_close_or_leak(self):
@@ -681,3 +678,17 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             await ui.key('Escape')
             self.assertEqual(ui.focused_control, 'navigation')
             self.assertEqual(ui.state.focus_name, 'navigation')
+
+
+class ActivityComposerFocusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_close_keeps_current_composer_focus(self):
+        async with tui_harness() as ui:
+            ui.view.focus_named('navigation')
+            await ui.key('F5')
+            await ui.key('Tab')
+            await ui.key('Tab')
+            self.assertEqual(ui.focused_control, 'composer')
+            await ui.paste('typing')
+            await ui.key('F5')
+            self.assertEqual(ui.focused_control, 'composer')
+            self.assertEqual(ui.view.composer.text, 'typing')

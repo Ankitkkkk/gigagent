@@ -6,6 +6,10 @@ import re
 from bisect import bisect_right
 
 from prompt_toolkit.application.current import get_app
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
+from prompt_toolkit.mouse_events import MouseEventType
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer, Float,
@@ -19,7 +23,7 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Button, Frame, TextArea
 
-from cli_tui_state import body_text, clip_cells, label_text, layout_mode
+from cli_tui_state import MAX_DRAFT_BYTES, body_text, clip_cells, label_text, layout_mode
 from cli_view_contracts import channel_transcript
 from cli_workspace_chat import _timestamp
 from cli_workspaces import WINDOWS_TMUX_ERROR
@@ -77,9 +81,45 @@ class _ConversationControl(UIControl):
     def __init__(self, view):
         self.width, self.height = 1, 1
         self.view = view
+        self._visible_start = (None, 0)
 
     def is_focusable(self):
         return True
+
+    def mouse_handler(self, mouse_event):
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            self.view.focus_named('conversation')
+            self.view.state.viewport.mark_seen()
+            self.view._app().invalidate()
+            return None
+        return NotImplemented
+
+    def page(self, direction):
+        ids = self.view._transcript_ids()
+        if not ids:
+            return
+        ident, offset = self._visible_start
+        index = ids.index(ident) if ident in ids else 0
+        remaining = max(1, self.height)
+
+        def count(position):
+            message = self.view._message(ids[position])
+            return sum(1 for _ in self._message_lines(message, self.width)) if message else 1
+        if direction < 0:
+            while remaining > offset and index > 0:
+                remaining -= offset
+                index -= 1
+                offset = count(index)
+            offset = max(0, offset - remaining)
+        else:
+            offset += remaining
+            length = count(index)
+            while offset >= length and index + 1 < len(ids):
+                offset -= length
+                index += 1
+                length = count(index)
+            offset = min(offset, max(0, length - 1))
+        self.view.state.viewport.anchor(ids[index], self.view.client.messages, line_offset=offset)
 
     def create_content(self, width, height):
         self.width, self.height = width, height
@@ -113,8 +153,10 @@ class _ConversationControl(UIControl):
                 message = self.view._message(ident)
                 if message is None:
                     continue
-                tail = deque(self._message_lines(message, width), maxlen=height - len(lines))
-                lines.extendleft(reversed(tail))
+                tail = deque(enumerate(self._message_lines(message, width)), maxlen=height - len(lines))
+                if tail:
+                    self._visible_start = (ident, tail[0][0])
+                lines.extendleft(line for _, line in reversed(tail))
                 if len(lines) >= height:
                     break
         else:
@@ -123,10 +165,26 @@ class _ConversationControl(UIControl):
                 message = self.view._message(ident)
                 if message is None:
                     continue
-                for line in self._message_lines(message, width):
+                offset = viewport.line_offset if ident == viewport.anchor_id else 0
+                message_lines = self._message_lines(message, width)
+                # Clamp a saved offset if a message edit shortened its body.
+                tail = deque(maxlen=1)
+                visible = False
+                for line_index, line in enumerate(message_lines):
+                    tail.append((line_index, line))
+                    if line_index < offset:
+                        continue
+                    if not lines:
+                        self._visible_start = (ident, line_index)
+                    visible = True
                     lines.append(line)
                     if len(lines) >= height:
                         return list(lines)
+                if not visible and tail:
+                    line_index, line = tail[0]
+                    self._visible_start = (ident, line_index)
+                    viewport.line_offset = line_index
+                    lines.append(line)
         return list(lines) or ['No messages yet. Write in Message below.']
 
 
@@ -147,6 +205,230 @@ class _ActivityControl(UIControl):
         visible = lines[self.view._activity_line:self.view._activity_line + self.height]
         return UIContent(get_line=lambda index: [('', visible[index])],
                          line_count=len(visible), show_cursor=False)
+
+
+class ContextualCompleter(Completer):
+    """Resolve suggestions from current authoritative models on every request."""
+
+    common = {'/agents': 'Show agents', '/channels': 'List channels',
+              '/history': 'Show history', '/jobs': 'List jobs', '/rules': 'List rules',
+              '/help': 'Show command help', '/quit': 'Quit chat'}
+    session = {'/sessions': 'Choose a session', '/spawn': 'Start a configured provider',
+               '/resume': 'Resume a stopped agent', '/stop': 'Stop a session agent',
+               '/attach': 'Open an agent terminal', '/retry': 'Retry unread delivery',
+               '/unread': 'Inspect unread messages', '/rename': 'Rename this session',
+               '/archive': 'Archive this session'}
+
+    def __init__(self, view):
+        self.view = view
+
+    def get_completions(self, document, complete_event):
+        client, controller = self.view.client, self.view.controller
+        before = document.text_before_cursor
+        word = re.search(r'\S*$', before).group()
+        prior = before[:-len(word)] if word else before
+        parts = prior.split()
+        commands = dict(self.common)
+        if controller.plain_channel:
+            commands.update({'/join': 'Switch channel', '/create': 'Create channel'})
+        else:
+            commands['/sessions'] = self.session['/sessions']
+            if controller.workspace is not None:
+                commands.update(self.session)
+        agents = (controller.workspace or {}).get('agents', [])
+        handles = [agent.get('registry_name') or agent['agent_id'] for agent in agents]
+        candidates = {}
+        if not parts and word.startswith('/'):
+            candidates = commands
+        elif word.startswith('@'):
+            candidates = {'@' + name: 'Mention agent' for name in
+                          dict.fromkeys([*client.agent_names, *handles])}
+        elif parts and parts[0] in commands:
+            command = parts[0]
+            if controller.plain_channel and command == '/join' and len(parts) == 1:
+                candidates = {(('#' if word.startswith('#') else '') + name): 'Channel'
+                              for name in client.channels}
+            elif not controller.plain_channel and controller.workspace is not None:
+                if command == '/spawn' and len(parts) == 1:
+                    candidates = {name: 'Configured provider' for name in controller.providers}
+                elif command in ('/resume', '/stop', '/attach', '/retry', '/unread', '/history') and len(parts) == 1:
+                    candidates = {name: 'Session agent' for name in handles}
+                elif (command == '/history' and len(parts) == 2 or
+                      command == '/spawn' and parts[-1] == '--history-mode'):
+                    candidates = {'literal': 'Literal history', 'none': 'No history'}
+        elif word.startswith('#'):
+            candidates = {'#' + name: 'Channel' for name in client.channels}
+        for value, description in candidates.items():
+            if value.startswith(word):
+                yield Completion(value, start_position=-len(word),
+                                 display=[('', label_text(value))],
+                                 display_meta=[('', label_text(description))])
+
+
+class ComposerActions:
+    """Bind one persistent buffer to bounded destination drafts and submission."""
+
+    def __init__(self, view, state, submit, notice):
+        self.view, self.state, self.submit, self.notice = view, state, submit, notice
+        self.key = None
+        self.edit_version = 0
+        self.sending = False
+        self._restoring = False
+        self.buffer = view.composer.buffer
+        self._accepted = Document()
+        self.buffer.on_text_changed += self._edited
+        self.buffer.on_cursor_position_changed += self._cursor_changed
+        previous_read_only = self.buffer.read_only
+        self.buffer.read_only = Condition(lambda: self.key is None or previous_read_only())
+        self.buffer.completer = ContextualCompleter(view)
+        self.buffer.complete_while_typing = Condition(lambda: self.key is not None)
+        self._bindings()
+        self.switch_draft(self.destination_key(), mandatory=True)
+
+    def destination_key(self):
+        """Return authoritative selection identity; None disables the composer."""
+        if self.view.controller.plain_channel:
+            return ('channel', self.view.client.channel)
+        workspace = self.view.controller.workspace
+        return ('session', workspace['id']) if workspace is not None else None
+
+    def rename_channel(self, old_name, new_name):
+        old_key, new_key = ('channel', old_name), ('channel', new_name)
+        if not self.state.drafts.rename(old_key, new_key):
+            self.notice('Channel draft collision; both drafts were kept')
+            return False
+        if self.key == old_key:
+            self.key = new_key
+            self.edit_version += 1
+        self.view._app().invalidate()
+        return True
+
+    def _restore(self, document):
+        self._restoring = True
+        try:
+            self.buffer.set_document(document, bypass_readonly=True)
+            self._accepted = document
+        finally:
+            self._restoring = False
+
+    def _edited(self, buffer):
+        if self._restoring:
+            return
+        document = buffer.document
+        if self.key is None or not self.state.drafts.set(
+                self.key, document.text, cursor=document.cursor_position):
+            too_large = len(document.text.encode('utf-8', 'surrogatepass')) > MAX_DRAFT_BYTES
+            self._restore(self._accepted)
+            self.notice('Draft exceeds 64 KiB UTF-8; edit rejected' if too_large else
+                        self.state.drafts.capacity_notice)
+            return
+        self.edit_version += 1
+        self._accepted = document
+
+    def _cursor_changed(self, buffer):
+        if not self._restoring:
+            self._accepted = buffer.document
+            if self.key is not None:
+                self.state.drafts.set_cursor(self.key, buffer.cursor_position)
+
+    def switch_draft(self, key, *, mandatory=False):
+        """Bind admitted destination text/cursor; caller owns selection commits."""
+        if key == self.key:
+            return True
+        if key is not None and not self.state.drafts.can_open(key, mandatory=mandatory):
+            self.notice(self.state.drafts.capacity_notice)
+            return False
+        self.key = key
+        self.edit_version += 1
+        self._restore(Document(self.state.drafts.get(key), self.state.drafts.get_cursor(key))
+                      if key is not None else Document())
+        self.view._app().invalidate()
+        return True
+
+    async def send(self):
+        if self.sending or self.key is None or not self.buffer.text.strip():
+            return
+        if self.key != self.destination_key():
+            self.notice('Draft destination changed; select its destination before sending')
+            return
+        self.sending = True
+        key, text = self.key, self.buffer.text
+        revision = self.state.drafts.revision(key)
+        try:
+            outcome = await self.submit(text)
+            if outcome.status == 'completed':
+                if revision == self.state.drafts.revision(key):
+                    self.state.drafts.clear(key)
+                    if key == self.key:
+                        self.edit_version += 1
+                        self._restore(Document())
+                elif outcome.sent:
+                    self.notice('The earlier message was sent; your current draft was kept')
+            if not outcome.keep_running:
+                await self.view.callbacks['quit']()
+        finally:
+            self.sending = False
+            self.view._app().invalidate()
+
+    async def clear_draft(self):
+        key, version = self.key, self.edit_version
+        if key is None or not self.buffer.text:
+            return False
+        if not await self.view.dialogs.confirm('Clear draft? [y/N]', default=False, escape=False):
+            return False
+        if key != self.key or version != self.edit_version:
+            return False
+        self.state.drafts.clear(key)
+        self.edit_version += 1
+        self._restore(Document())
+        return True
+
+    def _bindings(self):
+        bindings = self.view.key_bindings
+        focused = has_focus(self.view.composer) & Condition(lambda:
+            self.view.screen_mode != 'small' and self.view.dialogs.future is None)
+        editable = focused & Condition(lambda: self.key is not None)
+
+        @bindings.add('enter', filter=focused)
+        def send(event):
+            completion = self.buffer.complete_state
+            if completion is not None:
+                selected = completion.current_completion or next(iter(completion.completions), None)
+                if selected is not None:
+                    self.buffer.apply_completion(selected)
+                else:
+                    self.buffer.cancel_completion()
+            elif self.key is not None:
+                event.app.create_background_task(self.send())
+
+        @bindings.add('escape', 'enter', filter=editable)
+        def newline(event):
+            self.buffer.insert_text('\n')
+
+        @bindings.add('tab', filter=editable & Condition(lambda: self.buffer.complete_state is not None))
+        def complete(event):
+            self.buffer.complete_next()
+
+        @bindings.add('c-c', filter=focused)
+        def cancel(event):
+            if self.buffer.complete_state is not None:
+                # Keep the visible candidate, rather than restoring pre-completion text.
+                self.buffer.complete_state = None
+            else:
+                self.view._cancel_overlay()
+
+        @bindings.add('escape', filter=focused,
+                      eager=Condition(lambda: not self.view._app().key_processor.input_queue))
+        def escape(event):
+            if self.buffer.complete_state is not None:
+                self.buffer.complete_state = None
+
+        @bindings.add('c-d', filter=focused)
+        def delete_or_quit(event):
+            if not self.buffer.text:
+                event.app.create_background_task(self.view.callbacks['quit']())
+            elif self.key is not None:
+                self.buffer.delete()
 
 
 class TuiView:
@@ -175,7 +457,7 @@ class TuiView:
         self._activity_line = 0
         self._activity_max_line = 0
         self._activity_focus = None
-        self.composer = TextArea(multiline=True, height=3, wrap_lines=True,
+        self.composer = TextArea(multiline=True, height=self._composer_height, wrap_lines=True,
                                  read_only=Condition(lambda: self.screen_mode == 'small'),
                                  input_processors=[_SafeComposer()])
         self.conversation = _ConversationControl(self)
@@ -219,9 +501,19 @@ class TuiView:
         self.root = FloatContainer(content=HSplit([
             DynamicContainer(lambda: resize_notice if self.screen_mode == 'small'
                              else wide if self.screen_mode == 'wide' else main), notice_strip, footer]),
-            floats=[Float(content=DynamicContainer(lambda: self.dialogs.body))],
+            floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=6,
+                        extra_filter=has_focus(self.composer) & Condition(lambda:
+                            self.screen_mode != 'small' and self.dialogs.future is None))),
+                    Float(content=DynamicContainer(lambda: self.dialogs.body))],
             key_bindings=self.key_bindings)
         self.refresh()
+
+    def _composer_height(self):
+        width = max(1, self._app().output.get_size().columns -
+                    (22 if self.screen_mode == 'wide' else 0) - 2)
+        lines = sum(max(1, (get_cwidth(line) + width - 1) // width)
+                    for line in body_text(self.composer.text).split('\n'))
+        return min(6, max(3, lines))
 
     def _app(self):
         try:
@@ -329,14 +621,17 @@ class TuiView:
         return self.focus_named('activity')
 
     def hide_activity(self):
-        """Restore a visible prior control; otherwise choose the composer."""
+        """Keep current visible focus; otherwise restore prior focus or composer."""
         if not self.activity_visible or self.screen_mode == 'small':
             return False
+        current = self._app().layout.current_control
         self.activity_visible = False
         saved, name = self._activity_focus
         self._activity_focus = None
         visible = [node.content for node in walk(self.root, skip_hidden=True) if isinstance(node, Window)]
-        if saved in visible:
+        if current is not self.activity and current in visible:
+            self._app().invalidate()
+        elif saved in visible:
             self._app().layout.focus(saved)
             self.state.focus_name = name
             self._app().invalidate()
@@ -476,6 +771,15 @@ class TuiView:
         return [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
                  ' · F3 Agents · F4 Commands · F5 Activity · F1 Help · Ctrl+Q Quit')]
 
+    def _cancel_overlay(self):
+        if self.screen_mode == 'small':
+            return
+        if self.activity_visible:
+            self.hide_activity()
+        elif self.inspecting:
+            self.inspecting = False
+            self._app().invalidate()
+
     def _bindings(self):
         bindings = KeyBindings()
 
@@ -499,7 +803,7 @@ class TuiView:
 
         @bindings.add('c-c')
         def preserve(event):
-            pass
+            self._cancel_overlay()
 
         @bindings.add('tab')
         @bindings.add('s-tab')
@@ -563,6 +867,18 @@ class TuiView:
                       eager=Condition(lambda: not self._app().key_processor.input_queue))
         def close_inspector(event):
             self.inspecting = False
+
+        @bindings.add('pageup', filter=has_focus(self.conversation))
+        @bindings.add('pagedown', filter=has_focus(self.conversation))
+        @bindings.add('end', filter=has_focus(self.conversation))
+        def scroll_conversation(event):
+            if self.screen_mode == 'small':
+                return
+            key = event.key_sequence[-1].key
+            if key == 'end':
+                self.state.viewport.mark_seen()
+            else:
+                self.conversation.page(-1 if key == 'pageup' else 1)
 
         @bindings.add('up', filter=has_focus(self.activity))
         @bindings.add('down', filter=has_focus(self.activity))

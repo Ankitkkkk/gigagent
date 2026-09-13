@@ -71,6 +71,7 @@ class DraftStore:
 
     def __init__(self):
         self._entries = OrderedDict()
+        self._revision = 0
 
     def __len__(self):
         return len(self._entries)
@@ -102,18 +103,41 @@ class DraftStore:
         position = old[1] if cursor is None and old is not None else (
             len(text) if cursor is None else cursor)
         position = max(0, min(len(text), int(position)))
-        self._entries[key] = (text, position)
+        if old is None or old[0] != text:
+            self._revision += 1
+            revision = self._revision
+        else:
+            revision = old[2]
+        self._entries[key] = (text, position, revision)
         return True
+
+    def revision(self, key):
+        """Identity of this nonempty text snapshot, or None when absent."""
+        entry = self._entries.get(key)
+        return entry[2] if entry is not None else None
 
     def clear(self, key):
         self._entries.pop(key, None)
+
+    def rename(self, old_key, new_key):
+        """Move one raw draft and cursor atomically, without consuming capacity."""
+        if old_key == new_key:
+            return True
+        if new_key in self._entries:
+            return False
+        if old_key not in self._entries:
+            return True
+        text, cursor, _ = self._entries.pop(old_key)
+        self._revision += 1
+        self._entries[new_key] = (text, cursor, self._revision)
+        return True
 
     def set_cursor(self, key, position):
         entry = self._entries.get(key)
         if entry is None:
             return
-        text, _ = entry
-        self._entries[key] = (text, max(0, min(len(text), int(position))))
+        text, _, revision = entry
+        self._entries[key] = (text, max(0, min(len(text), int(position))), revision)
 
 
 class NoticeStore:
@@ -148,6 +172,7 @@ class Viewport:
 
     def __init__(self, anchor_id=None, follow=True):
         self.anchor_id = anchor_id
+        self.line_offset = 0
         self.follow = follow
         self.new_ids = set()
         self._known_ids = ()
@@ -166,8 +191,10 @@ class Viewport:
                 self.new_ids.clear()
             else:
                 self.anchor_id = replacement
+                self.line_offset = 0
 
         if self.follow:
+            self.line_offset = 0
             self.new_ids.clear()
             self.anchor_id = current_ids[-1] if current_ids else None
         elif self._initialized and not reconnect:
@@ -189,14 +216,16 @@ class Viewport:
                     return message_id
         return None
 
-    def anchor(self, message_id, messages):
+    def anchor(self, message_id, messages, *, line_offset=0):
         if message_id not in messages:
             return
         self.anchor_id = message_id
+        self.line_offset = max(0, int(line_offset))
         self.follow = False
 
     def mark_seen(self):
         self.follow = True
+        self.line_offset = 0
         self.new_ids.clear()
         self.anchor_id = self._known_ids[-1] if self._known_ids else None
 

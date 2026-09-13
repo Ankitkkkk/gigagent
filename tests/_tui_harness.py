@@ -13,7 +13,7 @@ from prompt_toolkit.output.vt100 import Vt100_Output
 from cli import ChatClient
 from cli_tui_dialogs import DialogHost
 from cli_tui_state import TuiState
-from cli_tui_view import TuiView
+from cli_tui_view import ComposerActions, TuiView
 from cli_view_contracts import ActionOutcome, SubmitOutcome
 from cli_workspace_chat import WorkspaceChatController
 
@@ -28,7 +28,7 @@ class TuiHarness:
 
     sequences = {'F1': '\x1bOP', 'F2': '\x1bOQ', 'F3': '\x1bOR', 'F4': '\x1bOS', 'F5': '\x1b[15~',
                  'Enter': '\r', 'Escape': '\x1b', 'CtrlQ': '\x11', 'CtrlC': '\x03',
-                 'Tab': '\t', 'ShiftTab': '\x1b[Z', 'Home': '\x1b[H', 'End': '\x1b[F',
+                 'CtrlD': '\x04', 'AltEnter': '\x1b\r', 'Left': '\x1b[D', 'Right': '\x1b[C', 'CtrlSpace': '\x00', 'Tab': '\t', 'ShiftTab': '\x1b[Z', 'Home': '\x1b[H', 'End': '\x1b[F',
                  'PageUp': '\x1b[5~', 'PageDown': '\x1b[6~', 'Up': '\x1b[A', 'Down': '\x1b[B'}
 
     def __init__(self, size, client, controller, pipe):
@@ -155,6 +155,17 @@ class TuiHarness:
         """Escape includes the configured 50ms terminal escape decoding timeout."""
         await self._send(self.sequences[name])
 
+    def bind_submit(self, submit):
+        self.submit_mock = submit
+        self.callbacks['submit'] = submit
+        if not hasattr(self, 'composer_actions'):
+            self.composer_actions = ComposerActions(self.view, self.state, submit, self.notice)
+        else:
+            self.composer_actions.submit = submit
+
+    async def paste(self, text):
+        await self.type_text(text)
+
     async def type_text(self, text):
         await self._send('\x1b[200~' + text + '\x1b[201~')
 
@@ -165,7 +176,7 @@ class TuiHarness:
     async def _send(self, text):
         count = self.key_count
         self.input_processed.clear()
-        self.pipe.send_text(text)
+        await asyncio.to_thread(self.pipe.send_text, text)
         async def processed():
             while self.key_count == count:
                 await self.input_processed.wait()
