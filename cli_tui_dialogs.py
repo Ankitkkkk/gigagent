@@ -4,7 +4,9 @@ import asyncio
 from bisect import bisect_right
 from dataclasses import dataclass
 
-from prompt_toolkit.filters import has_focus
+from prompt_toolkit.filters import Condition, has_focus
+from prompt_toolkit.application.current import get_app
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
 from prompt_toolkit.layout import FloatContainer, HSplit, Window
@@ -69,10 +71,18 @@ class DialogHost:
     def _bindings(self, cancel_value):
         bindings = KeyBindings()
 
-        @bindings.add('escape', eager=True)
+        # A queued continuation belongs to Alt editing. Let native multi-key
+        # bindings consume it; only a lone Escape bypasses timeoutlen.
+        @bindings.add('escape', eager=Condition(lambda: not get_app().key_processor.input_queue))
         @bindings.add('c-c', eager=True)
         def cancel(event):
             self.finish(cancel_value)
+
+        @bindings.add('escape', Keys.Any)
+        def unknown_alt(event):
+            # Specific native Alt bindings outrank this wildcard fallback.
+            # Unknown Alt sequences must not cancel and leak into the composer.
+            pass
 
         bindings.add('tab')(focus_next)
         bindings.add('s-tab')(focus_previous)
@@ -82,6 +92,8 @@ class DialogHost:
         if self.future is not None:
             return cancel_value
         app = self.app_getter()
+        if app is None or not app.is_running:
+            return cancel_value
         future = asyncio.get_running_loop().create_future()
         self.future = future
         self._saved_focus = app.layout.current_control
@@ -89,6 +101,7 @@ class DialogHost:
         self.float = FloatContainer(content=content, floats=[], modal=True,
                                     key_bindings=bindings)
         try:
+            app.layout.update_parents_relations()
             app.layout.focus(focus)
             self.invalidate()
             return await future
@@ -97,8 +110,11 @@ class DialogHost:
                 self.finish(cancel_value)
 
     def restore_focus(self):
-        layout = self.app_getter().layout
         saved, self._saved_focus = self._saved_focus, None
+        app = self.app_getter()
+        if app is None or not app.is_running:
+            return
+        layout = app.layout
         controls = [container.content for container in walk(layout.container, skip_hidden=True)
                     if isinstance(container, Window)]
         if saved in controls and saved.is_focusable():
@@ -115,10 +131,12 @@ class DialogHost:
             return
         self.float = None
         self._cancel_value = None
-        self.restore_focus()
-        self.invalidate()
-        if not future.done():
-            future.set_result(value)
+        try:
+            self.restore_focus()
+            self.invalidate()
+        finally:
+            if not future.done():
+                future.set_result(value)
 
     def cancel(self):
         """Cancel any open dialog, including during application shutdown."""
