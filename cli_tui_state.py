@@ -91,7 +91,7 @@ class DraftStore:
 
     def set(self, key, text, *, cursor=None):
         text = str(text)
-        if len(text.encode('utf-8')) > MAX_DRAFT_BYTES:
+        if len(text.encode('utf-8', 'surrogatepass')) > MAX_DRAFT_BYTES:
             return False
         if not text:
             self.clear(key)
@@ -131,7 +131,13 @@ class NoticeStore:
         return tuple(self._lines)
 
     def add(self, text):
-        for line in body_text(text).split('\n'):
+        text = body_text(text)
+        if not text:
+            return
+        lines = text.split('\n')
+        if lines[-1] == '':
+            lines.pop()
+        for line in lines:
             if len(self._lines) == self._lines.maxlen:
                 self.omitted += 1
             self._lines.append(line)
@@ -154,7 +160,12 @@ class Viewport:
         previous = set(previous_ids)
 
         if not self.follow and self.anchor_id not in current:
-            self.anchor_id = self._replacement_anchor(previous_ids, current)
+            replacement = self._replacement_anchor(previous_ids, current)
+            if replacement is None:
+                self.follow = True
+                self.new_ids.clear()
+            else:
+                self.anchor_id = replacement
 
         if self.follow:
             self.new_ids.clear()

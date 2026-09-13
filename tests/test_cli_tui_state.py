@@ -112,16 +112,34 @@ class DraftStoreTests(unittest.TestCase):
         self.assertEqual(drafts.get(('session', '0')), 'edited')
         self.assertEqual(len(drafts), 50)
 
-    def test_utf8_limit_accepts_boundary_and_preserves_previous_on_refusal(self):
+    def test_utf8_limit_accepts_exact_boundary_and_preserves_surrogates(self):
         drafts = DraftStore()
         key = ('channel', 'general')
-        boundary = 'é' * 32768
+        boundary = 'a' * 65533 + '\udc80'
+        oversize = boundary + 'b'
+        self.assertEqual(len(boundary.encode('utf-8', 'surrogatepass')), 65536)
+        self.assertEqual(len(oversize.encode('utf-8', 'surrogatepass')), 65537)
         self.assertTrue(drafts.set(key, boundary, cursor=len(boundary)))
-        self.assertFalse(drafts.set(key, boundary + 'é', cursor=1))
+        self.assertEqual(drafts.get(key), boundary)
+        self.assertEqual(
+            drafts.get(key).encode('utf-8', 'surrogatepass').decode(
+                'utf-8', 'surrogatepass'), boundary)
+        self.assertFalse(drafts.set(key, oversize, cursor=1))
         self.assertEqual(drafts.get(key), boundary)
         self.assertEqual(drafts.get_cursor(key), len(boundary))
-        self.assertFalse(drafts.set(('channel', 'other'), 'é' * 32769))
-        self.assertEqual(drafts.get(('channel', 'other')), '')
+
+    def test_clearing_at_capacity_frees_space_for_new_destinations(self):
+        drafts = DraftStore()
+        for n in range(50):
+            drafts.set(('session', str(n)), 'unsent')
+        drafts.set(('session', '0'), '')
+        self.assertTrue(drafts.can_open(('session', 'new')))
+        self.assertTrue(drafts.set(('session', 'new'), 'draft'))
+        self.assertEqual(len(drafts), 50)
+        drafts.clear(('session', '1'))
+        self.assertTrue(drafts.can_open(('session', 'another')))
+        self.assertTrue(drafts.set(('session', 'another'), 'draft'))
+        self.assertEqual(len(drafts), 50)
 
     def test_empty_text_removes_entry_and_cursor(self):
         drafts = DraftStore()
@@ -166,6 +184,14 @@ class DraftStoreTests(unittest.TestCase):
 
 
 class NoticeStoreTests(unittest.TestCase):
+    def test_empty_add_and_terminal_newline_do_not_store_blank_lines(self):
+        notices = NoticeStore()
+        notices.add('')
+        notices.add('first\n')
+        notices.add('second\n\nthird\n')
+        self.assertEqual(notices.lines, ('first', 'second', '', 'third'))
+        self.assertEqual(notices.omitted, 0)
+
     def test_notices_split_sanitize_and_never_write_stdout(self):
         notices = NoticeStore()
         output = io.StringIO()
@@ -209,6 +235,14 @@ class ViewportTests(unittest.TestCase):
         self.assertEqual(viewport.anchor_id, 3)
         self.assertEqual(viewport.new_ids, set())
 
+    def test_following_stays_clear_after_initial_sync(self):
+        viewport = Viewport()
+        viewport.sync(self.messages(1), changed_ids=(1,))
+        viewport.sync(self.messages(1, 2), changed_ids=(2,))
+        self.assertTrue(viewport.follow)
+        self.assertEqual(viewport.anchor_id, 2)
+        self.assertEqual(viewport.new_ids, set())
+
     def test_unfollowed_view_counts_only_new_changed_ids(self):
         viewport = Viewport()
         viewport.sync(self.messages(1, 2, 3))
@@ -239,6 +273,28 @@ class ViewportTests(unittest.TestCase):
         viewport.anchor(4, self.messages(1, 3, 4))
         viewport.sync(self.messages(1, 3), deleted_ids=(4,))
         self.assertEqual(viewport.anchor_id, 3)
+
+    def test_deleted_anchor_without_survivor_resumes_following(self):
+        viewport = Viewport()
+        viewport.sync(self.messages(1))
+        viewport.anchor(1, self.messages(1))
+        viewport.sync(self.messages(1, 2), changed_ids=(2,))
+        self.assertEqual(viewport.new_ids, {2})
+        viewport.sync(self.messages(3), changed_ids=(3,), deleted_ids=(1, 2))
+        self.assertTrue(viewport.follow)
+        self.assertEqual(viewport.anchor_id, 3)
+        self.assertEqual(viewport.new_ids, set())
+
+    def test_anchor_ignores_unknown_message_id(self):
+        viewport = Viewport()
+        messages = self.messages(1, 2)
+        viewport.sync(messages)
+        viewport.anchor(1, messages)
+        viewport.new_ids.add(2)
+        viewport.anchor(99, messages)
+        self.assertFalse(viewport.follow)
+        self.assertEqual(viewport.anchor_id, 1)
+        self.assertEqual(viewport.new_ids, {2})
 
     def test_anchor_recovery_uses_supplied_nonmonotonic_order(self):
         viewport = Viewport()
