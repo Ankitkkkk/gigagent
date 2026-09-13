@@ -161,8 +161,12 @@ class ChatClient:
             if event.get("action") != "delete" and "id" in data:
                 records.append(data)
         elif kind == "history":
-            for message in event.get("messages", []):
+            messages = event.get("messages", [])
+            for message in messages:
                 self.remember(message)
+            if messages:
+                # Invalidate presentation ordering without publishing partial history.
+                self.view_revision += 1
         elif kind == "history_complete":
             self.ready.set()
             self.history()

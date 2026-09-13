@@ -54,8 +54,13 @@ class ClientViewEventTests(unittest.TestCase):
 
     def test_history_completion_notifies_once_after_ready_and_without_printing(self):
         self.bind()
+        before_revision = self.client.view_revision
         self.client.handle_event({"type": "history", "messages": [message(2), message(1)]})
+        self.assertEqual(tuple(self.client.messages), (2, 1))
+        self.assertEqual(self.client.view_revision, before_revision + 1)
         self.assertEqual(self.observed, [])
+        self.client.handle_event({"type": "history", "messages": []})
+        self.assertEqual(self.client.view_revision, before_revision + 1)
         self.client.handle_event({"type": "history_complete"})
         event, cached, ready = self.observed[-1]
         self.assertEqual((event.kind, event.message_ids), ("history", (1, 2)))

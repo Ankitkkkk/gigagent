@@ -26,9 +26,10 @@ class _HarnessAPI:
 class TuiHarness:
     """Bounded render waits and controlled callbacks; no network or provider startup."""
 
-    sequences = {'F1': '\x1bOP', 'F2': '\x1bOQ', 'F3': '\x1bOR', 'F4': '\x1bOS',
+    sequences = {'F1': '\x1bOP', 'F2': '\x1bOQ', 'F3': '\x1bOR', 'F4': '\x1bOS', 'F5': '\x1b[15~',
                  'Enter': '\r', 'Escape': '\x1b', 'CtrlQ': '\x11', 'CtrlC': '\x03',
-                 'Tab': '\t', 'ShiftTab': '\x1b[Z', 'Up': '\x1b[A', 'Down': '\x1b[B'}
+                 'Tab': '\t', 'ShiftTab': '\x1b[Z', 'Home': '\x1b[H', 'End': '\x1b[F',
+                 'PageUp': '\x1b[5~', 'PageDown': '\x1b[6~', 'Up': '\x1b[A', 'Down': '\x1b[B'}
 
     def __init__(self, size, client, controller, pipe):
         self.size = Size(rows=size[1], columns=size[0])
@@ -75,7 +76,8 @@ class TuiHarness:
             layout=Layout(self.view.root, focused_element=self.view.composer),
             input=pipe, output=Vt100_Output(self.stream, get_size=lambda: self.size,
                                            enable_cpr=False),
-            full_screen=True, mouse_support=True, style=self.view.style, after_render=self._capture)
+            full_screen=True, mouse_support=True, key_bindings=self.view.global_key_bindings,
+            style=self.view.style, after_render=self._capture)
         self.key_count = 0
         self.input_processed = asyncio.Event()
         self.application.key_processor.after_key_press += self._key_processed
@@ -131,7 +133,7 @@ class TuiHarness:
     @property
     def focused_control(self):
         current = self.application.layout.current_control
-        for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session'):
+        for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity'):
             target = getattr(self.view, name)
             if current is getattr(target, 'control', target):
                 return name
@@ -171,9 +173,11 @@ class TuiHarness:
         await self.wait_render()
 
     async def resize(self, columns, rows):
+        before = self.render_count
         self.size = Size(rows=rows, columns=columns)
         self.application._on_resize()
-        await self.wait_render()
+        if self.render_count != before + 1:
+            raise AssertionError('resize must capture exactly one synchronous redraw')
 
     async def close(self):
         self.dialogs.cancel()
