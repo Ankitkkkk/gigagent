@@ -22,6 +22,16 @@ class WorkspaceCommandResult:
     workspace: dict | None = None
 
 
+@dataclass(frozen=True)
+class AttachTarget:
+    """Validated tmux target ready for foreground attachment."""
+
+    target: str
+    label: str
+    hint: str
+    nested: bool
+
+
 def _safe(value):
     return "".join(char for char in str(value)
                    if char.isprintable() and char != "\x1b")
@@ -91,8 +101,8 @@ def tmux_target(agent):
     return target
 
 
-def attach_agent(agent, *, runner=subprocess.run, output=print, shell_session=None):
-    """Hand over the terminal to an existing tmux session; never launch one."""
+def prepare_attach(agent, *, runner=subprocess.run, shell_session=None) -> AttachTarget:
+    """Validate and probe an existing tmux session without taking the terminal."""
     require_tmux_platform()
     if shell_session is not None and not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise CLIError('Attach requires a terminal')
@@ -106,13 +116,29 @@ def attach_agent(agent, *, runner=subprocess.run, output=print, shell_session=No
         if probe.returncode:
             raise CLIError(f'not running; resume with {hint}')
         nested = bool(os.environ.get('TMUX'))
-        result = runner(['tmux', 'switch-client' if nested else 'attach', '-t', target])
     except (OSError, subprocess.SubprocessError):
         # Process diagnostics may contain credentials or terminal controls.
         raise CLIError('Could not attach to the agent terminal. Check tmux and retry.') from None
-    if nested and result.returncode == 0:
+    return AttachTarget(target=target, label=label, hint=hint, nested=nested)
+
+
+def run_attach(target, *, runner=subprocess.run, output=print) -> int:
+    """Hand the terminal to a previously validated tmux target."""
+    try:
+        result = runner(['tmux', 'switch-client' if target.nested else 'attach',
+                         '-t', target.target])
+    except (OSError, subprocess.SubprocessError):
+        # Process diagnostics may contain credentials or terminal controls.
+        raise CLIError('Could not attach to the agent terminal. Check tmux and retry.') from None
+    if target.nested and result.returncode == 0:
         output('Switch back: tmux switch-client -l')
     return result.returncode
+
+
+def attach_agent(agent, *, runner=subprocess.run, output=print, shell_session=None):
+    """Hand over the terminal to an existing tmux session; never launch one."""
+    target = prepare_attach(agent, runner=runner, shell_session=shell_session)
+    return run_attach(target, runner=runner, output=output)
 
 
 def _selected_workspace(api, selector):
