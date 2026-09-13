@@ -485,8 +485,11 @@ class PtyTerminal:
             os.killpg(self.process.pid, signal.SIGWINCH)
 
     def output(self):
+        return self.output_bytes().decode('utf-8', errors='replace')
+
+    def output_bytes(self):
         with self.lock:
-            return bytes(self.raw).decode('utf-8', errors='replace')
+            return bytes(self.raw)
 
     def wait(self, predicate, *, timeout=15):
         import re

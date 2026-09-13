@@ -54,14 +54,14 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
 
     async def create_session(self, ui, name):
         await ui.activate_named('new_session')
-        await ui.wait_until(lambda: 'Session name:' in ui.screen_text())
+        await ui.wait_until(lambda: 'Session name:' in ui.screen_text(), timeout=15)
         await ui.type_text(name)
         await ui.key('Tab')
         await ui.key('Enter')
         await ui.wait_until(lambda: ui.controller.workspace is not None
                             and ui.controller.workspace['name'] == name, timeout=15)
         await asyncio.wait_for(ui.client.ready.wait(), 15)
-        await ui.wait_until(lambda: ui.focused_control == 'composer')
+        await ui.wait_until(lambda: ui.focused_control == 'composer', timeout=15)
         return ui.controller.workspace['id']
 
     async def test_real_session_message_switch_and_quit(self):
@@ -76,8 +76,10 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
             snapshot['agents'] = [dict(
                 agent_id='ag_synthetic_status', registry_name='qa-status', provider='kilo',
                 cwd=self.temp.name, last_state='running', native_session_id='NATIVE-SECRET-QA',
-                tmux_session='never-launch-synthetic', history_mode='none', history_state='done',
-                history_note=None, unread_count=0, last_error=None, last_launch=None)]
+                tmux_session='agentchattr-ag_synthetic_status', history_mode='none', history_state='done',
+                history_note=None, unread_count=0, last_error=None,
+                last_launch={'kind': 'spawn', 'nonce': 'synthetic-only',
+                             'at': '2026-09-13T00:00:00Z', 'pid': None})]
             ui.client.handle_event({'type': 'workspace', 'data': snapshot})
             await ui.wait_until(lambda: 'qa-status' in ui.screen_text())
             self.assertEqual(ui.view.composer.text, text)
@@ -87,11 +89,11 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
             await ui.key('Enter')
             await ui.wait_until(lambda: any(m.get('text') == text
                                            for m in ui.client.messages.values()), timeout=15)
-            await ui.wait_until(lambda: text in ui.screen_text())
+            await ui.wait_until(lambda: text in ui.screen_text(), timeout=15)
             self.assertEqual(ui.screen_text().count(text), 1)
             self.assertEqual(ui.view.composer.text, '')
             await ui.key('F2')
-            await ui.wait_until(lambda: 'Show archived' in ui.screen_text())
+            await ui.wait_until(lambda: 'Show archived' in ui.screen_text(), timeout=15)
             await ui.key('Escape')
             self.assertFalse(any(event[0] == 'checkpoint' for event in ui.events))
             await ui.key('F2')
@@ -112,9 +114,30 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([w['name'] for w in names], ['billing', 'frontend'])
 
 
-@unittest.skipIf(os.name == 'nt', 'Physical PTY smoke requires POSIX')
+@unittest.skipUnless(os.name != 'nt' and shutil.which('tmux'), 'Requires POSIX tmux')
 class _PtyCase(IsolatedCliServer):
     """Catches script-entry, VT input/resize, and real terminal ownership regressions."""
+
+    provider_commands = ('claude', 'codex', 'gemini', 'antigravity', 'agy', 'kimi',
+                         'qwen', 'kilo', 'codebuddy', 'copilot', 'minimax')
+
+    @classmethod
+    def environment_additions(cls):
+        # Applied by IsolatedCliServer BEFORE server startup/provider lookup.
+        cls.shim_directory = Path(cls.temp.name) / 'bin'
+        cls.shim_directory.mkdir()
+        cls.shim_log = Path(cls.temp.name) / 'inert-launches.txt'
+        script = (f'#!{sys.executable}\nimport os, sys\nfrom pathlib import Path\n'
+                  'with open(os.environ["TUI_INERT_LAUNCH_LOG"], "a") as log:\n'
+                  '    log.write(Path(sys.argv[0]).name + "\\n")\n'
+                  'print("INERT TUI AGENT READY", flush=True)\n'
+                  'for line in sys.stdin:\n    print("INERT INPUT", flush=True)\n')
+        for name in cls.provider_commands:
+            shim = cls.shim_directory / name
+            shim.write_text(script)
+            shim.chmod(0o755)
+        return {'PATH': str(cls.shim_directory) + os.pathsep + os.defpath,
+                'SHELL': '/bin/sh', 'TUI_INERT_LAUNCH_LOG': str(cls.shim_log)}
 
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory(prefix='agentchattr-tui-pty-')
@@ -129,6 +152,53 @@ class _PtyCase(IsolatedCliServer):
                                  AGENTCHATTR_UPLOAD_DIR=str(self.upload_dir))
         self.artifacts = Path(os.environ.get('TUI_QA_ARTIFACT_DIR', self.directory))
         self.artifacts.mkdir(parents=True, exist_ok=True)
+        resolved = {name: shutil.which(name, path=self.terminal_env['PATH'])
+                    for name in self.provider_commands}
+        for name, path in resolved.items():
+            self.assertEqual(path, str(self.shim_directory / name))
+        self.addCleanup(self.cleanup_tmux)
+        # Multiple shell-command arguments invoke this inert executable directly;
+        # the very first pane cannot enter the user's default shell startup files.
+        self.tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'qa-keeper',
+                  '/bin/sleep', '120')
+        self.tmux('set-option', '-g', 'default-shell', '/bin/sh')
+        self.assertEqual(self.tmux('show-option', '-gv', 'default-shell').stdout.strip(), '/bin/sh')
+        self.write_artifact(self._testMethodName + '.isolation.json', json.dumps({
+            'PATH': self.terminal_env['PATH'], 'provider_commands': resolved,
+            'default_shell': '/bin/sh', 'first_pane_argv': ['/bin/sleep', '120'],
+            'server_environment_has_same_PATH': self.env['PATH'] == self.terminal_env['PATH']}))
+
+    def tmux(self, *args, check=True):
+        result = subprocess.run(['tmux', *args], env=self.terminal_env,
+                                capture_output=True, text=True, timeout=5)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def cleanup_tmux(self):
+        self.tmux('kill-server', check=False)
+        self.poll(lambda: self.tmux('list-sessions', check=False).returncode != 0)
+        socket = Path(self.terminal_env['TMUX_TMPDIR']) / ('tmux-' + str(os.getuid())) / 'default'
+        # Only this fixture-owned path; TemporaryDirectory also owns it.
+        socket.unlink(missing_ok=True)
+        self.assertFalse(socket.exists())
+        self.write_artifact(self._testMethodName + '.tmux-cleanup.json', json.dumps({
+            'isolated_server_stopped': True, 'isolated_socket_removed': True}))
+
+    def archive_session(self, ident):
+        count = len(self.api.get(ident)['agents'])
+        self.api.action(ident, 'archive')
+        self.write_artifact(self._testMethodName + '.archive.json', json.dumps({
+            'agents_before_archive': count,
+            'inert_launches': self.shim_log.read_text().splitlines() if self.shim_log.exists() else [],
+            'archived': self.api.get(ident)['archived']}))
+
+    def write_artifact(self, name, text):
+        text = re.sub(r'([?&]token=)[^\s&\"\'<>]+', r'\1[REDACTED]', text,
+                      flags=re.IGNORECASE)
+        text = re.sub(r'(Session token:\s*)\S+', r'\1[REDACTED]', text,
+                      flags=re.IGNORECASE)
+        (self.artifacts / name).write_text(text.replace(self.token, '[REDACTED]'))
 
     def cli_command(self, *args):
         return [sys.executable, '-c', PTY_OBSERVER, str(self.capture_path), str(ROOT),
@@ -154,28 +224,50 @@ class _PtyCase(IsolatedCliServer):
         self.fail('Button not keyboard reachable: ' + caption)
 
     def palette(self, terminal, action):
-        self.press(terminal, 'F4', lambda s: 'Commands' in s['text'])
+        self.press(terminal, 'F4', lambda s: 'Commands' in s['text'] and 'Search:' in s['text'])
         self.paste(terminal, action)
         return self.press(terminal, 'Enter')
 
+    def focus_agent_cwd(self, terminal):
+        for _ in range(len(self.provider_commands) + 1):
+            if '(*) kilo' in self.screen(terminal)['text']:
+                break
+            self.press(terminal, 'Down')
+        else:
+            self.fail('Inert kilo provider cannot be selected')
+        self.assertIn('(*) kilo', self.screen(terminal)['text'])
+        return self.press(terminal, 'Tab')
+
     def save(self, terminal, label):
         snapshot = self.screen(terminal)
-        # Only isolated fixture content is captured. Redact auth tokens even on failure.
-        def redact(text):
-            text = re.sub(r'([?&]token=)[^\s&\"\'<>]+', r'\1[REDACTED]', text,
-                          flags=re.IGNORECASE)
-            return text.replace(self.token, '[REDACTED]')
-        (self.artifacts / (label + '.vt.txt')).write_text(redact(terminal.output()))
+        self.write_artifact(label + '.vt.txt', terminal.output())
         if terminal.process.poll() is not None:
             # Last renderer frame belongs to before exit; never label it as
             # post-restoration screen evidence.
-            (self.artifacts / (label + '.exit.json')).write_text(json.dumps({
+            self.write_artifact(label + '.exit.json', json.dumps({
                 'returncode': terminal.process.returncode, 'source': 'pty-process',
                 'restoration_assertions_passed': True}))
             return snapshot
-        (self.artifacts / (label + '.json')).write_text(redact(json.dumps(snapshot, ensure_ascii=False)))
-        (self.artifacts / (label + '.txt')).write_text(redact(snapshot['text']))
+        self.write_artifact(label + '.json', json.dumps(snapshot, ensure_ascii=False))
+        self.write_artifact(label + '.txt', snapshot['text'])
         return snapshot
+
+    @staticmethod
+    def activity_body(snapshot):
+        lines = snapshot['text'].splitlines()
+        for index, row in enumerate(lines):
+            if 'Activity · ' not in row or 'omitted · Esc Back' not in row:
+                continue
+            title = row.index('Activity · ')
+            left, right = row.rfind('┌', 0, title), row.find('┐', title)
+            if left < 0 or right < 0:
+                return ''
+            body = []
+            for line in lines[index + 1:]:
+                if len(line) > left and line[left] == '└':
+                    return '\n'.join(body)
+                body.append(line[left + 1:right])
+        return ''
 
     def assert_restored(self, terminal):
         import termios
@@ -184,6 +276,8 @@ class _PtyCase(IsolatedCliServer):
         self.assertEqual(termios.tcgetattr(terminal.slave), terminal.before_termios)
         self.assertIn('\x1b[?1049h', terminal.output())
         self.assertIn('\x1b[?1049l', terminal.output())
+        self.assertGreater(terminal.output().rfind('\x1b[?1049l'),
+                           terminal.output().rfind('\x1b[?1049h'))
         self.assertIn('\x1b[?25h', terminal.output())
         self.assertNotIn('Full-screen unavailable', terminal.output())
         self.assertNotIn('unexpected local error', terminal.output())
@@ -207,12 +301,13 @@ class TuiPtyIntegrationTests(_PtyCase):
             self.screen(terminal, lambda s: 'Session name:' in s['text'])
             self.paste(terminal, 'pty-controls')
             self.press(terminal, 'Enter', lambda s: 'Connected' in s['text'] and 'Session name:' not in s['text'])
+            session = next(w for w in self.api.list()['workspaces'] if w['name'] == 'pty-controls')
+            self.addCleanup(self.archive_session, session['id'])
             draft = 'first line\nsecond line'
             self.paste(terminal, draft)
-            self.press(terminal, 'Left')
+            self.press(terminal, 'Left', lambda s: s['buffer_cursor'] == len(draft) - 1)
             initial = self.save(terminal, 'pty-wide-120x30')
             self.assertEqual(initial['buffer_cursor'], len(draft) - 1)
-            session = next(w for w in self.api.list()['workspaces'] if w['name'] == 'pty-controls')
             self.assertEqual(self.json_command('read', '--session', session['id']), [])
             for columns, rows, label in ((80, 24, 'pty-compact-80x24'), (70, 16, 'pty-small-70x16')):
                 before = self.screen(terminal)['count']
@@ -236,18 +331,24 @@ class TuiPtyIntegrationTests(_PtyCase):
             self.paste(terminal, 'pty-controls')
             self.save(terminal, 'pty-navigation-search')
             self.press(terminal, 'Escape', lambda s: s['buffer'] == draft)
-            self.press(terminal, 'F5', lambda s: 'Activity' in s['text'])
+            self.press(terminal, 'F5', lambda s: 'Connected to ' in self.activity_body(s))
             self.save(terminal, 'pty-activity')
             self.press(terminal, 'Escape', lambda s: s['buffer'] == draft)
             self.palette(terminal, 'Add agent')
             self.screen(terminal, lambda s: 'Working directory:' in s['text'])
-            self.press(terminal, 'Tab')  # Provider radio -> working-directory field.
+            focused = self.focus_agent_cwd(terminal)
+            self.write_artifact('pty-provider-focus.json', json.dumps({
+                'selected_kilo': '(*) kilo' in focused['text'],
+                'focused_buffer': focused['buffer'], 'expected_cwd': str(ROOT)}))
+            self.assertEqual(focused['buffer'], str(ROOT),
+                             'Working-directory focus required before editing or submitting')
             terminal.send('\x01\x0b')
             self.screen(terminal, lambda s: s['buffer'] == '')
             self.paste(terminal, 'relative-invalid-cwd')
             self.press(terminal, 'Enter', lambda s: 'absolute existing directory' in s['text'])
             self.save(terminal, 'pty-validation-error')
             self.assertIn('relative-invalid-cwd', self.screen(terminal)['text'])
+            self.assertEqual(self.api.get(session['id'])['agents'], [])
             self.press(terminal, 'Escape', lambda s: s['buffer'] == draft)
             # Actual SGR press/release on visible sidebar button.
             current = self.screen(terminal)
@@ -271,25 +372,10 @@ class TuiPtyIntegrationTests(_PtyCase):
 
 @unittest.skipUnless(os.name != 'nt' and shutil.which('tmux'), 'Requires POSIX tmux')
 class TuiTmuxIntegrationTests(_PtyCase):
-    @classmethod
-    def environment_additions(cls):
-        directory = Path(cls.temp.name) / 'bin'
-        directory.mkdir()
-        shim = directory / 'kilo'
-        shim.write_text(f'#!{sys.executable}\nimport sys\n'
-                        'print("INERT TUI AGENT READY", flush=True)\n'
-                        'for line in sys.stdin:\n    print("INERT INPUT", flush=True)\n')
-        shim.chmod(0o755)
-        return {'PATH': str(directory) + os.pathsep + os.environ['PATH']}
-
     def setUp(self):
         super().setUp()
-        # Own server has no user tmux config. Every cleanup precedes launch.
-        self.addCleanup(self.cleanup_tmux)
-        self.tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'qa-keeper',
-                  'exec /bin/sleep 120')
         self.session = self.api.create(self._testMethodName)
-        self.addCleanup(self.api.action, self.session['id'], 'archive')
+        self.addCleanup(self.archive_session, self.session['id'])
         self.agent = self.api.action(self.session['id'], 'spawn', body={
             'provider': 'kilo', 'cwd': self.temp.name,
             'name': 'qa-inert-' + ('nested' if 'nested' in self._testMethodName else 'outside'),
@@ -304,24 +390,6 @@ class TuiTmuxIntegrationTests(_PtyCase):
                                     '-F', '#{pane_id}').stdout.strip()
         self.poll(lambda: 'INERT TUI AGENT READY' in self.tmux(
             'capture-pane', '-p', '-t', self.agent_pane).stdout)
-
-    def tmux(self, *args, check=True):
-        result = subprocess.run(['tmux', *args], env=self.terminal_env,
-                                capture_output=True, text=True, timeout=5)
-        if check:
-            self.assertEqual(result.returncode, 0, result.stderr)
-        return result
-
-    def cleanup_tmux(self):
-        self.tmux('kill-server', check=False)
-        self.poll(lambda: self.tmux('list-sessions', check=False).returncode != 0)
-        socket = Path(self.terminal_env['TMUX_TMPDIR']) / ('tmux-' + str(os.getuid())) / 'default'
-        # tmux may retain its socket inode after the server has exited. This is
-        # our fixture's private path, also owned by TemporaryDirectory cleanup.
-        socket.unlink(missing_ok=True)
-        self.assertFalse(socket.exists())
-        (self.artifacts / (self._testMethodName + '.tmux-cleanup.json')).write_text(json.dumps({
-            'isolated_server_stopped': True, 'isolated_socket_removed': True}))
 
     def clients(self):
         result = self.tmux('list-clients', '-F', '#{client_name}|#{session_name}', check=False)
@@ -338,7 +406,7 @@ class TuiTmuxIntegrationTests(_PtyCase):
     def prepare_draft(self, terminal):
         self.screen(terminal, lambda s: 'Connected' in s['text'] and 'qa-inert' in s['text'])
         self.paste(terminal, 'survives attachment')
-        self.press(terminal, 'Left')
+        self.press(terminal, 'Left', lambda s: s['buffer_cursor'] == len('survives attachment') - 1)
         return self.screen(terminal)['buffer_cursor']
 
     def finish_with_draft(self, terminal):
@@ -354,9 +422,13 @@ class TuiTmuxIntegrationTests(_PtyCase):
             self.open_attach(terminal)
             terminal.wait(lambda: self.target in self.clients().values())
             frozen = self.screen(terminal)['count']
+            raw_start = len(terminal.output_bytes())
             self.json_command('send', '--session', self.session['id'], 'received during outside attach')
             # Authenticated persisted send completes while foreground owns tty.
             self.assertEqual(self.screen(terminal)['count'], frozen)
+            attached_bytes = terminal.output_bytes()[raw_start:]
+            self.assertNotIn(b'received during outside attach', attached_bytes)
+            self.write_artifact('tmux-outside-attached.vt.txt', attached_bytes.decode('utf-8', errors='replace'))
             terminal.send('\x02d')
             restored = self.screen(terminal, lambda s: s['count'] > frozen
                                    and s['buffer'] == 'survives attachment'
@@ -394,13 +466,13 @@ class TuiTmuxIntegrationTests(_PtyCase):
                         and 'copied terminal message' in s['text'])
             self.assertEqual(self.screen(terminal)['buffer_cursor'], cursor)
             self.save(terminal, 'tmux-nested-returned')
-            self.press(terminal, 'F5', lambda s: 'Switch back: tmux switch-client -l' in s['text'])
+            self.press(terminal, 'F5', lambda s: 'Switch back: tmux switch-client -l' in self.activity_body(s))
             self.save(terminal, 'tmux-nested-guidance')
             self.press(terminal, 'Escape', lambda s: s['buffer'] == 'survives attachment')
             pane = self.tmux('list-panes', '-t', tui_session + ':', '-F', '#{pane_id}').stdout.strip()
             captured = self.tmux('capture-pane', '-p', '-t', pane).stdout
             self.assertIn('copied terminal message', captured)
-            (self.artifacts / 'tmux-nested-capture-pane.txt').write_text(captured)
+            self.write_artifact('tmux-nested-capture-pane.txt', captured)
             self.tmux('copy-mode', '-t', pane)
             self.tmux('send-keys', '-t', pane, '-X', 'history-top')
             self.tmux('send-keys', '-t', pane, '-X', 'start-of-line')
@@ -410,8 +482,10 @@ class TuiTmuxIntegrationTests(_PtyCase):
             self.tmux('send-keys', '-t', pane, '-X', 'copy-selection-and-cancel')
             copied = self.tmux('show-buffer').stdout
             self.assertIn('copied terminal message', copied)
-            (self.artifacts / 'tmux-native-selection-copy.txt').write_text(copied)
+            self.write_artifact('tmux-native-selection-copy.txt', copied)
             self.finish_with_draft(terminal)
             terminal.wait(lambda: tui_session not in self.clients().values())
             self.assertEqual(terminal.process.wait(timeout=15), 0)
             self.assertIn('\x1b[?1049l', terminal.output())
+            self.assertGreater(terminal.output().rfind('\x1b[?1049l'),
+                               terminal.output().rfind('\x1b[?1049h'))

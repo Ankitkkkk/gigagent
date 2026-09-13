@@ -199,6 +199,12 @@ send/switch/checkpoint coverage, actual `cli.py` script dispatch on a controllin
 PTY, resize/paste/mouse/Quit restoration, and outside/nested attach using an
 inert `kilo`. Nested tmux copy-mode tests terminal-native selection/copy;
 desktop clipboard and physical mouse behavior remain manual checks.
+All PTY cases replace inherited `PATH` before server startup with inert shims
+for supported provider commands plus the OS default system path. The Add-agent
+case explicitly selects `kilo`, verifies cwd focus before editing, and verifies
+that validation leaves the agent list empty. The first private tmux pane uses
+direct `/bin/sleep` argv; subsequent panes use `/bin/sh`, bypassing user shell
+startup files. Archive and private-server cleanup also cover failed assertions.
 Full-screen component and application tests use prompt-toolkit pipe input with
 captured VT screens from `tests/_tui_harness.py`. For isolated PTY QA, preserve
 the real CLI entry, terminal dimensions, input bytes, and terminal restoration;
