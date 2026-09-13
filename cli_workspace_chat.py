@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from collections import Counter
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import shlex
 import shutil
@@ -17,11 +18,12 @@ from cli_api import CLIError
 from cli_workspaces import (WINDOWS_TMUX_ERROR, WorkspaceCommandResult,
                             attach_agent, format_workspace_result, require_tmux_platform,
                             resolve_agent, resolve_session)
-from cli_view_contracts import ViewEvent
+from cli_view_contracts import ActionOutcome, ViewEvent
 
 
 ROOT = Path(__file__).resolve().parent
 SERVER_SESSION = 'agentchattr-server'
+_RESUME_COMMAND = ContextVar('resume_command', default=None)
 
 
 def _safe(value):
@@ -341,6 +343,10 @@ class WorkspaceChatController:
         self._poll_error = None
         self.presentation = None
         self.on_view_change = None
+        self._action_lock = asyncio.Lock()
+        self._active_actions = set()
+        self._pending_actions = set()
+        self._pending_mutations = set()
 
     def bind_view(self, presentation, notify):
         self.presentation = presentation
@@ -547,7 +553,261 @@ class WorkspaceChatController:
             words.extend(['--agent-name', 'NAME' if name else args.agent_name])
         if cwd or args.cwd:
             words.extend(['--cwd', 'PATH' if cwd else args.cwd])
-        self.client.show(shlex.join(words))
+        self._notice(shlex.join(words))
+
+    def _notice(self, text):
+        if self.presentation is not None:
+            self.presentation.notice('\n'.join(_safe(line.expandtabs(4)) for line in str(text).split('\n')))
+        else:
+            self.client.show(text)
+
+    def _failed_action(self, error, ws_id=None, agent_id=None, *, resume=None):
+        message = (_safe(error) if isinstance(error, CLIError) else
+                   'Session request failed or timed out. Check the local server and retry.')
+        self._notice(message)
+        if resume is not None and isinstance(error, CLIError):
+            self._resume_hint(resume, error)
+        return ActionOutcome('failed', message, ws_id, agent_id)
+
+    @staticmethod
+    async def _wait_owned(task):
+        """Cancellation waits for ownership to finish, including repeated signals."""
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                # Retrieve the original exception below; never relabel local bugs.
+                break
+        try:
+            return task.result()
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _run_mutation(self, function, *args, **kwargs):
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        self._pending_mutations.add(task)
+        try:
+            return await self._wait_owned(task)
+        finally:
+            self._pending_mutations.discard(task)
+
+    async def wait_pending(self):
+        """Drain admitted operations and their workers without replaying requests."""
+        while self._pending_actions or self._pending_mutations:
+            tasks = self._pending_actions | self._pending_mutations
+            # return_exceptions consumes completed failures even during shutdown.
+            waiter = asyncio.ensure_future(asyncio.gather(*tasks, return_exceptions=True))
+            await self._wait_owned(waiter)
+
+    def _validate_action(self, action, payload):
+        fields = {
+            'create_session': {'name'}, 'rename_session': {'name'},
+            'archive_session': {'confirmed'},
+            'spawn': {'provider', 'cwd', 'name', 'history_mode'},
+            'resume': {'agent_id', 'fresh', 'cwd', 'name'},
+            'stop': {'agent_id'}, 'attach': {'agent_id'}, 'unread': {'agent_id'},
+            'retry': {'agent_id'}, 'history': {'agent_id', 'mode'},
+        }
+        if not isinstance(action, str) or action not in fields:
+            raise CLIError(f'unsupported session action: {_safe(action)}')
+        if not isinstance(payload, dict):
+            raise CLIError('action payload must be an object')
+        allowed = fields[action]
+        required = set() if action == 'unread' else allowed
+        if set(payload) - allowed:
+            raise CLIError('unexpected action fields: ' + ', '.join(sorted(map(str, set(payload) - allowed))))
+        if required - set(payload):
+            raise CLIError('missing action fields: ' + ', '.join(sorted(required - set(payload))))
+        for key, value in payload.items():
+            if key in ('fresh', 'confirmed'):
+                if not isinstance(value, bool):
+                    raise CLIError(f'{key} must be a boolean')
+            elif value is None and (key == 'cwd' or key == 'name' and action in ('spawn', 'resume')
+                                    or key == 'agent_id' and action == 'unread'):
+                continue
+            elif not isinstance(value, str):
+                raise CLIError(f'{key} must be text')
+            elif key in ('provider', 'agent_id') and not value:
+                raise CLIError(f'{key} is required')
+        mode = payload.get('history_mode', payload.get('mode'))
+        if mode is not None:
+            _validate_history(mode)
+        if action in ('spawn', 'resume', 'attach'):
+            require_tmux_platform()
+        if self.plain_channel or (self.workspace is None and action != 'create_session'):
+            raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
+        agent_id = payload.get('agent_id')
+        if agent_id is not None:
+            # Structured payloads contain stable IDs only; slash adapters resolve aliases.
+            if not any(agent.get('agent_id') == agent_id for agent in self.workspace['agents']):
+                raise CLIError(f'agent not found: {_safe(agent_id)}')
+
+    async def execute_action(self, action, payload):
+        """Validate and serialize one lifecycle operation, never replaying a mutation."""
+        ws_id = self.workspace['id'] if self.workspace is not None else None
+        agent_id = payload.get('agent_id') if isinstance(payload, dict) else None
+        if not isinstance(agent_id, str):
+            agent_id = None
+        try:
+            self._validate_action(action, payload)
+            payload = dict(payload)
+            agent_id = payload.get('agent_id')
+        except CLIError as error:
+            return self._failed_action(error, ws_id, agent_id)
+        generation = self._selection_version
+        key = (ws_id, generation, action, tuple(sorted(payload.items())))
+        if key in self._active_actions:
+            message = 'Session action already in progress.'
+            self._notice(message)
+            return ActionOutcome('cancelled', message, ws_id, agent_id)
+        self._active_actions.add(key)
+        try:
+            # Admission precedes the first await. Dialogs are gathered by callers.
+            async with self._action_lock:
+                if generation != self._selection_version or (self._closed and action != 'create_session'):
+                    return ActionOutcome('cancelled', workspace_id=ws_id, agent_id=agent_id)
+                try:
+                    self._validate_action(action, payload)
+                except CLIError as error:
+                    return self._failed_action(error, ws_id, agent_id)
+                task = asyncio.create_task(self._execute_locked(
+                    action, payload, ws_id, self.workspace, self._snapshot_version()))
+                self._pending_actions.add(task)
+                try:
+                    return await self._wait_owned(task)
+                finally:
+                    self._pending_actions.discard(task)
+        finally:
+            self._active_actions.discard(key)
+
+    async def _execute_locked(self, action, payload, ws_id, workspace, version):
+        agent_id = payload.get('agent_id')
+        try:
+            if action == 'create_session':
+                result = await self._run_mutation(self.api.create, payload['name'])
+                return ActionOutcome('completed', workspace_id=result['id'])
+            if action == 'archive_session':
+                if not payload['confirmed']:
+                    return ActionOutcome('cancelled', workspace_id=ws_id)
+                await self._run_mutation(self.api.action, ws_id, 'archive')
+            elif action == 'attach':
+                agent = next(a for a in workspace['agents'] if a['agent_id'] == agent_id)
+                if self.presentation is not None:
+                    return await self.presentation.attach(agent)
+                self.client.pause_output()
+                try:
+                    loop = asyncio.get_running_loop()
+                    def output(text):
+                        loop.call_soon_threadsafe(self.client.show, text)
+                    await self._run_mutation(attach_agent, agent, output=output)
+                finally:
+                    self.client.resume_output()
+            elif action == 'spawn':
+                agent = await self._run_mutation(self.api.action, ws_id, 'spawn', body={
+                    'provider': payload['provider'], 'cwd': payload['cwd'],
+                    'history_mode': payload['history_mode'], 'name': payload['name']})
+                agent_id = agent['agent_id']
+                if self._accept_snapshot(version):
+                    self._store_agent(agent)
+                if (payload['provider'] == 'claude' and payload['cwd'] is not None
+                        and not (Path(payload['cwd']) / '.claude').exists()):
+                    self._notice(f'Claude may be waiting at a trust prompt; use '
+                                 f'/attach {shlex.quote(str(_agent_label(agent)))} to answer it.')
+            elif action == 'rename_session':
+                result = await self._run_mutation(self.api.rename, ws_id, payload['name'])
+                if self._accept_snapshot(version):
+                    self.workspace = result
+                    self._state_revision += 1
+                    self._notify_view('action')
+                    self._notice(f'Session renamed: {self.workspace.get("name", ws_id)}')
+                else:
+                    self._notice('Session rename completed; refreshing session state.')
+            elif action == 'unread':
+                data = await asyncio.to_thread(self.api.unread, ws_id, agent_id)
+                self._notice(format_workspace_result('unread', WorkspaceCommandResult(data, workspace)))
+            else:
+                kwargs = {}
+                if action == 'resume':
+                    kwargs['body'] = {'fresh': payload['fresh'], 'name': payload['name'], 'cwd': payload['cwd']}
+                elif action == 'history':
+                    kwargs['body'] = {'mode': payload['mode']}
+                result = await self._run_mutation(self.api.action, ws_id, action, agent_id, **kwargs)
+                if action == 'retry':
+                    self._notice('Retry requested.')
+                elif self._accept_snapshot(version):
+                    self._store_agent(result)
+            return ActionOutcome('completed', workspace_id=ws_id, agent_id=agent_id)
+        except (CLIError, OSError, TimeoutError) as error:
+            resume = ((_RESUME_COMMAND.get() or argparse.Namespace(agent=agent_id, fresh=payload['fresh'],
+                      agent_name=payload['name'], cwd=payload['cwd'])) if action == 'resume' else None)
+            return self._failed_action(error, ws_id, agent_id, resume=resume)
+
+    async def dispatch_action(self, text):
+        parts = text.strip().split(maxsplit=1)
+        if not parts:
+            return None
+        command = parts[0]
+        if command not in SESSION_COMMANDS or command in ('/sessions', '/archive'):
+            return None
+        if command == '/history' and (len(parts) == 1 or self.workspace is None):
+            return None
+        ws_id = self.workspace['id'] if self.workspace is not None else None
+        generation = self._selection_version
+        try:
+            if self.plain_channel or self.workspace is None:
+                raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
+            try:
+                words = shlex.split(text)
+            except ValueError as error:
+                raise CLIError(str(error)) from None
+            args = _parse_command(command, words[1:])
+            mode = getattr(args, 'history_mode', None)
+            if mode is not None:
+                _validate_history(mode)
+            if command in ('/spawn', '/resume', '/attach'):
+                require_tmux_platform()
+            action = command[1:]
+            defaulted_spawn = command == '/spawn' and (args.cwd is None or mode is None)
+            if command == '/spawn':
+                if args.cwd is None:
+                    default = next((a['cwd'] for a in reversed(self.workspace['agents']) if a.get('cwd')),
+                                   None) or str(Path.cwd())
+                    args.cwd = default if self.presentation is not None else (
+                        (await self.prompt('Working directory:', default=default)).strip() or default)
+                if mode is None:
+                    mode = 'literal' if self.presentation is not None else (
+                        (await self.prompt('History mode [none/literal]:', default='literal')).strip() or 'literal')
+                    _validate_history(mode)
+                payload = {'provider': args.provider, 'cwd': args.cwd, 'history_mode': mode, 'name': args.agent_name}
+            elif command == '/rename':
+                action, payload = 'rename_session', {'name': args.name}
+            else:
+                agent_id = resolve_agent(self.workspace, args.agent)['agent_id'] if args.agent else None
+                payload = {'agent_id': agent_id}
+                if command == '/resume':
+                    payload.update(fresh=args.fresh, name=args.agent_name, cwd=args.cwd)
+                elif command == '/history':
+                    payload['mode'] = mode
+            if generation != self._selection_version:
+                return ActionOutcome('cancelled', workspace_id=ws_id)
+            # Task-local diagnostics retain the user's selector without extending payloads.
+            token = _RESUME_COMMAND.set(args if command == '/resume' else None)
+            try:
+                outcome = await self.execute_action(action, payload)
+            finally:
+                _RESUME_COMMAND.reset(token)
+            if self.presentation is not None and defaulted_spawn and outcome.status == 'completed':
+                message = _safe(f'Spawn defaults used: cwd {args.cwd}; history mode {mode}. '
+                                'Change with --cwd/--history-mode or New agent.')
+                self._notice(message)
+                return ActionOutcome(outcome.status, message, outcome.workspace_id, outcome.agent_id)
+            return outcome
+        except (CLIError, OSError, TimeoutError) as error:
+            return self._failed_action(error, ws_id)
 
     async def handle(self, text):
         parts = text.strip().split(maxsplit=1)
@@ -569,88 +829,33 @@ class WorkspaceChatController:
             return 'continue'
         if command not in SESSION_COMMANDS:
             return None
-        args = None
         switching = False
         try:
+            if command not in ('/sessions', '/archive'):
+                await self.dispatch_action(text)
+                return 'continue'
             if self.plain_channel or self.workspace is None:
                 raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
             try:
                 words = shlex.split(text)
             except ValueError as error:
                 raise CLIError(str(error)) from None
-            args = _parse_command(command, words[1:])
-            mode = getattr(args, 'history_mode', None)
-            if mode is not None:
-                _validate_history(mode)
-            if command in ('/spawn', '/resume', '/attach'):
-                require_tmux_platform()
-            ws_id = self.workspace['id']
-            if command == '/attach':
-                agent = resolve_agent(self.workspace, args.agent)
-                self.client.pause_output()
-                try:
-                    await asyncio.to_thread(attach_agent, agent, output=self.client.show)
-                finally:
-                    self.client.resume_output()
-                return 'continue'
+            _parse_command(command, words[1:])
+            generation = self._selection_version
             if command == '/sessions':
                 await self.close()
                 switching = True
                 return await self._pick_again()
-            if command == '/archive':
-                answer = (await self.prompt('Archive session? [y/N]', default='n')).strip().lower()
-                if answer not in ('y', 'yes'):
-                    return 'continue'
-                await asyncio.to_thread(self.api.action, ws_id, 'archive')
-                switching = True
-                return await self._pick_again()
-            if command == '/spawn':
-                if args.cwd is None:
-                    default = next((a['cwd'] for a in reversed(self.workspace['agents']) if a.get('cwd')),
-                                   None) or str(Path.cwd())
-                    args.cwd = (await self.prompt('Working directory:', default=default)).strip() or default
-                if mode is None:
-                    mode = (await self.prompt('History mode [none/literal]:', default='literal')).strip() or 'literal'
-                    _validate_history(mode)
-                version = self._snapshot_version()
-                agent = await asyncio.to_thread(self.api.action, ws_id, 'spawn', body={
-                    'provider': args.provider, 'cwd': args.cwd, 'history_mode': mode,
-                    'name': args.agent_name})
-                if self._accept_snapshot(version):
-                    self._store_agent(agent)
-                if args.provider == 'claude' and not (Path(args.cwd) / '.claude').exists():
-                    self.client.show(f'Claude may be waiting at a trust prompt; use '
-                                     f'/attach {shlex.quote(str(_agent_label(agent)))} to answer it.')
-            elif command == '/rename':
-                version = self._snapshot_version()
-                result = await asyncio.to_thread(self.api.rename, ws_id, args.name)
-                if self._accept_snapshot(version):
-                    self.workspace = result
-                    self._state_revision += 1
-                    self.client.show(f'Session renamed: {self.workspace.get("name", ws_id)}')
-                else:
-                    self.client.show('Session rename completed; refreshing session state.')
-            elif command == '/unread':
-                agent_id = resolve_agent(self.workspace, args.agent)['agent_id'] if args.agent else None
-                data = await asyncio.to_thread(self.api.unread, ws_id, agent_id)
-                self.client.show(format_workspace_result('unread', WorkspaceCommandResult(data, self.workspace)))
-            elif command in ('/resume', '/stop', '/history', '/retry'):
-                agent_id = resolve_agent(self.workspace, args.agent)['agent_id']
-                kwargs = {}
-                if command == '/resume':
-                    kwargs['body'] = {'fresh': args.fresh, 'name': args.agent_name, 'cwd': args.cwd}
-                elif command == '/history':
-                    kwargs['body'] = {'mode': mode}
-                version = self._snapshot_version()
-                result = await asyncio.to_thread(self.api.action, ws_id, command[1:], agent_id, **kwargs)
-                if command == '/retry':
-                    self.client.show('Retry requested.')
-                elif self._accept_snapshot(version):
-                    self._store_agent(result)
+            answer = (await self.prompt('Archive session? [y/N]', default='n')).strip().lower()
+            if answer not in ('y', 'yes') or generation != self._selection_version:
+                return 'continue'
+            outcome = await self.execute_action('archive_session', {'confirmed': True})
+            if outcome.status != 'completed':
+                return 'continue'
+            switching = True
+            return await self._pick_again()
         except CLIError as error:
             self.client.show(str(error))
-            if command == '/resume' and args is not None:
-                self._resume_hint(args, error)
             if switching and self.workspace is None:
                 return 'quit'
         except EOFError:
@@ -658,7 +863,6 @@ class WorkspaceChatController:
         except KeyboardInterrupt:
             return 'continue'
         except (OSError, TimeoutError):
-            # Transport exception text can contain authenticated URLs.
             self.client.show('Session request failed or timed out. Check the local server and retry.')
             if switching and self.workspace is None:
                 return 'quit'
