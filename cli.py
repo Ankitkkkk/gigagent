@@ -135,7 +135,6 @@ class ChatClient:
         kind = event.get("type")
         data = event.get("data", {})
         if kind == "settings":
-            previous_channel = self.channel
             show_history = False
             self.channels = data.get("channels", ["general"])
             if self.username is None:
@@ -150,9 +149,7 @@ class ChatClient:
                 self.show(f"Channel {self.channel!r} is unavailable; using #general.")
                 self.channel = "general"
             self._notify_view("settings")
-            if self.channel != previous_channel:
-                self._notify_view("channel")
-            if show_history:
+            if show_history and self.on_view_change is None:
                 self.history()
         elif kind == "agents":
             self.agent_names = list(data)
@@ -278,7 +275,6 @@ class ChatClient:
                 return SubmitOutcome("failed", message=message)
             else:
                 self.channel = argument
-                self._notify_view("channel")
                 self.history()
         elif command == "/create":
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,19}", argument):
@@ -287,7 +283,6 @@ class ChatClient:
                 return SubmitOutcome("failed", message=message)
             elif argument in self.channels:
                 self.channel = argument
-                self._notify_view("channel")
                 self.history()
             else:
                 self.pending_channel = argument

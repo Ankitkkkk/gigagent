@@ -194,6 +194,32 @@ class SubmissionOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(outcome.sent)
         self.assertIsNone(self.client.pending_channel)
 
+    async def test_join_existing_channel_emits_one_view_event(self):
+        observed = []
+        self.client.on_view_change = observed.append
+        outcome = await self.client.submit_outcome("/join work")
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(self.client.channel, "work")
+        self.assertEqual([event.kind for event in observed], ["history"])
+
+    async def test_create_existing_channel_emits_one_view_event(self):
+        observed = []
+        self.client.on_view_change = observed.append
+        outcome = await self.client.submit_outcome("/create work")
+        self.assertEqual(outcome.status, "completed")
+        self.assertEqual(self.client.channel, "work")
+        self.assertEqual([event.kind for event in observed], ["history"])
+
+    async def test_settings_resolving_pending_channel_emits_one_view_event(self):
+        observed = []
+        self.client.pending_channel = "work"
+        self.client.on_view_change = observed.append
+        self.client.handle_event({"type": "settings", "data": {
+            "channels": ["general", "work"], "username": "Pat"}})
+        self.assertEqual(self.client.channel, "work")
+        self.assertIsNone(self.client.pending_channel)
+        self.assertEqual([event.kind for event in observed], ["settings"])
+
 
 class ControllerViewEventTests(unittest.TestCase):
     def setUp(self):
@@ -211,45 +237,66 @@ class ControllerViewEventTests(unittest.TestCase):
 
     def test_bind_view_installs_callbacks_and_selection_notifies_after_version(self):
         presentation = Mock()
+        before_generation = self.controller._selection_version
         observed = []
-        self.controller.bind_view(presentation, lambda event: observed.append(
-            (event, self.controller.workspace, self.controller._selection_version)))
+
+        def notify(event):
+            self.assertEqual(self.controller._selection_version, before_generation + 1)
+            self.assertEqual(event.selection_generation, before_generation + 1)
+            observed.append((event, self.controller.workspace))
+
+        self.controller.bind_view(presentation, notify)
         self.assertIs(self.controller.presentation, presentation)
         self.assertEqual(self.client.on_workspace, self.controller.on_workspace)
         self.assertEqual(self.client.on_settings, self.controller.on_settings)
 
         self.controller._select(copy.deepcopy(self.workspace))
 
-        event, selected, generation = observed[-1]
+        event, selected = observed[-1]
         self.assertEqual(event.kind, "selection")
         self.assertEqual(event.workspace_id, "ws_a")
-        self.assertEqual(event.selection_generation, generation)
         self.assertEqual(selected["id"], "ws_a")
 
     def test_workspace_update_notifies_after_revision_without_status_printing(self):
         self.controller.workspace = copy.deepcopy(self.workspace)
+        self.controller.workspace["agents"][0]["last_state"] = "starting"
         self.controller._agent_states = {
             "ag_a": self.controller._agent_status(self.controller.workspace["agents"][0])}
+        before_revision = self.controller._state_revision
         observed = []
-        self.controller.bind_view(Mock(), lambda event: observed.append(
-            (event, self.controller._state_revision,
-             self.controller.workspace["agents"][0]["last_state"])))
+
+        def notify(event):
+            self.assertEqual(self.controller._state_revision, before_revision + 1)
+            self.assertEqual(event.revision, before_revision + 1)
+            current = self.controller.workspace["agents"][0]
+            self.assertEqual(self.controller._agent_states["ag_a"],
+                             self.controller._agent_status(current))
+            self.assertIn("ag_a", self.controller._failed_launches)
+            observed.append((event, current["last_state"]))
+
+        self.controller.bind_view(Mock(), notify)
         updated = copy.deepcopy(self.workspace)
-        updated["agents"][0]["last_state"] = "running"
+        updated["agents"][0]["last_state"] = "exited"
+        updated["agents"][0]["last_error"] = "launch failed"
 
         self.controller.on_workspace(updated)
 
-        event, revision, state = observed[-1]
-        self.assertEqual((event.kind, event.revision), ("agent_state", revision))
+        event, state = observed[-1]
+        self.assertEqual(event.kind, "agent_state")
         self.assertEqual(event.workspace_id, "ws_a")
         self.assertEqual(event.selection_generation, self.controller._selection_version)
-        self.assertEqual(state, "running")
+        self.assertEqual(state, "exited")
         self.assertEqual(self.output, [])
 
-    def test_notices_still_flow_through_client_output_in_view_mode(self):
-        self.controller.bind_view(Mock(), Mock())
-        self.client.show("request failed")
-        self.assertEqual(self.output, ["request failed"])
+    def test_controller_refusal_still_flows_through_output_in_view_mode(self):
+        observed = []
+        self.controller.workspace = copy.deepcopy(self.workspace)
+        self.controller.bind_view(Mock(), observed.append)
+        result = asyncio.run(self.controller.handle("/join general"))
+        self.assertEqual(result, "continue")
+        self.assertEqual(self.output, [
+            "Use /sessions to switch sessions, or plain --channel mode to join/create channels."])
+        self.assertEqual(observed, [])
 
 
 if __name__ == "__main__":
