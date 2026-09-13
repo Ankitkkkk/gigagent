@@ -193,35 +193,74 @@ def _render_picker(items, output):
     output('  a. Show archived')
 
 
-async def _offer_resume(api, workspace, prompt, output, no_resume):
-    agents = workspace.get('agents', [])
-    for agent in agents:
-        output(_agent_line(agent))
-    eligible = [agent for agent in agents
-                if agent.get('last_state') == 'exited'
-                and _agent_cwd(agent) is not None]
+def _legacy_confirm(prompt):
+    async def confirm(text, *, default=False, escape=False):
+        answer = (await prompt(text, default='y' if default else 'n')).strip().lower()
+        return answer in ('y', 'yes') or (default and answer == '')
+    return confirm
+
+
+async def _unarchive_workspace(api, workspace, *, confirm, mutate, still_current):
+    """Return a workspace dict, or a cancelled ActionOutcome after decline/overlap."""
+    if not workspace.get('archived'):
+        return workspace
+    ws_id = workspace['id']
+    accepted = await confirm('Unarchive it? [y/N]', default=False, escape=False)
+    if not still_current():
+        return ActionOutcome('cancelled', workspace_id=ws_id)
+    if not accepted:
+        return ActionOutcome('cancelled', 'Archived session was not selected', ws_id)
+    result = await mutate(api.action, ws_id, 'unarchive')
+    if not still_current():
+        return ActionOutcome('cancelled', workspace_id=ws_id)
+    return result
+
+
+async def _resume_workspace(api, workspace, *, confirm, notice, mutate, still_current, no_resume):
+    """Return a workspace dict, or a cancelled ActionOutcome after overlap."""
+    eligible = [agent for agent in workspace.get('agents', [])
+                if agent.get('last_state') == 'exited' and _agent_cwd(agent) is not None]
     if no_resume or not eligible:
         return workspace
     if sys.platform == 'win32':
-        output(WINDOWS_TMUX_ERROR)
+        notice(WINDOWS_TMUX_ERROR)
         return workspace
-    answer = (await prompt(f'Resume {len(eligible)} stopped agents? [Y/n]', default='y')).strip().lower()
-    if answer not in ('', 'y', 'yes'):
+    ws_id = workspace['id']
+    cancelled = ActionOutcome('cancelled', workspace_id=ws_id)
+    accepted = await confirm(f'Resume {len(eligible)} stopped agents? [Y/n]', default=True, escape=False)
+    if not still_current():
+        return cancelled
+    if not accepted:
         return workspace
     require_tmux_platform()
     resumed = False
     for agent in eligible:
+        if not still_current():
+            return cancelled
         try:
-            await asyncio.to_thread(api.action, workspace['id'], 'resume', agent['agent_id'],
-                                    body={})
+            result = await mutate(api.action, ws_id, 'resume', agent['agent_id'], body={})
+            if isinstance(result, ActionOutcome):
+                return result
             resumed = True
         except CLIError as error:
-            output(_safe(error))
+            notice(_safe(error))
             if error.status == 409 and '--fresh' in str(error):
-                output(_safe(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh'))
+                notice(_safe(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh'))
+        if not still_current():
+            return cancelled
     if resumed:
-        workspace = await asyncio.to_thread(api.get, workspace['id'])
+        workspace = await asyncio.to_thread(api.get, ws_id)
+        if not still_current():
+            return cancelled
     return workspace
+
+
+async def _offer_resume(api, workspace, prompt, output, no_resume):
+    for agent in workspace.get('agents', []):
+        output(_agent_line(agent))
+    return await _resume_workspace(
+        api, workspace, confirm=_legacy_confirm(prompt), notice=output,
+        mutate=asyncio.to_thread, still_current=lambda: True, no_resume=no_resume)
 
 
 async def choose_workspace(api, prompt, output, *, selector=None, no_resume=False):
@@ -254,12 +293,13 @@ async def choose_workspace(api, prompt, output, *, selector=None, no_resume=Fals
             selected = await asyncio.to_thread(api.get, selected['id'])
             if selected.get('archived'):
                 output('archived')
-                answer = (await prompt('Unarchive it? [y/N]', default='n')).strip().lower()
-                if answer not in ('y', 'yes'):
+                selected = await _unarchive_workspace(
+                    api, selected, confirm=_legacy_confirm(prompt),
+                    mutate=asyncio.to_thread, still_current=lambda: True)
+                if isinstance(selected, ActionOutcome):
                     if selector is not None:
-                        raise CLIError('Archived session was not selected')
+                        raise CLIError(selected.message)
                     continue
-                selected = await asyncio.to_thread(api.action, selected['id'], 'unarchive')
             return await _offer_resume(api, selected, prompt, output, no_resume)
     except (EOFError, KeyboardInterrupt):
         return None
@@ -402,36 +442,37 @@ class WorkspaceChatController:
         return self._selection_task is not None or self._selection_commit is not None
 
     async def list_sessions(self, include_archived=False):
-        """Fetch navigation rows on demand without touching the selected session."""
-        data = await asyncio.to_thread(self.api.list, include_archived=include_archived)
-        return data['workspaces']
+        """Return the API mapping (workspaces and optional warning) on demand."""
+        return await asyncio.to_thread(self.api.list, include_archived=include_archived)
 
     async def select_session(self, ws_id):
         """Prepare without changing selection; own the checkpoint/commit once ready."""
         try:
             self._validate_action('select_session', {'session_id': ws_id})
+            if self.presentation is None:
+                raise CLIError('Session selection requires a bound presenter.')
         except CLIError as error:
             return self._failed_action(error)
         if self.selection_pending:
             return ActionOutcome('cancelled', 'Session selection already in progress.', ws_id)
         if self.workspace is not None and self.workspace['id'] == ws_id:
             return ActionOutcome('completed', workspace_id=ws_id)
-        version = self._snapshot_version()
-        task = asyncio.create_task(self._prepare_selection(ws_id, version))
+        generation = self._selection_version
+        task = asyncio.create_task(self._prepare_selection(ws_id, generation))
         self._selection_task = task
         commit = None
         try:
             candidate = await task
             if isinstance(candidate, ActionOutcome):
                 return candidate
-            if self._selection_task is not task or version != self._snapshot_version():
+            if self._selection_task is not task or generation != self._selection_version:
                 return ActionOutcome('cancelled', workspace_id=ws_id)
-            commit = asyncio.create_task(self._commit_selection(candidate, version))
+            commit = asyncio.create_task(self._commit_selection(candidate, generation))
             self._selection_commit = commit
             self._pending_actions.add(commit)
             return await self._wait_owned(commit)
         except asyncio.CancelledError:
-            if commit is not None:
+            if commit is not None or asyncio.current_task().cancelling():
                 raise
             return ActionOutcome('cancelled', workspace_id=ws_id)
         except (CLIError, OSError, TimeoutError) as error:
@@ -444,62 +485,36 @@ class WorkspaceChatController:
             if commit is not None:
                 self._pending_actions.discard(commit)
 
-    async def _prepare_selection(self, ws_id, version):
+    async def _prepare_selection(self, ws_id, generation):
         cancelled = ActionOutcome('cancelled', workspace_id=ws_id)
-        candidate = await asyncio.to_thread(self.api.get, ws_id)
-        if version != self._snapshot_version():
-            return cancelled
-        if candidate.get('archived'):
-            accepted = await self.presentation.confirm('Unarchive it? [y/N]', default=False, escape=False)
-            if not accepted or version != self._snapshot_version():
-                return cancelled
-            async with self._action_lock:
-                if version != self._snapshot_version():
-                    return cancelled
-                candidate = await self._run_mutation(self.api.action, ws_id, 'unarchive')
-            if version != self._snapshot_version():
-                return cancelled
-        agents = candidate.get('agents', [])
-        eligible = [agent for agent in agents
-                    if agent.get('last_state') == 'exited' and _agent_cwd(agent) is not None]
-        if self.no_resume or not eligible:
-            return candidate
-        if sys.platform == 'win32':
-            self._notice(WINDOWS_TMUX_ERROR)
-            return candidate
-        accepted = await self.presentation.confirm(
-            f'Resume {len(eligible)} stopped agents? [Y/n]', default=True, escape=False)
-        if version != self._snapshot_version():
-            return cancelled
-        if not accepted:
-            return candidate
-        require_tmux_platform()
-        resumed = False
-        for agent in eligible:
-            async with self._action_lock:
-                if version != self._snapshot_version():
-                    return cancelled
-                try:
-                    await self._run_mutation(self.api.action, ws_id, 'resume', agent['agent_id'], body={})
-                    resumed = True
-                except CLIError as error:
-                    self._notice(error)
-                    if error.status == 409 and '--fresh' in str(error):
-                        self._notice(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh')
-            if version != self._snapshot_version():
-                return cancelled
-        if resumed:
-            candidate = await asyncio.to_thread(self.api.get, ws_id)
-            if version != self._snapshot_version():
-                return cancelled
-        return candidate
 
-    async def _commit_selection(self, candidate, version):
+        def still_current():
+            return generation == self._selection_version
+
+        async def mutate(function, *args, **kwargs):
+            async with self._action_lock:
+                if not still_current():
+                    return cancelled
+                return await self._run_mutation(function, *args, **kwargs)
+
+        candidate = await asyncio.to_thread(self.api.get, ws_id)
+        if not still_current():
+            return cancelled
+        candidate = await _unarchive_workspace(
+            self.api, candidate, confirm=self.presentation.confirm,
+            mutate=mutate, still_current=still_current)
+        if isinstance(candidate, ActionOutcome):
+            return candidate
+        return await _resume_workspace(
+            self.api, candidate, confirm=self.presentation.confirm, notice=self._notice,
+            mutate=mutate, still_current=still_current, no_resume=self.no_resume)
+
+    async def _commit_selection(self, candidate, generation):
         async with self._action_lock:
-            if version != self._snapshot_version():
+            if generation != self._selection_version:
                 return ActionOutcome('cancelled', workspace_id=candidate['id'])
             await self.close()
-            if version[0] != self._selection_version:
+            if generation != self._selection_version:
                 return ActionOutcome('cancelled', workspace_id=candidate['id'])
             # No await between clearing preparation state and the final event.
             self._selection_task = None

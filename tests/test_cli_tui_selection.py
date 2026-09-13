@@ -67,7 +67,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
             return self.choice
         self.presenter.confirm = AsyncMock(side_effect=confirm)
         ctl.bind_view(self.presenter, self.events.append)
-        self.addAsyncCleanup(ctl.cancel_selection) if hasattr(ctl, 'cancel_selection') else None
+        self.addAsyncCleanup(ctl.cancel_selection)
         return ctl
 
     async def tick(self):
@@ -85,7 +85,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_dialog_preserves_old_selection(self):
         ctl = self.make_controller(stopped=True)
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         ctl._failed_launches.add('ag_old')
         ctl._agent_states = {'ag_old': 'failed'}
         ctl._refresh_requested = False
@@ -94,20 +93,24 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
                   ctl._state_revision, set(ctl._failed_launches), dict(ctl._agent_states),
                   ctl._refresh_requested, ctl._poll_error, ctl.client.pending_channel)
         task = asyncio.create_task(ctl.select_session('ws_b'))
-        await asyncio.wait_for(self.dialog_open.wait(), 2)
-        self.assertTrue(ctl.selection_pending)
-        await ctl.cancel_selection()
-        self.assertEqual((await task).status, 'cancelled')
-        self.assertEqual((ctl.workspace, ctl.client.channel, ctl._closed, ctl._selection_version,
-                          ctl._state_revision, ctl._failed_launches, ctl._agent_states,
-                          ctl._refresh_requested, ctl._poll_error, ctl.client.pending_channel), before)
-        self.api.action.assert_not_called()
-        self.assertEqual(self.events, [])
-        self.assert_clean(ctl)
+        try:
+            await asyncio.wait_for(self.dialog_open.wait(), 2)
+            self.assertTrue(ctl.selection_pending)
+            await ctl.cancel_selection()
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertEqual((ctl.workspace, ctl.client.channel, ctl._closed, ctl._selection_version,
+                              ctl._state_revision, ctl._failed_launches, ctl._agent_states,
+                              ctl._refresh_requested, ctl._poll_error, ctl.client.pending_channel), before)
+            self.api.action.assert_not_called()
+            self.assertEqual(self.events, [])
+            self.assert_clean(ctl)
+        finally:
+            self.dialog_release.set()
+            await ctl.cancel_selection()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def test_first_commit_notifies_only_after_all_state_changes(self):
         ctl = self.make_controller(old=False)
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         generation, revision = ctl._selection_version, ctl._state_revision
         def observe(event):
             self.assertEqual(event.kind, 'selection')
@@ -129,7 +132,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_selection_preserves_failed_launches_without_reads(self):
         ctl = self.make_controller()
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         ctl._failed_launches.add('ag_a')
         generation = ctl._selection_version
         self.assertEqual(await ctl.select_session('ws_a'), ActionOutcome('completed', workspace_id='ws_a'))
@@ -158,13 +160,13 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, ActionOutcome('completed', workspace_id='ws_a'))
         self.assertEqual(len(self.events), 1)
         self.api.action.assert_called_once_with('ws_a', 'archive')
+        self.assert_clean(ctl)
 
     async def test_archived_decline_is_cancelled_without_checkpoint(self):
         ctl = self.make_controller(archived=True)
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         self.dialog_release.set()
         result = await ctl.select_session('ws_b')
-        self.assertEqual(result.status, 'cancelled')
+        self.assertEqual(result, ActionOutcome('cancelled', 'Archived session was not selected', 'ws_b'))
         self.presenter.confirm.assert_awaited_once_with('Unarchive it? [y/N]', default=False, escape=False)
         self.assertEqual(ctl.workspace, self.old)
         self.api.action.assert_not_called()
@@ -175,7 +177,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
                               (False, [call('ws_a', 'checkpoint')])]:
             with self.subTest(answer=answer):
                 ctl = self.make_controller(stopped=True)
-                self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
                 self.choice = answer
                 self.dialog_release.set()
                 result = await ctl.select_session('ws_b')
@@ -189,7 +190,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         for no_resume in (True, False):
             with self.subTest(no_resume=no_resume):
                 ctl = self.make_controller(stopped=True, no_resume=no_resume)
-                self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
                 if not no_resume:
                     self.candidate['agents'][0]['cwd'] = self.directory.name + '/missing'
                 self.assertEqual((await ctl.select_session('ws_b')).status, 'completed')
@@ -199,18 +199,17 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_windows_retains_chat_only_notice(self):
         ctl = self.make_controller(stopped=True)
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         with patch('cli_workspace_chat.sys.platform', 'win32'):
             self.assertEqual((await ctl.select_session('ws_b')).status, 'completed')
         self.presenter.confirm.assert_not_awaited()
         self.presenter.notice.assert_any_call(WINDOWS_TMUX_ERROR)
         self.api.action.assert_called_once_with('ws_a', 'checkpoint')
+        self.assert_clean(ctl)
 
     async def test_precommit_read_and_unarchive_failures_preserve_old_selection(self):
         for unarchive in (False, True):
             with self.subTest(unarchive=unarchive):
                 ctl = self.make_controller(archived=unarchive)
-                self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
                 if unarchive:
                     self.choice = True
                     self.dialog_release.set()
@@ -227,7 +226,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_quit_waits_checkpoint_blocked_commit_then_checkpoints_new_selection(self):
         ctl = self.make_controller()
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         entered, release = threading.Event(), threading.Event()
         action = self.api.action.side_effect
         def checkpoint(ws_id, name, *args, **kwargs):
@@ -265,19 +263,19 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_sessions_returns_rows_without_selection_or_checkpoint(self):
         ctl = self.make_controller()
-        self.assertTrue(callable(getattr(ctl, 'list_sessions', None)), 'list_sessions missing')
-        self.assertEqual(await ctl.list_sessions(), [self.old, self.candidate])
-        self.assertEqual(await ctl.list_sessions(True), [self.old, self.candidate])
+        self.api.list.return_value['warning'] = 'Recovered corrupt session data'
+        self.assertEqual(await ctl.list_sessions(), {
+            'workspaces': [self.old, self.candidate], 'warning': 'Recovered corrupt session data'})
+        self.assertEqual(await ctl.list_sessions(True), self.api.list.return_value)
         self.assertEqual(self.api.list.call_args_list, [call(include_archived=False), call(include_archived=True)])
         self.assertEqual(ctl.workspace, self.old)
         self.api.action.assert_not_called()
         self.assertEqual(self.events, [])
 
-    async def test_stale_candidate_read_cannot_replace_newer_selection_or_revision(self):
+    async def test_candidate_read_guards_generation_but_allows_old_revision_change(self):
         for selection_change in (True, False):
             with self.subTest(selection_change=selection_change):
                 ctl = self.make_controller()
-                self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
                 entered, release = threading.Event(), threading.Event()
                 def get(ws_id):
                     entered.set()
@@ -294,9 +292,12 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         ctl.on_workspace(changed)
                     release.set()
-                    self.assertEqual((await selecting).status, 'cancelled')
-                    self.assertEqual(ctl.workspace, changed)
-                    self.api.action.assert_not_called()
+                    self.assertEqual((await selecting).status, 'cancelled' if selection_change else 'completed')
+                    self.assertEqual(ctl.workspace, changed if selection_change else self.candidate)
+                    if selection_change:
+                        self.api.action.assert_not_called()
+                    else:
+                        self.api.action.assert_called_once_with('ws_a', 'checkpoint')
                     self.assert_clean(ctl)
                 finally:
                     release.set()
@@ -304,7 +305,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelled_thread_read_is_ignored_after_next_selection(self):
         ctl = self.make_controller()
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         entered, release, finished = threading.Event(), threading.Event(), threading.Event()
         def get(ws_id):
             entered.set()
@@ -335,7 +335,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelled_candidate_mutation_drains_without_rollback_or_commit(self):
         ctl = self.make_controller(archived=True)
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         self.choice = True
         self.dialog_release.set()
         entered, release = threading.Event(), threading.Event()
@@ -368,7 +367,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_repeated_cancellation_cannot_interrupt_commit(self):
         ctl = self.make_controller()
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         entered, release = threading.Event(), threading.Event()
         def checkpoint(*args, **kwargs):
             entered.set()
@@ -397,7 +395,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_checkpoint_failure_warns_but_commits(self):
         ctl = self.make_controller()
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         self.api.action.side_effect = CLIError('checkpoint refused')
         self.assertEqual((await ctl.select_session('ws_b')).status, 'completed')
         self.assertEqual(ctl.workspace, self.candidate)
@@ -406,7 +403,6 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_archived_accept_resumes_then_checkpoints_then_notifies(self):
         ctl = self.make_controller(archived=True, stopped=True)
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         self.choice = True
         self.dialog_release.set()
         generation = ctl._selection_version
@@ -429,14 +425,18 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_selection_is_cancelled_without_second_dialog(self):
         ctl = self.make_controller(stopped=True)
-        self.assertTrue(callable(getattr(ctl, 'select_session', None)), 'select_session missing')
         selecting = asyncio.create_task(ctl.select_session('ws_b'))
-        await asyncio.wait_for(self.dialog_open.wait(), 2)
-        self.assertEqual((await ctl.select_session('ws_b')).status, 'cancelled')
-        self.assertEqual(self.presenter.confirm.await_count, 1)
-        await ctl.cancel_selection()
-        self.assertEqual((await selecting).status, 'cancelled')
-        self.assert_clean(ctl)
+        try:
+            await asyncio.wait_for(self.dialog_open.wait(), 2)
+            self.assertEqual((await ctl.select_session('ws_b')).status, 'cancelled')
+            self.assertEqual(self.presenter.confirm.await_count, 1)
+            await ctl.cancel_selection()
+            self.assertEqual((await selecting).status, 'cancelled')
+            self.assert_clean(ctl)
+        finally:
+            self.dialog_release.set()
+            await ctl.cancel_selection()
+            await asyncio.gather(selecting, return_exceptions=True)
 
     async def test_cancel_selection_does_not_wait_for_callers_later_work(self):
         ctl = self.make_controller(stopped=True)
@@ -466,19 +466,23 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_completed_preparation_before_commit_does_not_checkpoint(self):
         ctl = self.make_controller()
         selection = None
+        cancellations = []
         async def get_candidate(ws_id, version):
             # Schedule cancellation before select_session resumes with this snapshot.
-            asyncio.create_task(ctl.cancel_selection())
+            cancellations.append(asyncio.create_task(ctl.cancel_selection()))
             return copy.deepcopy(self.candidate)
         # Own preparation remains real except this deterministic scheduling boundary.
         with patch.object(ctl, '_prepare_selection', side_effect=get_candidate):
             selection = asyncio.create_task(ctl.select_session('ws_b'))
-            self.assertEqual((await selection).status, 'cancelled')
+            try:
+                self.assertEqual((await selection).status, 'cancelled')
+            finally:
+                await asyncio.gather(selection, *cancellations, return_exceptions=True)
         self.api.action.assert_not_called()
         self.assertEqual(ctl.workspace, self.old)
         self.assert_clean(ctl)
 
-    async def test_candidate_unarchive_and_refresh_snapshots_reject_revision_overlap(self):
+    async def test_candidate_unarchive_and_refresh_allow_old_revision_changes(self):
         for phase in ('unarchive', 'refresh'):
             with self.subTest(phase=phase):
                 ctl = self.make_controller(archived=phase == 'unarchive', stopped=phase == 'refresh')
@@ -505,9 +509,9 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
                     updated = dict(self.old, name='newer same-session event')
                     ctl.on_workspace(updated)
                     release.set()
-                    self.assertEqual((await selecting).status, 'cancelled')
-                    self.assertEqual(ctl.workspace, updated)
-                    self.assertNotIn(call('ws_a', 'checkpoint'), self.api.action.call_args_list)
+                    self.assertEqual((await selecting).status, 'completed')
+                    self.assertEqual(ctl.workspace, self.candidate)
+                    self.assertIn(call('ws_a', 'checkpoint'), self.api.action.call_args_list)
                     self.assert_clean(ctl)
                 finally:
                     release.set()
@@ -562,3 +566,71 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await asyncio.gather(archiving, return_exceptions=True)
+
+    async def test_old_session_event_during_resume_dialog_does_not_cancel_switch(self):
+        ctl = self.make_controller(stopped=True)
+        selecting = asyncio.create_task(ctl.select_session('ws_b'))
+        try:
+            await asyncio.wait_for(self.dialog_open.wait(), 2)
+            ctl.on_workspace(dict(self.old, name='updated while choosing'))
+            self.choice = True
+            self.dialog_release.set()
+            self.assertEqual(await selecting, ActionOutcome('completed', workspace_id='ws_b'))
+            self.assertEqual(self.api.action.call_args_list,
+                             [call('ws_b', 'resume', 'ag_b', body={}), call('ws_a', 'checkpoint')])
+            self.assertEqual(ctl.workspace, self.candidate)
+            self.assert_clean(ctl)
+        finally:
+            self.dialog_release.set()
+            await ctl.cancel_selection()
+            await asyncio.gather(selecting, return_exceptions=True)
+
+    async def test_direct_preparation_cancellation_propagates_and_stops_caller(self):
+        ctl = self.make_controller(stopped=True)
+        continued = []
+        async def caller():
+            await ctl.select_session('ws_b')
+            continued.append(True)
+        selecting = asyncio.create_task(caller())
+        try:
+            await asyncio.wait_for(self.dialog_open.wait(), 2)
+            selecting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await selecting
+            self.assertEqual(continued, [])
+            self.api.action.assert_not_called()
+            self.assertEqual(ctl.workspace, self.old)
+            self.assert_clean(ctl)
+        finally:
+            self.dialog_release.set()
+            await asyncio.gather(selecting, return_exceptions=True)
+
+    async def test_no_presenter_fails_before_any_read(self):
+        ctl = self.make_controller()
+        ctl.presentation = None
+        outcome = await ctl.select_session('ws_b')
+        self.assertEqual(outcome.status, 'failed')
+        self.assertIn('present', outcome.message)
+        self.assertEqual(self.api.mock_calls, [])
+        self.assertEqual(ctl.workspace, self.old)
+        self.assert_clean(ctl)
+
+    async def test_generation_change_during_dialog_prevents_candidate_mutation(self):
+        for archived in (True, False):
+            with self.subTest(archived=archived):
+                ctl = self.make_controller(archived=archived, stopped=not archived)
+                selecting = asyncio.create_task(ctl.select_session('ws_b'))
+                try:
+                    await asyncio.wait_for(self.dialog_open.wait(), 2)
+                    replacement = dict(self.old, id='ws_c', channel='session-c')
+                    ctl._select(replacement)
+                    self.choice = True
+                    self.dialog_release.set()
+                    self.assertEqual(await selecting, ActionOutcome('cancelled', workspace_id='ws_b'))
+                    self.api.action.assert_not_called()
+                    self.assertEqual(ctl.workspace, replacement)
+                    self.assert_clean(ctl)
+                finally:
+                    self.dialog_release.set()
+                    await ctl.cancel_selection()
+                    await asyncio.gather(selecting, return_exceptions=True)
