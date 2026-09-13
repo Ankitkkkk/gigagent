@@ -8,6 +8,35 @@ from tests._tui_harness import tui_harness
 
 
 class ViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_providers_disable_add_agent_with_visible_reason(self):
+        async with tui_harness() as ui:
+            ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': []})
+            ui.controller.providers = []
+            choice = next(choice for choice in ui.view.action_choices() if choice['id'] == 'new_agent')
+            self.assertEqual(choice['disabled_reason'], 'No providers configured')
+
+    async def test_activity_sgr_wheel_scrolls_three_lines_and_clamps(self):
+        async with tui_harness() as ui:
+            for i in range(80):
+                ui.notice(f'notice {i:03}')
+            ui.view.show_activity()
+            await ui.wait_render()
+            self.assertEqual(ui.view._activity_line, 0)
+            await ui._send('\x1b[<65;26;4M')
+            self.assertEqual(ui.view._activity_line, 3)
+            self.assertIn('notice 003', ui.screen_text())
+            self.assertNotIn('notice 000', ui.screen_text())
+            await ui._send('\x1b[<64;26;4M')
+            self.assertEqual(ui.view._activity_line, 0)
+            await ui._send('\x1b[<64;26;4M')
+            self.assertEqual(ui.view._activity_line, 0)
+            await ui.key('End')
+            bottom = ui.view._activity_line
+            await ui._send('\x1b[<65;26;4M')
+            self.assertEqual(ui.view._activity_line, bottom)
+            await ui._send('\x1b[<64;26;4M')
+            self.assertEqual(ui.view._activity_line, bottom - 3)
+
     async def test_malformed_agent_records_are_skipped_by_real_renderer(self):
         async with tui_harness() as ui:
             ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': []})

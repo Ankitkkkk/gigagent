@@ -387,6 +387,8 @@ class TuiWorkflows:
         search = TextArea(text=self.state.search, multiline=False, height=1, prompt='Search: ',
                           input_processors=[_SafeInput()])
         tasks = set()
+        owner = asyncio.current_task()
+        fetch_error = None
         loading = False
 
         def visible():
@@ -440,13 +442,28 @@ class TuiWorkflows:
                 loading = False
                 self.dialogs.invalidate()
 
+        def fetched(task):
+            nonlocal fetch_error
+            tasks.discard(task)
+            if task.cancelled():
+                return
+            error = task.exception()  # Retrieve before releasing this read's owner.
+            if error is not None:
+                if fetch_error is None:
+                    fetch_error = error
+                # Wake only our modal. _open still owns focus/restoration; a
+                # replacement or already-finished modal keeps its own result.
+                future = self.dialogs.future
+                if self.dialogs.owner is owner and future is not None and not future.done():
+                    future.set_exception(error)
+
         def refresh():
             if loading or tasks:
                 self.notice('Loading sessions… Refresh is already in progress.')
                 return
             task = asyncio.create_task(fetch())
             tasks.add(task)
-            task.add_done_callback(tasks.discard)
+            task.add_done_callback(fetched)
 
         def toggle():
             if loading or tasks:
@@ -493,9 +510,14 @@ class TuiWorkflows:
         try:
             return await self._dialog('_open', dialog, bindings, search, cancelled)
         finally:
-            for task in tasks:
+            pending = tuple(tasks)
+            for task in pending:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await asyncio.gather(*pending, return_exceptions=True)
+            finally:
+                if fetch_error is not None:
+                    raise fetch_error
 
     async def navigate(self, mandatory=False):
         generation = self.controller.selection_generation
@@ -605,6 +627,8 @@ class TuiWorkflows:
             return self._failure('Select a session first')
         if action in ('spawn', 'resume') and sys.platform == 'win32':
             return self._failure(WINDOWS_TMUX_ERROR)
+        if action == 'spawn' and not self.controller.providers:
+            return self._failure('No providers configured')
         if action != 'spawn':
             agent_id = await self._choose_agent(agent_id)
             if not self._unchanged(scope):
@@ -756,18 +780,21 @@ class TuiWorkflows:
             text = ('F2 Sessions/Channels · F3 Agents · F4 Commands · F5 Activity\n'
                     'Tab changes focus · Enter selects/sends · Alt+Enter adds a line\n'
                     'Ctrl+Q Quit · Escape cancels · Ctrl+C preserves draft\n'
-                    'Sessions opens navigation. Committed switches and Quit checkpoint.\n\n' + HELP + '\n' +
+                    'Sessions opens navigation. Committed switches and Quit checkpoint.\n\n' +
+                    HELP.replace('/history            Show recent messages in this channel',
+                                 '/history            Jump to conversation') + '\n' +
                     SESSION_HELP.replace('/sessions            Checkpoint, then choose a session',
-                                         '/sessions            Open session navigation'))
+                                         '/sessions            Open session navigation').replace(
+                        '/history             Show recent channel messages',
+                        '/history            Jump to conversation'))
             self.view.show_help(text)
         elif action in ('switch_channel', 'create_channel'):
             return await self._channel(action)
         elif action == 'history' and self.controller.plain_channel:
-            result = await self.client.submit_outcome('/history')
             self.view.hide_activity()
             self.state.viewport.mark_seen()
             self.view.focus_named('conversation')
-            return ActionOutcome(result.status, result.message)
+            return ActionOutcome('completed')
         elif action in ('new_agent', 'resume', 'history'):
             return await self.agent_form('spawn' if action == 'new_agent' else action, target_id, _scope=scope)
         elif action in ('rename_session', 'archive_session'):

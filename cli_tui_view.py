@@ -92,15 +92,22 @@ class _ConversationControl(UIControl):
             self.view.state.viewport.mark_seen()
             self.view._app().invalidate()
             return None
+        if mouse_event.event_type in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+            self.scroll(-1 if mouse_event.event_type == MouseEventType.SCROLL_UP else 1, 3)
+            self.view._app().invalidate()
+            return None
         return NotImplemented
 
     def page(self, direction):
+        self.scroll(direction, max(1, self.height))
+
+    def scroll(self, direction, lines):
         ids = self.view._transcript_ids()
         if not ids:
             return
         ident, offset = self._visible_start
         index = ids.index(ident) if ident in ids else 0
-        remaining = max(1, self.height)
+        remaining = lines
 
         def count(position):
             message = self.view._message(ids[position])
@@ -119,6 +126,17 @@ class _ConversationControl(UIControl):
                 index += 1
                 length = count(index)
             offset = min(offset, max(0, length - 1))
+        if direction > 0:
+            # At most one viewport of lookahead decides whether the proposed
+            # anchor reaches the tail; do not scan the full transcript per wheel.
+            available = count(index) - offset
+            following = index + 1
+            while available < self.height and following < len(ids):
+                available += count(following)
+                following += 1
+            if available <= self.height and following == len(ids):
+                self.view.state.viewport.mark_seen()
+                return
         self.view.state.viewport.anchor(ids[index], self.view.client.messages, line_offset=offset)
 
     def create_content(self, width, height):
@@ -195,6 +213,15 @@ class _ActivityControl(UIControl):
 
     def is_focusable(self):
         return True
+
+    def mouse_handler(self, mouse_event):
+        if mouse_event.event_type in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+            offset = -3 if mouse_event.event_type == MouseEventType.SCROLL_UP else 3
+            self.view._activity_line = max(0, min(self.view._activity_max_line,
+                                                 self.view._activity_line + offset))
+            self.view._app().invalidate()
+            return None
+        return NotImplemented
 
     def create_content(self, width, height):
         self.height = max(1, height)
@@ -914,6 +941,8 @@ class TuiView:
                     reason = 'Agent is already stopped'
                 elif ident == 'resume' and agent.get('last_state') in ('running', 'starting'):
                     reason = 'Agent is already running'
+                if ident == 'new_agent' and workspace is not None and not self.controller.providers:
+                    reason = 'No providers configured'
                 if ident in {'new_agent', 'attach', 'resume', 'stop'} and sys.platform == 'win32':
                     reason = WINDOWS_TMUX_ERROR
             if self.controller.selection_pending and ident not in {'help', 'activity', 'quit'}:

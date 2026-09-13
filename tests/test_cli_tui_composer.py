@@ -14,6 +14,64 @@ def bind(ui, submit=None):
 
 
 class ComposerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_conversation_sgr_wheel_scrolls_wrapped_lines_and_resumes_follow(self):
+        async with tui_harness(size=(80, 24)) as ui:
+            bind(ui)
+            ui.client.handle_event({'type': 'message', 'data': {
+                'id': 1, 'text': 'x' * 6000, 'sender': 'peer'}})
+            await ui.wait_render()
+            tail = ui.view.conversation._visible_start
+            self.assertGreater(tail[1], 3)
+            await ui._send('\x1b[<64;5;4M')
+            self.assertFalse(ui.state.viewport.follow)
+            self.assertEqual(ui.view.conversation._visible_start, (1, tail[1] - 3))
+            self.assertEqual(ui.state.viewport.line_offset, tail[1] - 3)
+            ui.client.handle_event({'type': 'message', 'data': {
+                'id': 2, 'text': 'new tail', 'sender': 'peer'}})
+            await ui.wait_render()
+            self.assertEqual(ui.state.viewport.new_ids, {2})
+            await ui._send('\x1b[<65;5;4M')
+            self.assertFalse(ui.state.viewport.follow)
+            await ui._send('\x1b[<65;5;4M')
+            self.assertTrue(ui.state.viewport.follow)
+            self.assertFalse(ui.state.viewport.new_ids)
+            self.assertIn('new tail', ui.screen_text())
+            bottom = ui.view.conversation._visible_start
+            await ui._send('\x1b[<65;5;4M')
+            self.assertEqual(ui.view.conversation._visible_start, bottom)
+            ui.state.viewport.anchor(1, ui.client.messages, line_offset=1)
+            await ui.wait_render()
+            await ui._send('\x1b[<64;5;4M')
+            self.assertEqual(ui.view.conversation._visible_start, (1, 0))
+            await ui._send('\x1b[<64;5;4M')
+            self.assertEqual(ui.view.conversation._visible_start, (1, 0))
+            self.assertFalse(ui.state.viewport.follow)
+
+    async def test_conversation_sgr_wheel_crosses_records_and_deleted_anchor(self):
+        async with tui_harness() as ui:
+            bind(ui)
+            ui.client.handle_event({'type': 'history', 'messages': [
+                {'id': i, 'timestamp': i, 'text': f'message {i}', 'sender': 'peer'}
+                for i in range(1, 41)]})
+            ui.client.handle_event({'type': 'history_complete'})
+            ui.state.viewport.anchor(10, ui.client.messages)
+            await ui.wait_render()
+            await ui._send('\x1b[<64;26;4M')
+            self.assertEqual(ui.view.conversation._visible_start, (8, 1))
+            await ui._send('\x1b[<65;26;4M')
+            self.assertEqual(ui.view.conversation._visible_start, (10, 0))
+            ui.client.handle_event({'type': 'delete', 'ids': [10]})
+            await ui.wait_render()
+            self.assertEqual(ui.view.conversation._visible_start, (11, 0))
+            await ui._send('\x1b[<64;26;4M')
+            self.assertEqual(ui.view.conversation._visible_start, (8, 1))
+            await ui._send('\x1b[<65;26;4M')
+            self.assertEqual(ui.view.conversation._visible_start, (11, 0))
+            ui.view.focus_named('conversation')
+            await ui.key('End')
+            self.assertTrue(ui.state.viewport.follow)
+            self.assertIn('message 40', ui.screen_text())
+
     async def test_cancel_scheduled_send_before_start_releases_reservation(self):
         async with tui_harness() as ui:
             bind(ui)

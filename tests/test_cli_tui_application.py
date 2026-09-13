@@ -105,6 +105,164 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await ui.wait_until(lambda: ui.client.websocket is not None)
         await ui.socket.deliver({'type': 'history_complete'})
 
+    async def test_bare_history_typed_in_both_modes_only_focuses_transcript(self):
+        for plain in (False, True):
+            with self.subTest(plain=plain):
+                async with self.ui(plain=plain, selected=None if plain else workspace()) as ui:
+                    await self.connected(ui)
+                    await ui.type_text('/history')
+                    ui.state.viewport.follow = False
+                    ui.state.viewport.new_ids.add(99)
+                    ui.view.show_activity()
+                    ui.view.focus_named('composer')
+                    ui.api.reset_mock()
+                    with patch.object(ui.client, 'submit_outcome', side_effect=AssertionError('legacy history')):
+                        await ui.key('Enter')
+                        await ui.wait_until(lambda: not ui.composer_actions.sending or ui.dialogs.future is not None)
+                    self.assertFalse(ui.view.activity_visible)
+                    self.assertTrue(ui.state.viewport.follow)
+                    self.assertFalse(ui.state.viewport.new_ids)
+                    self.assertEqual(ui.focused_control, 'conversation')
+                    self.assertIsNone(ui.dialogs.future)
+                    self.assertEqual(ui.api.mock_calls, [])
+                    self.assertEqual(ui.view.composer.text, '')
+
+    async def test_typed_history_arguments_keep_controller_action(self):
+        async with self.ui(selected=workspace(agents=[agent()])) as ui:
+            await self.connected(ui)
+            outcome = await ui.tui.submit('/history ag_one none')
+            self.assertEqual(outcome.status, 'completed')
+            ui.api.action.assert_called_once_with('ws_one', 'history', 'ag_one', body={'mode': 'none'})
+            self.assertIsNone(ui.dialogs.future)
+
+    async def test_help_bare_history_literal_describes_transcript_jump(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            await ui.key('F1')
+            self.assertTrue(ui.view.help_visible)
+            self.assertIn('/history            Jump to conversation', ui.view._help_text)
+            self.assertNotIn('Show recent channel messages', ui.view._help_text)
+            self.assertNotIn('Show recent messages in this channel', ui.view._help_text)
+            self.assertIn('/history AGENT MODE  Change history mode: none or literal', ui.view._help_text)
+
+    async def test_empty_providers_add_agent_fails_without_losing_draft(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            ui.controller.providers = []
+            await ui.type_text('preserved draft')
+            before = (ui.view.composer.text, ui.view.composer.buffer.cursor_position)
+            action = asyncio.create_task(ui.tui.run_action('new_agent'))
+            try:
+                done, _ = await asyncio.wait({action}, timeout=1)
+                self.assertIn(action, done, 'empty providers must refuse before opening form')
+                outcome = action.result()
+            finally:
+                action.cancel()
+                await asyncio.gather(action, return_exceptions=True)
+            self.assertEqual((outcome.status, outcome.message), ('failed', 'No providers configured'))
+            self.assertFalse(ui.task.done())
+            self.assertIsNone(ui.dialogs.future)
+            self.assertEqual((ui.view.composer.text, ui.view.composer.buffer.cursor_position), before)
+            ui.api.action.assert_not_called()
+            self.assertIn('No providers configured', ui.state.notices.lines)
+
+    async def test_navigation_list_parsing_failure_reaches_run_after_restoration(self):
+        hooks = (Mock(), Mock(), Mock(), Mock(), object(), Mock())
+        failure = RuntimeError('session row parsing failed')
+        class BrokenRow(dict):
+            def get(self, key, default=None):
+                if key == 'id':
+                    raise failure
+                return super().get(key, default)
+        loop = asyncio.get_running_loop()
+        previous_handler, errors = loop.get_exception_handler(), []
+        loop.set_exception_handler(lambda loop, context: errors.append(context))
+        previous_signals = tuple(signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM))
+        try:
+            async with self.ui(selected=workspace(), prior_hooks=hooks) as ui:
+                await self.connected(ui)
+                loop.set_exception_handler(lambda loop, context: errors.append(context))
+                ui.api.list.side_effect = lambda **kwargs: {'workspaces': [BrokenRow(workspace())]}
+                await ui.key('F2')
+                done, _ = await asyncio.wait({ui.task}, timeout=1)
+                self.assertIn(ui.task, done, 'navigation failure must stop Application')
+                self.assertIs(ui.task.exception(), failure)
+                self.assertEqual((ui.client.output, ui.client.on_view_change, ui.client.on_workspace,
+                    ui.client.on_settings, ui.controller.presentation, ui.controller.on_view_change), hooks)
+                self.assertEqual(tuple(signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)),
+                                 previous_signals)
+                self.assertIn('\x1b[?1049l', ui.stream.getvalue())
+                self.assertIsNone(ui.dialogs.future)
+                self.assertLess(ui.events.index('checkpoint'), ui.events.index('receiver_cancel'))
+                self.assertFalse(errors, errors)
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    async def test_navigation_cancelled_fetch_failure_does_not_join_draining_quit(self):
+        for trigger in ('key', 'signal', 'escape'):
+            with self.subTest(trigger=trigger):
+                hooks = (Mock(), Mock(), Mock(), Mock(), object(), Mock())
+                failure = RuntimeError('cancelled session read failed locally')
+                async with self.ui(selected=workspace(), prior_hooks=hooks) as ui:
+                    await self.connected(ui)
+                    entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                    async def delayed_list(**kwargs):
+                        entered.set()
+                        try:
+                            await asyncio.Future()
+                        except asyncio.CancelledError:
+                            cancelled.set()
+                            await release.wait()
+                            raise failure
+                    ui.controller.list_sessions = delayed_list
+                    await ui.key('F2')
+                    await asyncio.wait_for(entered.wait(), 1)
+                    navigation = ui.dialogs.owner
+                    # Trap only the invalid cycle edge so a regression fails boundedly:
+                    # Quit drains navigation, therefore navigation cannot join Quit.
+                    original_quit, cycle_attempts = ui.tui.request_quit, []
+                    async def observed_quit(signal=False):
+                        if asyncio.current_task() is navigation and ui.tui.quitting:
+                            cycle_attempts.append('navigation joined draining Quit')
+                            return True
+                        return await original_quit(signal=signal)
+                    ui.tui.request_quit = observed_quit
+                    quit_task = None
+                    try:
+                        if trigger == 'signal':
+                            quit_task = asyncio.create_task(ui.tui.request_quit(signal=True))
+                        else:
+                            await ui.key('CtrlQ' if trigger == 'key' else 'Escape')
+                        await asyncio.wait_for(cancelled.wait(), 1)
+                        self.assertFalse(ui.task.done())
+                        release.set()
+                        done, _ = await asyncio.wait({ui.task}, timeout=1)
+                        self.assertIn(ui.task, done, 'cancelled fetch failure must finish shutdown')
+                        self.assertIs(ui.task.exception(), failure)
+                        self.assertFalse(cycle_attempts, cycle_attempts)
+                        self.assertEqual((ui.client.output, ui.client.on_view_change, ui.client.on_workspace,
+                            ui.client.on_settings, ui.controller.presentation, ui.controller.on_view_change), hooks)
+                        self.assertIn('\x1b[?1049l', ui.stream.getvalue())
+                        self.assertIsNone(ui.dialogs.future)
+                        self.assertLess(ui.events.index('checkpoint'), ui.events.index('receiver_cancel'))
+                    finally:
+                        release.set()
+                        if quit_task is not None:
+                            await asyncio.gather(quit_task, return_exceptions=True)
+
+    async def test_navigation_expected_transport_error_keeps_app_and_draft(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            await ui.type_text('saved draft')
+            ui.api.list.side_effect = OSError('offline')
+            await ui.key('F2')
+            await ui.wait_until(lambda: ui.view.sessions_stale)
+            self.assertIn('Session list unavailable; retry Refresh.', ui.state.notices.lines)
+            await ui.key('Escape')
+            self.assertFalse(ui.task.done())
+            self.assertEqual(ui.view.composer.text, 'saved draft')
+            self.assertIsNone(ui.tui._run_error)
+
     async def test_initial_cancel_never_starts_transport(self):
         for key in ('Escape', 'CtrlC', 'CtrlQ'):
             with self.subTest(key=key):

@@ -258,7 +258,9 @@ class TuiApplication:
             return await operation
         except Exception as error:
             self._remember_failure(error)
-            await self.request_quit(signal=True)
+            # Quit may already be draining this caller after cancelling its read.
+            if not self.quitting:
+                await self.request_quit(signal=True)
             return outcome_type('failed')
 
     async def _attach_id(self, agent_id):
@@ -282,8 +284,13 @@ class TuiApplication:
             actions = {'/help': 'help', '/agents': 'agents', '/archive': 'archive_session'}
             if command == '/sessions':
                 outcome = await self.navigate()
-            elif command in actions or (command == '/history' and len(words) == 1):
-                outcome = await self.workflows.run_action(actions.get(command, 'history'))
+            elif command == '/history' and len(words) == 1:
+                self.view.hide_activity()
+                self.state.viewport.mark_seen()
+                self.view.focus_named('conversation')
+                outcome = ActionOutcome('completed')
+            elif command in actions:
+                outcome = await self.workflows.run_action(actions[command])
             else:
                 if command in ('/join', '/create'):
                     if not self.controller.plain_channel:

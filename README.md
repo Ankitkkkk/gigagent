@@ -83,6 +83,9 @@ The full-screen controls are:
 | Tab / Shift+Tab | Move between visible controls |
 | Enter | Select the highlighted choice or send the composer text |
 | Alt+Enter | Add a line without sending |
+| PageUp / PageDown | Scroll a page in the focused conversation or Activity pane |
+| End | Follow the latest messages in the focused conversation and clear its new-message count; jump to the bottom in Activity |
+| Mouse wheel | Scroll three wrapped lines in conversation or Activity; conversation wheel-up leaves follow, and reaching the bottom resumes follow and clears its new-message count |
 | Escape | Cancel the current dialog or close Help/Activity |
 | Ctrl+C | Cancel the current dialog while preserving the message draft |
 | Ctrl+D | Delete at the cursor, or Quit when the composer is empty |
@@ -107,7 +110,7 @@ after an agent is selected. Detaching returns to the current draft.
 | `/join NAME` | Switch channels in plain channel mode |
 | `/create NAME` | Create and switch channels in plain channel mode |
 | `/agents` | Show agent availability and roles |
-| `/history` | Show recent messages in the current channel |
+| `/history` | Jump to the conversation and follow latest messages; `--plain` shows recent messages |
 | `/spawn PROVIDER` | Prompt for working directory and history policy, then start an agent |
 | `/resume AGENT [--fresh] [--cwd PATH]` | Resume an agent, optionally starting a fresh conversation |
 | `/attach AGENT`, `/stop AGENT` | Open or stop an agent terminal |
