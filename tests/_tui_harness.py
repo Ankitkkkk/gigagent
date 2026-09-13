@@ -337,3 +337,190 @@ async def application_harness(client, controller, *, size=(120, 35), **kwargs):
             yield ui
         finally:
             await ui.close()
+
+
+# Executed by `python -c`, without importing this module (which imports cli).
+# This preserves real cli.py __main__ dispatch and lazy-import behavior.
+PTY_OBSERVER = r'''
+import fcntl, json, os, runpy, sys, termios, time
+from pathlib import Path
+from prompt_toolkit.application import Application
+
+snapshot_path, root, *arguments = sys.argv[1:]
+if os.getsid(0) == os.getpid():
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+original_run = Application.run_async
+count = 0
+
+def capture(app):
+    global count
+    screen = app.renderer.last_rendered_screen
+    if screen is None:
+        return
+    # Renderer commits this size together with last_rendered_screen. A fresh
+    # ioctl query here can already describe the next resize, mixing two frames.
+    size = app.renderer._last_size
+    if size is None:
+        return
+    count += 1
+    cells = [[screen.data_buffer[y][x].char for x in range(size.columns)]
+             for y in range(size.rows)]
+    current = app.layout.current_control
+    owner = getattr(getattr(current, 'text', None), '__self__', None)
+    cursor = screen.get_cursor_position(app.layout.current_window)
+    record = dict(count=count, time=time.monotonic(), columns=size.columns, rows=size.rows,
+                  cells=cells, text='\n'.join(''.join(row).rstrip() for row in cells),
+                  cursor=[cursor.x, cursor.y], buffer=app.current_buffer.text,
+                  buffer_cursor=app.current_buffer.cursor_position,
+                  focus_caption=getattr(owner, 'text', None), source='pty-renderer')
+    temp = Path(snapshot_path + '.new')
+    temp.write_text(json.dumps(record, ensure_ascii=False))
+    temp.replace(snapshot_path)
+
+async def observed_run(self, *args, **kwargs):
+    self.after_render += capture
+    try:
+        return await original_run(self, *args, **kwargs)
+    finally:
+        self.after_render -= capture
+
+Application.run_async = observed_run
+sys.path.insert(0, root)
+sys.argv = [str(Path(root) / 'cli.py'), *arguments]
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+finally:
+    print('QA_TERMINAL_RETURNED', flush=True)
+'''
+
+
+class PtyTerminal:
+    """Owned controlling tty with real VT bytes; no fake input/output objects."""
+
+    def __init__(self, command, *, env, cwd, size=(120, 30)):
+        import os
+        import pty
+        import subprocess
+        import termios
+        import threading
+        from contextlib import ExitStack
+        from tests._cli_server import stop_process
+
+        self.cleanup = ExitStack()
+        self.process = None
+        self.raw = bytearray()
+        self.stopped = threading.Event()
+        self.changed = threading.Event()
+        self.lock = threading.Lock()
+        try:
+            self.master, self.slave = pty.openpty()
+            self.cleanup.callback(os.close, self.slave)
+            self.cleanup.callback(os.close, self.master)
+            self.before_termios = termios.tcgetattr(self.slave)
+            self.resize(*size, notify=False)
+            self.reader = threading.Thread(target=self._drain, daemon=True)
+            self.cleanup.callback(self._stop_reader)
+            # Register closure before launch; child is assigned only after Popen.
+            self.cleanup.callback(lambda: stop_process(self.process)
+                                  if self.process is not None else None)
+            self.process = subprocess.Popen(command, stdin=self.slave, stdout=self.slave,
+                                            stderr=self.slave, env=env, cwd=cwd,
+                                            start_new_session=True)
+            self.reader.start()
+        except BaseException:
+            self.cleanup.close()
+            raise
+
+    def _stop_reader(self):
+        self.stopped.set()
+        if self.reader.ident is not None:
+            self.reader.join(timeout=2)
+
+    def _drain(self):
+        import os
+        import select
+        pending = b''
+        while not self.stopped.is_set():
+            if not select.select([self.master], [], [], .05)[0]:
+                continue
+            try:
+                chunk = os.read(self.master, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            with self.lock:
+                self.raw.extend(chunk)
+                if len(self.raw) > 2 * 1024 * 1024:
+                    del self.raw[:-2 * 1024 * 1024]
+            # Answer terminal CPR requests without bypassing input decoding.
+            pending += chunk
+            while b'\x1b[6n' in pending:
+                _, pending = pending.split(b'\x1b[6n', 1)
+                os.write(self.master, b'\x1b[1;1R')
+            pending = pending[-4:]
+            self.changed.set()
+
+    def send(self, text):
+        import os
+        data = text.encode() if isinstance(text, str) else text
+        while data:
+            written = os.write(self.master, data)
+            data = data[written:]
+
+    def key(self, name):
+        self.send(TuiHarness.sequences[name])
+
+    def paste(self, text):
+        self.send('\x1b[200~' + text + '\x1b[201~')
+
+    def resize(self, columns, rows, *, notify=True):
+        import fcntl
+        import os
+        import signal
+        import struct
+        import termios
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, columns, 0, 0))
+        if notify and self.process is not None:
+            os.killpg(self.process.pid, signal.SIGWINCH)
+
+    def output(self):
+        with self.lock:
+            return bytes(self.raw).decode('utf-8', errors='replace')
+
+    def wait(self, predicate, *, timeout=15):
+        import re
+        from time import monotonic
+        deadline = monotonic() + timeout
+        while monotonic() < deadline:
+            value = predicate()
+            if value:
+                return value
+            self.changed.wait(min(.05, max(0, deadline - monotonic())))
+            self.changed.clear()
+        output = re.sub(r'([?&]token=)[^\s&\"\'<>]+', r'\1[REDACTED]', self.output(),
+                        flags=re.IGNORECASE)
+        output = re.sub(r'(Session token:\s*)\S+', r'\1[REDACTED]', output,
+                        flags=re.IGNORECASE)
+        raise AssertionError('PTY condition timed out; terminal tail:\n' + output[-3000:])
+
+    def snapshot(self, path):
+        import json
+        from pathlib import Path
+        try:
+            return json.loads(Path(path).read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    def screen(self, path, predicate=lambda value: True, *, timeout=15):
+        return self.wait(lambda: (value if (value := self.snapshot(path))
+                                 and predicate(value) else None), timeout=timeout)
+
+    def close(self):
+        self.cleanup.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()

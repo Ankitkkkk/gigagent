@@ -76,7 +76,7 @@ The full-screen controls are:
 | Key | Action |
 | --- | --- |
 | F2 | Open Sessions, or Channels in channel-only chat |
-| F3 | Focus agents and their available actions |
+| F3 | Open agent selection and available actions |
 | F4 | Open the command palette |
 | F5 | Open Activity diagnostics |
 | F1 | Open Help |
@@ -95,6 +95,12 @@ history settings, inspection, refresh, and Quit. Narrow terminals use a compact
 layout. Below 80 columns or 18 rows, the UI keeps the current model, draft, and
 focus while showing resize, Help, and Quit controls.
 
+Choose **New session**, enter its name, and press Enter. F3 opens agent actions:
+choose **Add agent**, select a provider, enter an existing absolute working
+directory, and review the history mode before starting. To attach, press F3,
+choose the agent, and select **Attach**. The command palette also offers Attach
+after an agent is selected. Detaching returns to the current draft.
+
 | Interactive command | Action |
 | --- | --- |
 | `/channels` | List channels |
@@ -108,7 +114,7 @@ focus while showing resize, Help, and Quit controls.
 | `/unread [AGENT]`, `/retry AGENT` | Inspect unread messages or retry their delivery |
 | `/history AGENT MODE` | Set agent history policy to `literal` or `none` |
 | `/rename "New name"` | Rename the selected session |
-| `/sessions` | Checkpoint and return to the session picker |
+| `/sessions` | Open session navigation; `--plain` checkpoints before opening its picker |
 | `/archive` | Confirm archival, stop session agents, and return to the picker |
 | `/jobs`, `/rules` | List jobs or rules |
 | `/help` | Show commands |

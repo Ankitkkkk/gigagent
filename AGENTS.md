@@ -193,7 +193,12 @@ and kill only the isolated tmux server. Redact token query values and startup
 token lines from failure log excerpts before temporary-directory cleanup.
 Never replace the inert shim with paid Claude/Codex sessions. Foreground attach
 and buffered WebSocket output use controlled terminal tests in
-`tests/test_cli_workspace_chat.py`; the real tmux test covers lifecycle only.
+`tests/test_cli_workspace_chat.py`; the older real tmux test covers lifecycle only.
+`tests/test_cli_tui_integration.py` adds production Application/real-server
+send/switch/checkpoint coverage, actual `cli.py` script dispatch on a controlling
+PTY, resize/paste/mouse/Quit restoration, and outside/nested attach using an
+inert `kilo`. Nested tmux copy-mode tests terminal-native selection/copy;
+desktop clipboard and physical mouse behavior remain manual checks.
 Full-screen component and application tests use prompt-toolkit pipe input with
 captured VT screens from `tests/_tui_harness.py`. For isolated PTY QA, preserve
 the real CLI entry, terminal dimensions, input bytes, and terminal restoration;
@@ -201,6 +206,14 @@ capture runtime cells instead of treating stripped ANSI output as a screen.
 Always remove inherited `TMUX`, use a private `TMUX_TMPDIR`, and register child
 and private tmux-server cleanup before launch. Never attach to or kill a
 developer tmux server.
+
+Set `TUI_QA_ARTIFACT_DIR` to an existing review directory when retaining PTY
+JSON cell snapshots and terminal text. The observer pairs cells with the
+renderer’s committed dimensions; a fresh output-size query may already describe
+the next resize. Wait for the expected visible layout and a newer render before
+accepting a capture. PNGs rendered from these cells are labelled monochrome and
+do not establish terminal color or font fidelity. Windows full-screen and
+third-party asyncio loops remain untested end to end.
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -p 'test_cli*integration.py' -v

@@ -21,6 +21,7 @@ This is the TUI slice. It does not implement the separately deferred summary-his
 - Full-screen mode requires terminal stdin and stdout. With terminal stdin but non-terminal stdout, automatically use plain mode and emit exactly one stderr line: `Full-screen unavailable; using plain mode.` On POSIX only, unset/empty/`dumb` `TERM` also triggers that fallback. Windows does not require `TERM` and gets full-screen chat with existing tmux-operation refusals. Fallback alone does not change the exit code. Non-terminal stdin retains the existing refusal directing scripts to `read` or `send`; this validation precedes fallback. Explicit `--plain` skips capability selection without printing a fallback notice. Screen-reader users and Windows users needing compatibility can choose it explicitly.
 - Existing auto-start rules remain: interactive local chat only, never auto-start with explicit `--url`, no server restart or duplicate-session replacement. Startup diagnostics appear before screen entry and remain available in the UI's activity panel.
 - Exiting checkpoints the selected session and leaves server and agents running.
+- Unexpected local full-screen failures restore terminal ownership and exit 1 with exactly `Full-screen terminal stopped after an unexpected local error (TYPE); rerun with --plain.` The type name replaces `TYPE`; exception messages and authenticated URLs are never included. This R-T11c mapping applies to unexpected exceptions in the full-screen branch, including its lazy import. Existing `CLIError`/`ValueError` and interrupt handling stay unchanged. No runtime retry into plain mode occurs.
 
 ## 3. Layout and visual language
 
@@ -45,7 +46,7 @@ Wide layout, at least 110 columns and 24 rows:
 │                    ├ Message ────────────────────────────┤
 │                    │ Write a message or /command…       │
 └────────────────────┴─────────────────────────────────────┘
- F2 Sessions   F3 Agents   F4 Commands   F1 Help   Ctrl+Q Quit
+ F2 Sessions   F3 Agents   F4 Commands   F5 Activity   F1 Help   Ctrl+Q Quit
 ```
 
 The left sidebar occupies 22 columns including its borders, matching the schematic. The main pane holds the conversation, a compact agent area, and a composer that grows from three to six lines. An expanded agent inspector shows provider, directory, unread count, history state, resume availability, and relevant recovery guidance. Long labels truncate by display width; focusing a row exposes its full label in the inspector/help area.
@@ -62,6 +63,7 @@ Empty states are actionable: “No sessions yet” with New session and Show arc
 | F2 | Focus/open session or channel navigation and search |
 | F3 | Focus/open agents and the selected agent's actions |
 | F4 | Open searchable command palette |
+| F5 | Open/toggle persistent Activity diagnostics; Escape returns to prior focus |
 | Tab / Shift+Tab | Move focus between controls; accept/cycle an open completion menu first |
 | Up / Down | Move the focused list or completion selection; normal cursor movement in the composer |
 | Enter | Activate a selected action; in composer, send or execute the current input |
@@ -197,7 +199,7 @@ The following are planned integration interfaces, not APIs already present at th
 
 `execute_action` accepts an explicit allowlist: select/create/rename/archive session; spawn/resume/stop/attach agent; unread/retry/history policy. Session and agent selection use full stable IDs in payloads; user-written slash commands still use existing resolvers. The controller captures and validates the selected workspace before any mutation. Form values become typed/validated payload fields, not interpolated shell or slash strings. The legacy dispatcher delegates to these same operations. Event notifications are advisory invalidations and never replace workspace or message state with a second copy.
 
-View notifications have one defined shape: `source` (`client` or `controller`), `kind` (`connection`, `messages`, `history`, `settings`, `status`, `channel`, `selection`, `agent_state`, `action`, or `notice`), `workspace_id` and `agent_id` (nullable strings), `message_ids` (tuple of existing message IDs, empty when inapplicable), `revision` (monotonic integer for that source), `selection_generation` (controller generation, null for unscoped client events), and `text` (optional plain notice text). Controller revision means `_state_revision`; client revision is an invalidation counter, not a duplicate message store. A callback runs after the state mutation and applicable `_state_revision`/`_selection_version` bump, in the same event-loop tick. Never notify with pre-mutation state. Views use IDs/revisions to reject stale delayed presentation work and read the current authoritative model.
+View notifications have one defined shape: `source` (`client` or `controller`), `kind` (`connection`, `messages`, `history`, `settings`, `status`, `channel`, `selection`, `agent_state`, `action`, or `notice`), `workspace_id` and `agent_id` (nullable strings), `message_ids` (tuple of existing message IDs, empty when inapplicable), `revision` (monotonic integer for that source), `selection_generation` (controller generation, null for unscoped client events), and `text` (optional plain notice text). Trailing optional `old_channel` and `new_channel` fields default to None; channel-renamed events carry exact old/new identities for draft migration even when settings arrive first. Existing positional fields remain unchanged. Controller revision means `_state_revision`; client revision is an invalidation counter, not a duplicate message store. A callback runs after the state mutation and applicable `_state_revision`/`_selection_version` bump, in the same event-loop tick. Never notify with pre-mutation state. Views use IDs/revisions to reject stale delayed presentation work and read the current authoritative model.
 
 `execute_action` returns `ActionOutcome(status, message, workspace_id, agent_id)`: status is exactly `completed`, `cancelled`, or `failed`; message is optional plain diagnostic text; IDs are nullable stable strings identifying the attempted action. Expected refusals return failed; cancelled forms return cancelled and perform no action. Unexpected local exceptions propagate through terminal restoration. Structured legacy adapters expose the same outcome without changing their pre-existing boolean/string return contracts.
 
