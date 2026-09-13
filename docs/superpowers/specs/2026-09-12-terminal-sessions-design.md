@@ -11,6 +11,8 @@ colliding with the existing structured-workflow `session_store.py` and
 
 ## Decisions
 
+Full-screen presentation decisions D16–D28 live in the [TUI design](2026-09-13-terminal-tui-design.md#10-decisions-and-review-boundary). They amend only the new interactive view after its approval and implementation; the existing plain CLI and shell contracts below remain the baseline.
+
 | # | Decision | Chosen |
 |---|----------|--------|
 | D1 | Picker entry represents | One workspace: project dir + dedicated channel + its agents. |
@@ -626,6 +628,8 @@ route carries `unread_count` per agent from the same computation.
 - The picker shows `unread N` next to each agent.
 
 ## 5. CLI
+
+The [full-screen TUI amendment](2026-09-13-terminal-tui-design.md#7-existing-behavior-versus-presentation-changes) defines the new view's navigation, literal placement, fallback, and terminal-handoff behavior. Its §5/§8 selection and lifecycle rules apply to TUI mode; `--plain` and shell behavior retain this section's contracts. The TUI is a separately approved feature awaiting implementation.
 
 `cli.py` stays a thin client. All state and process control go through the
 API in §2. The user-facing word is "session"; flags and commands use it.
