@@ -75,7 +75,7 @@ class SubmitOutcome:
     message: str | None = None
 ```
 
-`controller.presentation` is None for legacy mode. A TUI presenter implements `confirm(text, *, default=False, escape=False) -> bool`, `attach(agent) -> ActionOutcome`, and `notice(text) -> None`; forms gather values in the application before `execute_action`. The controller never instantiates prompt-toolkit controls. Its view hook is an optional synchronous callable accepting ViewEvent. New public coroutine methods are `list_sessions(include_archived=False)`, `execute_action(action, payload)`, `dispatch_action(text)`, `select_session(ws_id)`, `cancel_selection()`, and `wait_pending()`. `bind_view(presentation, notify)` installs view mode/callbacks without starting receiver/poller. Existing initialize/handle/close APIs remain compatible.
+`controller.presentation` is None for legacy mode. A TUI presenter implements `confirm(text, *, default=False, escape=False) -> bool`, `attach(agent) -> ActionOutcome`, and `notice(text) -> None`; forms gather values in the application before `execute_action`. The controller never instantiates prompt-toolkit controls. Its view hook is an optional synchronous callable accepting ViewEvent. New public coroutine methods are `list_sessions(include_archived=False)`, `execute_action(action, payload)`, `dispatch_action(text)`, `select_session(ws_id)`, `cancel_selection()`, and `wait_pending()`. `bind_view(presentation, notify)` installs view mode/callbacks without starting receiver/poller. It also sets `client.on_workspace = self.on_workspace` and `client.on_settings = self.on_settings`; TUI startup never calls legacy initialize, so this binding must be self-contained. Existing initialize/handle/close APIs remain compatible.
 
 Use existing IDs and response dictionaries without copying them into a parallel store. Every task consuming a newly introduced interface lists it below. Implementation code excerpts specify the load-bearing algorithm; integrate them with the existing surrounding validation and tests rather than pasting duplicate dispatch paths.
 
@@ -170,7 +170,7 @@ async def _run_mutation(self, function, *args, **kwargs):
 
 Exceptions from completed mutations must be consumed even during cancellation. Expected CLIError/OSError/TimeoutError become failed outcomes plus sanitized notices, never catch arbitrary local exceptions as transport failures. `wait_pending` awaits strong references without replay. Preserve legacy plain guard, malformed-syntax text, trust hint, fresh/name/cwd hints, and duplicate cwd/unread prevention.
 
-`dispatch_action` parses only recognized session commands and returns None for delegated chat commands; in TUI mode it excludes /sessions,/archive,/quit,/help,/agents and no-argument /history because the application provides their view orchestration. Legacy handle still handles its original picker/close branches. `attach` invokes the injected presenter only when in TUI mode; otherwise retains the old pause/helper/resume flow. Until Task 4 wires a presenter, action tests supply an explicit fake presenter.
+`dispatch_action` parses only recognized session commands and returns None for delegated chat commands; in TUI mode it excludes /sessions,/archive,/quit,/help,/agents and no-argument /history because the application provides their view orchestration. Legacy handle still handles its original picker/close branches. `attach` invokes the injected presenter only when in TUI mode; otherwise retains the old pause/helper/resume flow. Until Task 10 wires a presenter, action tests supply an explicit fake presenter.
 - [ ] Cover all action bodies, invalid IDs/summary/Windows refusal, duplicate activation serialization, failed outcome and legacy parity; run `tests.test_cli_tui_actions tests.test_cli_workspace_chat tests.test_cli_workspace_commands`.
 - [ ] Commit only controller/test file; include explicit before/after API-call evidence.
 
@@ -178,7 +178,7 @@ Exceptions from completed mutations must be consumed even during cancellation. E
 
 **Files:** modify `cli_workspace_chat.py`; create `tests/test_cli_tui_selection.py`.
 **Consumes:** shared action lock/outcomes, presentation.confirm, _select/close/version guards.
-**Produces:** list_sessions/select_session/cancel_selection; `_selection_task`, `_selection_commit`, `selection_pending`; archive clears TUI selection and emits a selection event.
+**Produces:** list_sessions/select_session/cancel_selection; `_selection_task`, `_selection_commit`, `selection_pending`; archive clears TUI selection and emits a selection event. Add `select_session{session_id}` to the execute_action allowlist, validating and delegating to select_session.
 
 - [ ] RED test cancellation before commit keeps every old-state field:
 
@@ -197,7 +197,7 @@ async def test_cancel_dialog_preserves_old_selection(self):
 
 Fixture `make_controller` installs a presenter whose confirm waits on asyncio.Event and returns the configured choice, plus a fake API containing old/candidate snapshots; no view widget needed yet. Add separate checkpoint-blocked barrier proving Quit waits for commit rather than cancelling it.
 - [ ] Run selection tests RED.
-- [ ] Implement fetch/dialog preparation without holding `_action_lock`. Batch resume Escape is Chat only; archived Escape is No. Missing-directory agents skipped, Windows chat-only notice retained, batch resume body `{}` unchanged. Candidate API mutations use Task 2's pending tracking; completed effects are never rolled back.
+- [ ] Implement fetch/dialog preparation without holding `_action_lock`. `no_resume` chooses Chat only without showing a resume prompt. Batch resume Escape is Chat only; archived Escape is No. Missing-directory agents skipped, Windows chat-only notice retained, batch resume body `{}` unchanged. Candidate API mutations use Task 2's pending tracking; completed effects are never rolled back.
 
 ```python
 async def _commit_selection(self, candidate, generation):
@@ -271,9 +271,7 @@ def test_drafts_refuse_new_destination_without_eviction(self):
 
 ```python
 def label_text(value):
-    return ''.join(c for c in str(value)
-                   if c.isprintable() and c != '\x1b'
-                   and unicodedata.category(c) != 'Cf')
+    return _safe(value)  # reuse existing policy; isprintable already removes Cf
 
 def layout_mode(columns, rows):
     if columns < 80 or rows < 18:
@@ -281,7 +279,7 @@ def layout_mode(columns, rows):
     return 'wide' if columns >= 110 and rows >= 24 else 'compact'
 ```
 
-Body policy mirrors terminal_text then expands tabs; labels remove directional/zero-width formatting controls. clip_cells uses get_cwidth per complete character and fits ellipsis without splitting combining clusters. NoticeStore.add splits real newline-delimited lines, retains newest 1,000, tracks omitted count, and never writes stdout. Viewport stores anchor/follow/new-ID set; reconnect/update/delete adjust anchor against current client.messages without another cache. If anchor is deleted, choose the next surviving message, or the nearest previous survivor.
+Ruling R-F: import and reuse existing `terminal_text` and `_safe`, never copy their implementations. Alternatively move them unchanged into dependency-free cli_view_contracts and re-export from their old names. Body policy calls terminal_text then expands tabs; labels call _safe, whose isprintable already removes directional/zero-width Cf controls. Document/test that property rather than adding a second sanitiser. Cost if wrong: one extra import edge. clip_cells uses get_cwidth per complete character and fits ellipsis without splitting combining clusters. NoticeStore.add splits real newline-delimited lines, retains newest 1,000, tracks omitted count, and never writes stdout. Viewport stores anchor/follow/new-ID set; reconnect/update/delete adjust anchor against current client.messages without another cache. If anchor is deleted, choose the next surviving message, or the nearest previous survivor.
 - [ ] Test 64-KiB UTF-8 boundary, existing drafts at capacity/postarchive composing refusal, Unicode widths/controls, 1,001-line overflow, layout breakpoints, message-ID viewport behavior. Run focused state tests.
 - [ ] Commit state module/test pair. Do not create widgets or API clients.
 
@@ -309,7 +307,7 @@ async def test_confirmation_y_n_default_and_escape(self):
 
 Define dialog_application/wait_modal in this test file using create_pipe_input, Application.run_async, a FloatContainer, and Event signaled after the host installs a dialog. Cleanup cancels/awaits the Application task.
 - [ ] Run dialogs tests RED.
-- [ ] DialogHost owns one modal Future and saved focus. `open` installs a modal FloatContainer, focuses its first enabled control and invalidates; resolve/cancel removes it, restores valid old focus, resolves exactly once. Never block the event loop. Duplicate open requests return a clear busy/cancelled result rather than orphaning a Future.
+- [ ] DialogHost exposes `body` (an empty container while closed); Task 7 includes `Float(content=DynamicContainer(lambda: dialogs.body))` in its root FloatContainer. DialogHost owns one modal Future and saved focus. `open` installs a modal FloatContainer, focuses its first enabled control and invalidates; resolve/cancel removes it, restores valid old focus, resolves exactly once. Never block the event loop. Duplicate open requests return a clear busy/cancelled result rather than orphaning a Future.
 
 ```python
 def finish(self, value):
@@ -321,6 +319,8 @@ def finish(self, value):
         future.set_result(value)
 ```
 
+Ruling R-G: composer escape-prefixed bindings, including ('escape', 'enter'), are filtered by composer focus. Dialog/navigation lone Escape must resolve without waiting for the composer’s 1.0-second timeoutlen; add a bounded real-key test proving dialog cancellation resolves before that delay. Cost if wrong: none.
+
 Forms use real TextArea/RadioList/Button controls with Tab/ShiftTab, Enter submit, Esc/Ctrl+C cancel. Confirmations bind y/n and Enter default. Palette choices carry stable action IDs and display descriptions; searchable filtering preserves ID, disabled rows expose reasons. No automatic mutation from navigation/typing. Validation errors appear inside form; callers can keep current fields on failed operation. No hard-coded provider list: choices arrive from configured providers.
 - [ ] Test y/n/default, focus restoration, cancellation Future cleanup, search navigation, malicious labels, no single-letter bindings in fields. Run `tests.test_cli_tui_dialogs tests.test_cli_tui_state`.
 - [ ] Commit dialogs/tests/dependency floor; report headless key sequences.
@@ -329,7 +329,7 @@ Forms use real TextArea/RadioList/Button controls with Tab/ShiftTab, Enter submi
 
 **Files:** create `cli_tui_view.py`, `tests/_tui_harness.py`, `tests/test_cli_tui_view.py`.
 **Consumes:** state stores/sanitizers, DialogHost, real client/controller and ViewEvent.
-**Produces:** `TuiView(client, controller, state, dialogs, callbacks)` with `root`, `composer`, `conversation`, `navigation`, `agents`, `focus_named(name)`, `refresh(event=None)`, `screen_mode`; consumes Task 5's TuiState; `tui_harness` async context manager.
+**Produces:** `TuiView(client, controller, state, dialogs, callbacks)` with `root`, `composer`, `conversation`, `navigation`, `agents`, `focus_named(name)`, `refresh(event=None)`, `screen_mode`; consumes Task 5's TuiState; `tui_harness` async context manager. `callbacks` is a mapping with async callables: `submit(text: str) -> SubmitOutcome`, `quit() -> None`, `navigate(mandatory: bool = False) -> ActionOutcome`, `run_action(action_id: str) -> ActionOutcome`, and `attach(agent_id: str) -> ActionOutcome`. Task 7 supplies explicit stubs; Tasks 8/9/10 bind these same keys and signatures to composer/workflows/application, adapting presenter attach from stable ID to the current agent record.
 
 - [ ] RED screen assertions exercise layout, not widget construction:
 
@@ -356,7 +356,7 @@ main = HSplit([conversation, agent_area, composer_area])
 wide = VSplit([Box(navigation, width=22), main])
 root = FloatContainer(content=DynamicContainer(
     lambda: resize_notice if mode() == 'small' else wide if mode() == 'wide' else main),
-    floats=[])
+    floats=[Float(content=DynamicContainer(lambda: dialogs.body))])
 ```
 
 Use framed section titles, terminal-default background, cyan focus/selection, muted borders and labeled semantic status colors. Footer lists F2 Sessions/F3 Agents/F4 Commands/F1 Help/Ctrl+Q Quit. Plain-channel title says Channels and omits agent lifecycle controls. All captions/data fragments use sanitation before layout. `_agent_status` is raw until the view sanitizes it. Attachments display safe textual names/URLs; no automatic URL execution. Incoming status changes update rows, never conversation records.
@@ -402,7 +402,7 @@ async def test_failed_send_keeps_multiline_draft(self):
 
 Extend the existing harness with `bind_submit` and bracketed-paste VT sequences; these exercise actual key bindings/buffer, not direct callback invocation.
 - [ ] Run composer tests RED.
-- [ ] Bind Enter to accept active completion first, otherwise submit. Alt+Enter/Esc Enter inserts newline; bracketed paste never submits. Tab cycles completion when visible, otherwise moves focus. Ctrl+C cancels overlay/completion, preserving composer. Empty Ctrl+D delegates Quit; nonempty Ctrl+D deletes forward. Clear draft confirms. Body/cursor snapshots belong to stable `(session,id)` or `(channel,name)` keys.
+- [ ] Bind Enter to accept active completion first, otherwise submit. Alt+Enter/Esc Enter inserts newline, with all escape-prefixed bindings filtered by composer focus (R-G); bracketed paste never submits. Tab cycles completion when visible, otherwise moves focus. Ctrl+C cancels overlay/completion, preserving composer. Empty Ctrl+D delegates Quit; nonempty Ctrl+D deletes forward. Clear draft confirms. Body/cursor snapshots belong to stable `(session,id)` or `(channel,name)` keys.
 
 Capture both draft key and buffer revision during async send; clear only the sent snapshot, never newer typing or another selected draft:
 
@@ -419,7 +419,7 @@ Prevent concurrent submit activation while one is pending; keep editing allowed.
 Completion uses prompt-toolkit Completion(display_meta=...) with command descriptions, applicable configured providers, current full agent handles, @mentions and channels; sanitize display text and keep insertion strings unstyled. Only offer choices valid in current session/plain mode. When completion is closed, Tab remains focus navigation.
 
 PageUp/PageDown/End affect only focused conversation. Model callbacks preserve an anchored viewport when not following; new-message indicator counts unseen new IDs, not agent unread count. Clicking/End resets follow and counter. Reconnect/history updates do not create false duplicates/new counts.
-- [ ] Cover 64-KiB UTF-8 rejection, 50-draft block/mandatory archive exception, cursor preservation, y/n confirmation, cancellation, completion vs Tab focus, edited-during-send, and viewport follow. Run composer/state/view/client contract suites.
+- [ ] Add named §9 item 3 regressions: `test_ctrl_c_without_overlay_preserves_composer_text` and `test_ctrl_c_closes_overlay_preserving_composer_text`, driven through real pipe input. Cover 64-KiB UTF-8 rejection, 50-draft block/mandatory archive exception, cursor preservation, y/n confirmation, cancellation, completion vs Tab focus, edited-during-send, and viewport follow. Run composer/state/view/client contract suites.
 - [ ] Commit explicit four files; include tests demonstrating preserved text on failure and asynchronous update.
 
 ## Task 9: Session navigation, agent forms, and visible actions
@@ -502,7 +502,7 @@ async def test_attach_signal_waits_for_foreground_before_restore(self):
 
 Use real receive_forever with the existing queue-backed fake WebSocket connector for this test. Inject messages through its receive queue; direct handle_event is reserved for non-transport view cases. Terminal context records enter/exit; runner blocks only foreground argv and returns controlled codes.
 - [ ] Run application tests RED.
-- [ ] Compose Application and callbacks; bind controller view before selection, client.output=thread-safe notice sink, client.on_view_change refresh callback. No print/patch_stdout rendering inside TUI. Start Application first with mandatory navigation if no selector, then background receiver/poller only after first selection/channel assignment. Plain-channel starts receiver after assigning channel. `run` returns without background tasks on initial Escape/CtrlC/CtrlQ. API status/data_dir startup remains supplied by cli main.
+- [ ] Compose Application and callbacks; bind controller view before selection, client.output=thread-safe notice sink, client.on_view_change refresh callback. No print/patch_stdout rendering inside TUI. Start Application first with mandatory navigation if no selector, then background receiver/poller only after first selection/channel assignment. Plain-channel starts receiver after assigning channel. `run` returns without background tasks on initial Escape/CtrlC/CtrlQ. API status/data_dir startup remains supplied by cli main. For explicit `controller.selector`, TuiApplication.run resolves it inside the running Application: `await controller.list_sessions(include_archived=True)` then existing `resolve_session`, then transactional select_session. Missing/ambiguous selector CLIError propagates; an explicit archived decline raises existing `CLIError('Archived session was not selected')`. Mandatory navigation cancellation without an explicit selector returns normally. `interactive_tui` returns None on normal Quit/initial cancellation and propagates CLIError from run after cleanup to main’s existing `except ValueError` exit-1 path; never swallow it in a detached startup task.
 
 Keep one task registry. Selection notifications reconcile desired task lifetime; successful archive cancels/awaits both tasks and opens mandatory navigation, then next commit restarts one of each. Ordinary navigation/forms never restart tasks. Preserve client/controller callback ownership; no duplicate state observers overriding each other.
 
@@ -529,7 +529,7 @@ async with self.handoff_lock:
             self.attach_task = None
 ```
 
-Put that owned sequence in `_attach_owned(agent)`. Public `attach(agent)` creates and stores `self.handoff_task = asyncio.create_task(self._attach_owned(agent))` before its first await; await it with the same shield-and-wait cancellation discipline. Quit awaits handoff_task, so it cannot race between preflight and lock acquisition. UI action serialization prevents duplicate attach. On nonzero foreground return, re-probe exact target only in TUI adapter; gone→existing resume hint, otherwise fixed failed-status notice. OSError/SubprocessError never expose diagnostics. Never call pause_output/resume_output in TUI. Ensure expected preflight CLIError maps to a notice/outcome without entering terminal_context.
+Put that owned sequence in `_attach_owned(agent)`. Public `attach(agent)` creates and stores `self.handoff_task = asyncio.create_task(self._attach_owned(agent))` before its first await; await it with the same shield-and-wait cancellation discipline. Quit awaits handoff_task, so it cannot race between preflight and lock acquisition. UI action serialization prevents duplicate attach. Ruling R-H: add a pipe-input Application test using real `in_terminal()` alongside the controlled terminal_context tests, proving ownership/restore ordering with the actual API. Cost if wrong: one extra test. On nonzero foreground return, re-probe exact target only in TUI adapter (may reuse prepare_attach, whose missing-target CLIError is exactly `not running; resume with /resume <agent>`); gone→existing resume hint, otherwise fixed failed-status notice. OSError/SubprocessError never expose diagnostics. Never call pause_output/resume_output in TUI. Ensure expected preflight CLIError maps to a notice/outcome without entering terminal_context.
 
 request_quit is idempotent. For key Quit, confirm any unsent draft; signal Quit skips confirmation. Cancel selection preparation and await commit/pending mutations/attach, then close checkpoint, cancel/await receiver/poller, cancel modal Futures, exit Application. Never hold an action lock while awaiting a user dialog. Handle `Keys.SIGINT` separately from `c-c`, register SIGTERM through event-loop-safe scheduling, restore previous handlers on exit. During handoff keep signal handling live even when Application input is detached; external signals schedule request_quit, not immediate Application cancellation. If the event-loop platform cannot register add_signal_handler, install a main-thread signal.signal callback forwarding with call_soon_threadsafe and restore it in finally. SIGKILL is not catchable.
 - [ ] Cover startup no-task exits, initial selector decline exit1, postarchive mandatory task stop/restart, precommit/commit Quit, preflight refusal/no suspend, nested switch, missing target race, shield cancellation, signal bypass confirmation, output-to-notice, exception restoration. Run application plus all TUI-focused suites.
@@ -551,7 +551,7 @@ def test_unset_term_falls_back_only_on_posix(self):
         stdout_tty=True, platform='win32', term=None), 'tui')
 ```
 
-Define `choose_interactive_mode(*, plain, stdin_tty, stdout_tty, platform, term)` in cli.py as a pure decision helper. Invalid stdin raises existing CLIError text before fallback. Main prints fallback line only for automatic plain selection, not explicit --plain.
+Define `choose_interactive_mode(*, plain, stdin_tty, stdout_tty, platform, term)` in cli.py as a pure decision helper. Keep main’s existing `parser.exit(1, "Interactive chat requires a terminal...")` refusal unchanged, before config/HTTP/process and before calling choose_interactive_mode. Do not convert it to CLIError; preserve `test_non_tty_rejects_before_config_http_or_process`. The helper receives valid stdin after this guard. Main prints fallback line only for automatic plain selection, not explicit --plain.
 - [ ] Run entry tests RED.
 - [ ] Register --plain top-level and chat only, default False; reject its use with non-chat commands before config/network access, including before-shell placement. Keep JSON availability list and existing shell dependency gate. Lazy import cli_tui only for chosen full-screen mode.
 
@@ -562,9 +562,9 @@ if mode == 'plain' and not args.plain:
     print('Full-screen unavailable; using plain mode.', file=sys.stderr)
 ```
 
-Run ensure_server before screen startup, collecting sanitized startup output into initial_notices while still printing it at its existing severity/destination. Preserve conditional tmux-session hint, explicit URL no-auto-start, data_dir warnings, Windows/refusal ordering. Then call legacy interactive or interactive_tui with the existing client/controller. Main converts explicit archived decline to exit1 using CLIError; normal initial cancel exits normally.
+Run ensure_server before screen startup, collecting sanitized startup output into initial_notices while still printing it at its existing severity/destination. Preserve conditional tmux-session hint, explicit URL no-auto-start, data_dir warnings, Windows/refusal ordering. Then call legacy interactive or interactive_tui with the existing client/controller. Explicit selector missing/ambiguous errors and archived decline propagate as CLIError from interactive_tui to main’s existing except ValueError path and exit1; normal initial cancel exits normally.
 
-README shows default launch, --plain fallback, keymap, visible actions, draft limits and nonpersistent drafts, attach/detach, no summary, platform limits. AGENTS documents new module boundaries, headless screen capture and isolated PTY QA. Existing README parser guard remains. Keep shell examples unchanged.
+README shows default launch, --plain fallback, keymap, visible actions, draft limits and nonpersistent drafts, attach/detach, no summary, platform limits. AGENTS documents new module boundaries, headless screen capture and isolated PTY QA. Existing README parser guard remains. Keep shell examples unchanged. In `tests.test_cli_workspace_chat.MainIntegrationTests`, `test_default_chat_probes_status_and_passes_picker_controller`, `test_explicit_session_and_no_resume_are_carried_to_controller`, and `test_explicit_channel_is_plain_but_still_checks_server` keep their legacy interactive assertions under redirected non-tty stdout and now assert exactly one fallback stderr line. Add separate patched-tty/default-TUI coverage. Startup-failure tests retain their existing stderr hints plus the single automatic fallback notice when capability selection precedes startup; shell and non-tty-stdin tests get no fallback line (R-H).
 - [ ] Test both flag positions, shell rejection, tty/TERM/platform matrix, exact one stderr notice, existing shell JSON/stdout, startup failures, --channel and --session paths. Run full suite `/tmp/agentchattr-cli-venv/bin/python -m unittest discover -s tests -v`, diffcheck and isolated-child inspection.
 - [ ] Commit explicit entry/docs/tests. This is the first default-entry integration; no release-builder change.
 
@@ -597,7 +597,7 @@ async def test_real_session_message_switch_and_quit(self):
         self.assertEqual(ui.checkpointed_session_names, ['billing', 'frontend'])
 ```
 
-Define real_tui using isolated fixture ports/data and real ChatClient/WorkspaceAPI/controller/TuiApplication. Record checkpoint calls with a wrapper that calls the real HTTP API, not a substitute. Server message count uses authenticated API. All wait helpers use bounded events/readiness predicates. Complete spec §9 scenario with `client.handle_event` workspace injection; end-to-end message reception itself comes over real WebSocket.
+Use `class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase)` for this async test, or a synchronous def test method calling asyncio.run(scenario()). IsolatedCliServer alone inherits plain unittest.TestCase and never awaits async test methods; that shape is forbidden. Define real_tui using isolated fixture ports/data and real ChatClient/WorkspaceAPI/controller/TuiApplication. Record checkpoint calls with a wrapper that calls the real HTTP API, not a substitute. Server message count uses authenticated API. All wait helpers use bounded events/readiness predicates. Complete spec §9 scenario with `client.handle_event` workspace injection; end-to-end message reception itself comes over real WebSocket.
 - [ ] Run focused TUI integration tests; diagnose any failure as test-contract versus production defect before editing. Post proved production defects to Claude before expanding this task's source scope.
 - [ ] Add isolated PTY smoke capturing actual terminal output at 120×30, 80×24, 70×16, then restore wide. Feed bracketed paste, navigation, cancellation and Quit. For actual tmux attach smoke, create inert temporary agent session on an isolated socket, exercise outside and nested switch-client, detach/return, and confirm redraw plus draft survival. Never reuse default TMUX socket. Register process/socket cleanup before launch. Do not label fake runner checks as real terminal QA.
 
