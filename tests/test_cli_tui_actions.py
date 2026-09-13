@@ -98,7 +98,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed[0].workspace_id, 'ws_a')
 
     async def test_invalid_payloads_fail_before_api_or_prompt(self):
-        cases = [('rename', {'name': 'x'}), ('select_session', {'session_id': 'ws_a'}),
+        cases = [('rename', {'name': 'x'}), ('select_session', {'session_id': ''}),
                  ('resume', {'agent_id': 'ag_a'}), ('stop', {'agent_id': 'ag_a', 'extra': True}),
                  ('stop', {'agent_id': 'codex'}), ('stop', {'agent_id': 'ag_other'}),
                  ('stop', {'agent_id': None}), ('archive_session', {'confirmed': 'yes'}),

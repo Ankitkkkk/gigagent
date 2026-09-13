@@ -347,6 +347,8 @@ class WorkspaceChatController:
         self._active_actions = set()
         self._pending_actions = set()
         self._pending_mutations = set()
+        self._selection_task = None
+        self._selection_commit = None
 
     def bind_view(self, presentation, notify):
         self.presentation = presentation
@@ -381,10 +383,10 @@ class WorkspaceChatController:
         self._agent_states = {a['agent_id']: self._agent_status(a) for a in self.workspace['agents']}
         return True
 
-    def _select(self, workspace):
+    def _select(self, workspace, *, closed=False):
         self.workspace = workspace
         self._selection_version += 1
-        self._closed = False
+        self._closed = closed
         self._failed_launches.clear()
         self._refresh_requested = workspace is not None
         self._poll_error = None
@@ -394,6 +396,129 @@ class WorkspaceChatController:
             self.client.channel = workspace['channel']
             self.client.pending_channel = None
         self._notify_view('selection')
+
+    @property
+    def selection_pending(self):
+        return self._selection_task is not None or self._selection_commit is not None
+
+    async def list_sessions(self, include_archived=False):
+        """Fetch navigation rows on demand without touching the selected session."""
+        data = await asyncio.to_thread(self.api.list, include_archived=include_archived)
+        return data['workspaces']
+
+    async def select_session(self, ws_id):
+        """Prepare without changing selection; own the checkpoint/commit once ready."""
+        try:
+            self._validate_action('select_session', {'session_id': ws_id})
+        except CLIError as error:
+            return self._failed_action(error)
+        if self.selection_pending:
+            return ActionOutcome('cancelled', 'Session selection already in progress.', ws_id)
+        if self.workspace is not None and self.workspace['id'] == ws_id:
+            return ActionOutcome('completed', workspace_id=ws_id)
+        version = self._snapshot_version()
+        task = asyncio.create_task(self._prepare_selection(ws_id, version))
+        self._selection_task = task
+        commit = None
+        try:
+            candidate = await task
+            if isinstance(candidate, ActionOutcome):
+                return candidate
+            if self._selection_task is not task or version != self._snapshot_version():
+                return ActionOutcome('cancelled', workspace_id=ws_id)
+            commit = asyncio.create_task(self._commit_selection(candidate, version))
+            self._selection_commit = commit
+            self._pending_actions.add(commit)
+            return await self._wait_owned(commit)
+        except asyncio.CancelledError:
+            if commit is not None:
+                raise
+            return ActionOutcome('cancelled', workspace_id=ws_id)
+        except (CLIError, OSError, TimeoutError) as error:
+            return self._failed_action(error, ws_id)
+        finally:
+            if self._selection_task is task:
+                self._selection_task = None
+            if self._selection_commit is commit:
+                self._selection_commit = None
+            if commit is not None:
+                self._pending_actions.discard(commit)
+
+    async def _prepare_selection(self, ws_id, version):
+        cancelled = ActionOutcome('cancelled', workspace_id=ws_id)
+        candidate = await asyncio.to_thread(self.api.get, ws_id)
+        if version != self._snapshot_version():
+            return cancelled
+        if candidate.get('archived'):
+            accepted = await self.presentation.confirm('Unarchive it? [y/N]', default=False, escape=False)
+            if not accepted or version != self._snapshot_version():
+                return cancelled
+            async with self._action_lock:
+                if version != self._snapshot_version():
+                    return cancelled
+                candidate = await self._run_mutation(self.api.action, ws_id, 'unarchive')
+            if version != self._snapshot_version():
+                return cancelled
+        agents = candidate.get('agents', [])
+        eligible = [agent for agent in agents
+                    if agent.get('last_state') == 'exited' and _agent_cwd(agent) is not None]
+        if self.no_resume or not eligible:
+            return candidate
+        if sys.platform == 'win32':
+            self._notice(WINDOWS_TMUX_ERROR)
+            return candidate
+        accepted = await self.presentation.confirm(
+            f'Resume {len(eligible)} stopped agents? [Y/n]', default=True, escape=False)
+        if version != self._snapshot_version():
+            return cancelled
+        if not accepted:
+            return candidate
+        require_tmux_platform()
+        resumed = False
+        for agent in eligible:
+            async with self._action_lock:
+                if version != self._snapshot_version():
+                    return cancelled
+                try:
+                    await self._run_mutation(self.api.action, ws_id, 'resume', agent['agent_id'], body={})
+                    resumed = True
+                except CLIError as error:
+                    self._notice(error)
+                    if error.status == 409 and '--fresh' in str(error):
+                        self._notice(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh')
+            if version != self._snapshot_version():
+                return cancelled
+        if resumed:
+            candidate = await asyncio.to_thread(self.api.get, ws_id)
+            if version != self._snapshot_version():
+                return cancelled
+        return candidate
+
+    async def _commit_selection(self, candidate, version):
+        async with self._action_lock:
+            if version != self._snapshot_version():
+                return ActionOutcome('cancelled', workspace_id=candidate['id'])
+            await self.close()
+            if version[0] != self._selection_version:
+                return ActionOutcome('cancelled', workspace_id=candidate['id'])
+            # No await between clearing preparation state and the final event.
+            self._selection_task = None
+            self._selection_commit = None
+            self._select(candidate)
+            return ActionOutcome('completed', workspace_id=candidate['id'])
+
+    async def cancel_selection(self):
+        """Quit cancels preparation but drains an already-owned atomic commit."""
+        task, commit = self._selection_task, self._selection_commit
+        if commit is not None:
+            await self._wait_owned(commit)
+        elif task is not None:
+            # Invalidate even a finished read whose caller has not resumed yet.
+            self._selection_task = None
+            task.cancel()
+        if task is not None and task is not asyncio.current_task():
+            waiter = asyncio.ensure_future(asyncio.gather(task, return_exceptions=True))
+            await self._wait_owned(waiter)
 
     async def close(self):
         if self.workspace is None or self._closed:
@@ -612,6 +737,7 @@ class WorkspaceChatController:
     def _validate_action(self, action, payload):
         fields = {
             'create_session': {'name'}, 'rename_session': {'name'},
+            'select_session': {'session_id'},
             'archive_session': {'confirmed'},
             'spawn': {'provider', 'cwd', 'name', 'history_mode'},
             'resume': {'agent_id', 'fresh', 'cwd', 'name'},
@@ -638,14 +764,14 @@ class WorkspaceChatController:
                 continue
             elif not isinstance(value, str):
                 raise CLIError(f'{key} must be text')
-            elif (key in ('provider', 'agent_id') or key == 'cwd' and action == 'spawn') and not value:
+            elif (key in ('provider', 'agent_id', 'session_id') or key == 'cwd' and action == 'spawn') and not value:
                 raise CLIError(f'{key} is required')
         mode = payload.get('history_mode', payload.get('mode'))
         if mode is not None:
             _validate_history(mode)
         if action in ('spawn', 'resume', 'attach'):
             require_tmux_platform()
-        if self.plain_channel or (self.workspace is None and action != 'create_session'):
+        if self.plain_channel or (self.workspace is None and action not in ('create_session', 'select_session')):
             raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
         agent_id = payload.get('agent_id')
         if agent_id is not None:
@@ -667,6 +793,8 @@ class WorkspaceChatController:
             agent_id = payload.get('agent_id')
         except CLIError as error:
             return self._failed_action(error, ws_id, agent_id)
+        if action == 'select_session':
+            return await self.select_session(payload['session_id'])
         generation = self._selection_version
         key = (ws_id, generation, action, tuple(sorted(payload.items())))
         if key in self._active_actions:
@@ -703,6 +831,8 @@ class WorkspaceChatController:
                 if not payload['confirmed']:
                     return ActionOutcome('cancelled', workspace_id=ws_id)
                 await self._run_mutation(self.api.action, ws_id, 'archive')
+                if self.presentation is not None and version[0] == self._selection_version:
+                    self._select(None, closed=True)
             elif action == 'attach':
                 agent = next(a for a in workspace['agents'] if a['agent_id'] == agent_id)
                 if self.presentation is not None:
