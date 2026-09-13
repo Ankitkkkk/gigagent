@@ -26,6 +26,8 @@ from cli_view_contracts import ActionOutcome
 from cli_workspace_chat import _agent_cwd, _agent_line, _agent_label, SESSION_HELP
 from cli_workspaces import WINDOWS_TMUX_ERROR
 
+_NAVIGATION_BUSY = object()
+
 
 @dataclass(frozen=True)
 class ModalResult:
@@ -372,7 +374,7 @@ class TuiWorkflows:
         """Specialized modal, sharing DialogHost cancellation and focus semantics."""
         cancelled = ModalResult(cancelled=True)
         if self.dialogs.future is not None:
-            return cancelled
+            return ModalResult(_NAVIGATION_BUSY)
         search = TextArea(text=self.state.search, multiline=False, height=1, prompt='Search: ',
                           input_processors=[_SafeInput()])
         tasks = set()
@@ -490,10 +492,16 @@ class TuiWorkflows:
         if self.controller.plain_channel:
             return await self._menu('Channel actions', {'create_channel', 'switch_channel', 'history'},
                                     None, self._scope())
-        if self.dialogs.future is not None:
-            return ActionOutcome('cancelled')
         while True:
             result = await self._navigation()
+            if result.value is _NAVIGATION_BUSY:
+                if not mandatory and self.controller.workspace is not None:
+                    return ActionOutcome('cancelled')
+                # Another workflow owns this waiter. Cancellation here must not
+                # cancel its form, and a replacement dialog must also finish.
+                while self.dialogs.future is not None:
+                    await asyncio.shield(self.dialogs.future)
+                continue
             if result.cancelled:
                 if mandatory or self.controller.workspace is None:
                     await self.view.callbacks['quit']()
@@ -514,7 +522,8 @@ class TuiWorkflows:
                 outcome = await self._select(result.value, mandatory=mandatory)
             if outcome.status == 'completed':
                 return outcome
-            if outcome.message == 'Archived session was not selected':
+            if outcome.message in ('Archived session was not selected',
+                                   'Session selection already in progress.'):
                 self.notice(outcome.message)
 
     async def _select(self, ident, *, mandatory=False):
@@ -653,15 +662,20 @@ class TuiWorkflows:
         return await self._dispatch(result.value, target_id, scope)
 
     async def _agent_menu(self, target_id, scope):
-        if self.view.agent_rows():
+        rows = self.view.agent_rows()
+        stale = target_id is not None and not any(a['agent_id'] == target_id for a in rows)
+        if rows and not stale:
             target_id = await self._choose_agent(target_id)
             if not self._unchanged(scope):
                 return self._cancelled_selection()
             if target_id is None:
                 return ActionOutcome('cancelled')
-            if not any(a['agent_id'] == target_id for a in self.view.agent_rows()):
-                return self._cancelled_selection()
-            self.state.selected_agent_id = target_id
+            stale = not any(a['agent_id'] == target_id for a in self.view.agent_rows())
+            if not stale:
+                self.state.selected_agent_id = target_id
+        if stale:
+            self.state.selected_agent_id = target_id = None
+            self.notice('Selected agent is no longer available.')
         title = 'Agent actions' + (': ' + label_text(target_id) if target_id else '')
         return await self._menu(title, {'new_agent', 'resume', 'stop', 'attach', 'unread',
                                       'retry', 'history', 'inspect_agent'}, target_id, scope)

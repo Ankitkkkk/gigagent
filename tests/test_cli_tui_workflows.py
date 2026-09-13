@@ -486,12 +486,115 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(task.done())
                 self.assertNotIn(('quit',), ui.calls)
                 self.assertEqual(ui.state.selected_session_id, 'ws_second')
+                self.assertEqual(ui.state.notices.lines.count('Session selection already in progress.'), 1)
                 release.set()
                 await selecting
                 await ui.key('Escape')
                 await task
             finally:
                 release.set()
+
+    async def test_busy_retry_waits_for_palette_without_requesting_quit(self):
+        import threading
+        async with workflow_harness(rows=[workspace('ws_target')]) as ui:
+            entered, release = threading.Event(), threading.Event()
+            def get(ident):
+                entered.set()
+                release.wait(2)
+                raise CLIError('selection failed exactly')
+            ui.api.get.side_effect = get
+            task = ui.start(ui.workflows.navigate(mandatory=True))
+            await self.modal(ui, 'Show archived')
+            await ui.select_row('ws_target')
+            try:
+                await ui.wait_until(entered.is_set)
+                await ui.key('F4')
+                await self.modal(ui, 'Commands')
+                future = ui.dialogs.future
+                release.set()
+                await ui.wait_until(lambda: not ui.controller.selection_pending)
+                await ui.wait_render()
+                self.assertNotIn(('quit',), ui.calls)
+                self.assertFalse(task.done())
+                self.assertIs(ui.dialogs.future, future)
+                self.assertFalse(future.cancelled())
+                await ui.key('Escape')
+                await self.modal(ui, 'Show archived')
+                self.assertNotIn(('quit',), ui.calls)
+                ui.api.get.assert_called_once_with('ws_target')
+                await ui.key('Escape')
+                self.assertEqual((await task).status, 'cancelled')
+                self.assertEqual(ui.calls.count(('quit',)), 1)
+            finally:
+                release.set()
+
+    async def test_postarchive_busy_entry_waits_then_opens_mandatory_navigation(self):
+        import threading
+        async with workflow_harness(selected=workspace()) as ui:
+            entered, release = threading.Event(), threading.Event()
+            original = ui.api.action.side_effect
+            def action(*args, **kwargs):
+                if args[1] == 'archive':
+                    entered.set()
+                    release.wait(2)
+                return original(*args, **kwargs)
+            ui.api.action.side_effect = action
+            task = ui.start(ui.workflows.run_action('archive_session'))
+            await self.modal(ui, 'Archive session?')
+            await ui._send('y')
+            try:
+                await ui.wait_until(entered.is_set)
+                await ui.key('F4')
+                await self.modal(ui, 'Commands')
+                future = ui.dialogs.future
+                release.set()
+                await ui.wait_until(lambda: ui.controller.workspace is None)
+                await ui.wait_render()
+                self.assertFalse(task.done(), 'Mandatory navigation must wait for the existing dialog')
+                self.assertIs(ui.dialogs.future, future)
+                self.assertNotIn(('quit',), ui.calls)
+                await ui.key('Escape')
+                await self.modal(ui, 'Show archived')
+                self.assertNotIn(('quit',), ui.calls)
+                await ui.key('Escape')
+                await task
+                self.assertEqual(ui.calls.count(('quit',)), 1)
+            finally:
+                release.set()
+
+    async def test_cancel_waiting_navigation_does_not_cancel_other_modal_waiter(self):
+        async with workflow_harness() as ui:
+            owner = ui.start(ui.dialogs.form('Existing form', [cli_tui_dialogs.Field('name', 'Name:')],
+                                            submit_label='Save'))
+            await self.modal(ui, 'Existing form')
+            future = ui.dialogs.future
+            navigation = ui.start(ui.workflows.navigate(mandatory=True))
+            await ui.wait_render()
+            self.assertFalse(navigation.done())
+            navigation.cancel()
+            await asyncio.gather(navigation, return_exceptions=True)
+            self.assertFalse(future.cancelled())
+            self.assertFalse(owner.done())
+            self.assertIs(ui.dialogs.future, future)
+            await ui.key('Escape')
+            self.assertTrue((await owner).cancelled)
+            self.assertNotIn(('quit',), ui.calls)
+
+    async def test_stale_agent_highlight_still_opens_add_agent_actions(self):
+        for agents in ([agent('ag_remaining')], []):
+            with self.subTest(remaining=len(agents)):
+                async with workflow_harness(selected=workspace(agents=agents)) as ui:
+                    ui.state.selected_agent_id = 'ag_gone'
+                    await ui.key('F3')
+                    await self.modal(ui, 'Agent actions')
+                    self.assertIsNone(ui.state.selected_agent_id)
+                    self.assertEqual(ui.state.notices.lines.count('Selected agent is no longer available.'), 1)
+                    self.assertIn('Add agent', ui.screen_text())
+                    await ui.paste('Add agent')
+                    await ui.key('Enter')
+                    await self.modal(ui, 'New agent')
+                    ui.api.action.assert_not_called()
+                    await ui.key('Escape')
 
     async def test_first_escape_requests_quit(self):
         async with workflow_harness() as ui:
