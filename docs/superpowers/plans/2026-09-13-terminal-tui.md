@@ -249,9 +249,9 @@ Run_attach uses only `runner(['tmux', 'switch-client' if target.nested else 'att
 
 ## Task 5: Presentation state, sanitation, and bounded drafts
 
-**Files:** create `cli_tui_state.py`, `tests/test_cli_tui_state.py`.
-**Consumes:** existing terminal_text/_safe policies (do not import cli.py into new state module); prompt-toolkit get_cwidth.
-**Produces:** `label_text(value)`, `body_text(value)`, `clip_cells(text,width)`; DraftStore and NoticeStore; `layout_mode(columns,rows)`; Viewport state with anchor message ID and follow flag; `TuiState` grouping those stores plus selected-row IDs/search/focus names (presentation state only).
+**Files:** create `cli_tui_state.py`, `tests/test_cli_tui_state.py`; modify `cli_view_contracts.py` to move sanitisers unchanged; modify `cli.py`, `cli_workspaces.py`, `cli_workspace_chat.py` only to replace old definitions with imports/re-exports.
+**Consumes:** existing terminal_text in cli.py and canonical _safe in cli_workspaces.py; dependency-free cli_view_contracts from Task 1; prompt-toolkit get_cwidth. Do not import cli.py into the new state module. cli_view_contracts must not import cli, cli_workspaces, cli_workspace_chat, or prompt_toolkit.
+**Produces:** canonical terminal_text/_safe in cli_view_contracts with identity-preserving old-name re-exports; `label_text(value)`, `body_text(value)`, `clip_cells(text,width)`; DraftStore and NoticeStore; `layout_mode(columns,rows)`; Viewport state with anchor message ID and follow flag; `TuiState` grouping those stores plus selected-row IDs/search/focus names (presentation state only).
 
 - [ ] RED tests cover non-destructive limits and terminal content:
 
@@ -279,9 +279,9 @@ def layout_mode(columns, rows):
     return 'wide' if columns >= 110 and rows >= 24 else 'compact'
 ```
 
-Ruling R-F: import and reuse existing `terminal_text` and `_safe`, never copy their implementations. Alternatively move them unchanged into dependency-free cli_view_contracts and re-export from their old names. Body policy calls terminal_text then expands tabs; labels call _safe, whose isprintable already removes directional/zero-width Cf controls. Document/test that property rather than adding a second sanitiser. Cost if wrong: one extra import edge. clip_cells uses get_cwidth per complete character and fits ellipsis without splitting combining clusters. NoticeStore.add splits real newline-delimited lines, retains newest 1,000, tracks omitted count, and never writes stdout. Viewport stores anchor/follow/new-ID set; reconnect/update/delete adjust anchor against current client.messages without another cache. If anchor is deleted, choose the next surviving message, or the nearest previous survivor.
+Ruling R-F′ (supersedes R-F): move terminal_text from cli.py and canonical _safe from cli_workspaces.py unchanged into dependency-free cli_view_contracts. Replace the byte-for-byte equivalent _safe definition in cli_workspace_chat.py with the same import. Re-export under all old names; tests assert object identity and unchanged behavior. Never copy implementations or import the old owning modules into cli_tui_state. Body policy calls terminal_text then expands tabs; labels call _safe, whose isprintable already removes directional/zero-width Cf controls. Document/test that property rather than adding a second sanitiser. Cost if wrong: three import-only edits in Task 5. clip_cells uses get_cwidth per complete character and fits ellipsis without splitting combining clusters. NoticeStore.add splits real newline-delimited lines, retains newest 1,000, tracks omitted count, and never writes stdout. Viewport stores anchor/follow/new-ID set; reconnect/update/delete adjust anchor against current client.messages without another cache. If anchor is deleted, choose the next surviving message, or the nearest previous survivor.
 - [ ] Test 64-KiB UTF-8 boundary, existing drafts at capacity/postarchive composing refusal, Unicode widths/controls, 1,001-line overflow, layout breakpoints, message-ID viewport behavior. Run focused state tests.
-- [ ] Commit state module/test pair. Do not create widgets or API clients.
+- [ ] Run state tests plus existing client/workspace suites covering the unchanged sanitisers and new re-export identity assertions. Commit only the six listed files. Do not create widgets or API clients.
 
 ## Task 6: Awaitable dialogs and keyboard discovery
 
@@ -479,7 +479,7 @@ Every palette action also has a visible control/menu. Confirm stop/archive with 
 ## Task 10: Application lifetime, terminal handoff, and signals
 
 **Files:** create `cli_tui.py`, `tests/test_cli_tui_application.py`; modify `_tui_harness.py`, `cli_tui_dialogs.py` only for final callback integration.
-**Consumes:** TuiView/TuiWorkflows/ComposerActions, structured client/controller methods, prepare_attach/run_attach, in_terminal.
+**Consumes:** TuiView/TuiWorkflows/ComposerActions, structured client/controller methods, existing resolve_session, prepare_attach/run_attach, in_terminal.
 **Produces:** `TuiApplication(client, controller, *, input=None, output=None, terminal_context=in_terminal, runner=subprocess.run, initial_notices=())`; `run()`, `request_quit(signal=False)`, presenter confirm/attach/notice; `interactive_tui(client, controller, *, initial_notices=())`.
 
 - [ ] RED tests for ownership and startup using controlled Futures/threading.Events:
@@ -653,7 +653,7 @@ Before dispatch, controller records task self-consistency and all shared-file/in
 | 2 | Resume body test matches baseline nullable fields. ActionOutcome has no HTTP-status field: controller retains status-based hints, UI does not assume that field. Select-session action is introduced only by Task 3. |
 | 3 | Preparation cancel returns cancelled and leaves old state; shielded commit calls close only after dialogs. Archive emits final no-selection/closed state before UI task changes. |
 | 4 | Preflight test expects exact probe only; run_attach owns inherited-stdio foreground. Shell facade composes both without TUI-only re-probe. |
-| 5 | TuiState is created here, not ambiguously by Task 7. Limit tests preserve old drafts; mandatory navigation bypass does not bypass composing limits. |
+| 5 | Canonical sanitisers move unchanged into dependency-free contracts with old-name identity tests; no forbidden cli import. TuiState is created here, not ambiguously by Task 7. Limit tests preserve old drafts; mandatory navigation bypass does not bypass composing limits. |
 | 6 | Form API includes error text and immutable Field defaults, enabling Task 9 failure-retention loop. Confirm Escape result and y/n bindings match caller-specified defaults. |
 | 7 | Harness captures real renderer cells and owns its declared file. Hooks are wired to refresh; same controls survive resize rather than reconstructed buffers. |
 | 8 | Harness modifications are explicitly included. Async send captures key plus edit revision, so successful completion cannot clear newer text. Clear confirmation uses view.dialogs. |
@@ -683,6 +683,10 @@ All listed overlaps are sequential review gates, not parallel edit opportunities
 | 3–10 | selection events/cancel_selection | Initial/archive no-selection governs receiver/poller; Quit cancels preparation but awaits commit. |
 | 3–12 | checkpoints/select/archive | Real HTTP recorder proves one checkpoint per departed active session and no postarchive duplicate. |
 | 4–10 | prepare_attach/run_attach | Preflight before suspension, strong foreground task, TUI-only exact failure re-probe. |
+| 1–5 | cli.py/cli_workspace_chat/cli_view_contracts | Task 5 moves only canonical sanitizer definitions into contracts and preserves re-exports; types and event/submit behavior stay unchanged. |
+| 2–5 | cli_workspace_chat | Task 5 replaces duplicate _safe with canonical import; shared actions remain unchanged. |
+| 3–5 | cli_workspace_chat | Sanitizer import-only edit preserves transactional selection and notification behavior. |
+| 4–5 | cli_workspaces | Canonical _safe moves unchanged with re-export; attach phases and shell contracts stay unchanged. |
 | 5–6 | label sanitation | Dialog labels cannot become control sequences/markup; fields retain actual values for validation. |
 | 5–7 | TuiState/Viewport/layout_mode | 22-column wide sidebar and exact breakpoints; no message cache in state. |
 | 5–8 | cli_tui_state; DraftStore/Viewport | Preserve limits while adding revision/cursor behavior; no silent eviction on send/resize. |
