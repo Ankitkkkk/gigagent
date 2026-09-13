@@ -287,3 +287,53 @@ async def tui_harness(size=(120, 30), *, client=None, controller=None):
             yield ui
         finally:
             await ui.close()
+
+
+class ApplicationHarness(TuiHarness):
+    """Capture production TuiApplication using the same real pipe/render helpers."""
+
+    def __init__(self, size, client, controller, pipe, **kwargs):
+        from cli_tui import TuiApplication
+        self.size = Size(rows=size[1], columns=size[0])
+        self.stream, self.pipe = io.StringIO(), pipe
+        self.rendered, self.input_processed = asyncio.Event(), asyncio.Event()
+        self.render_count = self.key_count = 0
+        self.rows, self.cells = [], {}
+        self.client, self.controller, self.api = client, controller, controller.api
+        output = Vt100_Output(self.stream, get_size=lambda: self.size, enable_cpr=False)
+        self.tui = TuiApplication(client, controller, input=pipe, output=output, **kwargs)
+        self.application = self.tui.application
+        self.application.after_render += self._capture
+        self.application.key_processor.after_key_press += self._key_processed
+        self.application.ttimeoutlen = .05
+        self.application.timeoutlen = .2
+        for name in ('view', 'state', 'dialogs', 'composer_actions', 'workflows', 'callbacks'):
+            setattr(self, name, getattr(self.tui, name))
+
+    async def close(self):
+        if not self.task.done():
+            await asyncio.wait_for(self.tui.request_quit(signal=True), 3)
+        # Tests explicitly inspect startup exceptions; cleanup only retrieves them.
+        await asyncio.wait_for(asyncio.gather(self.task, return_exceptions=True), 3)
+
+    async def _send(self, text):
+        before, count = self.render_count, self.key_count
+        self.input_processed.clear()
+        await asyncio.to_thread(self.pipe.send_text, text)
+        if self.key_count == count:
+            await asyncio.wait_for(self.input_processed.wait(), 2)
+        if self.render_count == before and not self.application.is_done:
+            await self.wait_until(lambda: self.render_count > before or self.task.done())
+
+
+@asynccontextmanager
+async def application_harness(client, controller, *, size=(120, 35), **kwargs):
+    with create_pipe_input() as pipe:
+        ui = ApplicationHarness(size, client, controller, pipe, **kwargs)
+        ui.task = asyncio.create_task(ui.tui.run())
+        ui.task.add_done_callback(lambda _: ui.rendered.set())
+        try:
+            await ui.wait_render()
+            yield ui
+        finally:
+            await ui.close()

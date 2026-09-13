@@ -799,8 +799,12 @@ class TuiWorkflows:
                     return ActionOutcome('cancelled')
                 outcome = await self.controller.execute_action(action, {'confirmed': True})
                 if outcome.status == 'completed':
+                    generation = self.controller.selection_generation
                     self.composer_actions.switch_draft(None, mandatory=True)
                     await self.refresh_sessions()
+                    if (self.controller.workspace is not None
+                            and self.controller.selection_generation != generation):
+                        return ActionOutcome('completed', workspace_id=self.controller.workspace['id'])
                     return await self.view.callbacks['navigate'](mandatory=True)
             if outcome.status == 'completed':
                 await self.refresh_sessions()

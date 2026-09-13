@@ -31,6 +31,8 @@ class ViewEvent:
     message_ids: tuple = ()
     selection_generation: int | None = None
     text: str | None = None
+    old_channel: str | None = None
+    new_channel: str | None = None
 
 
 @dataclass(frozen=True)

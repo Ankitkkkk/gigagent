@@ -89,11 +89,12 @@ class ChatClient:
             self.messages.popitem(last=False)
         return fresh
 
-    def _notify_view(self, kind, *, message_ids=(), text=None):
+    def _notify_view(self, kind, *, message_ids=(), text=None, old_channel=None, new_channel=None):
         self.view_revision += 1
         if self.on_view_change is not None:
             self.on_view_change(ViewEvent('client', kind, self.view_revision,
-                                          message_ids=tuple(message_ids), text=text))
+                                          message_ids=tuple(message_ids), text=text,
+                                          old_channel=old_channel, new_channel=new_channel))
 
     def _set_connection_state(self, state, *, force=False):
         if not force and self.connection_state == state:
@@ -206,7 +207,8 @@ class ChatClient:
                 if message.get("channel") == event["old_name"]:
                     message["channel"] = event["new_name"]
                     changed.append(key)
-            self._notify_view("channel", message_ids=changed)
+            self._notify_view("channel", message_ids=changed,
+                              old_channel=event['old_name'], new_channel=event['new_name'])
         elif kind.endswith("_error"):
             self.show(event.get("error", "Request failed"))
 

@@ -24,6 +24,20 @@ def message(message_id, text="hello", **changes):
 
 
 class ValueTypeTests(unittest.TestCase):
+    def test_rename_event_carries_identity_after_settings_and_rewrites(self):
+        event = ViewEvent('client', 'messages', 1, None, None, (), None, 'old positional text')
+        self.assertEqual(event.text, 'old positional text')
+        self.assertIsNone(getattr(event, 'old_channel', 'missing'))
+        client = ChatClient('http://127.0.0.1:18300', channel='old', output=lambda _: None)
+        client.remember(message(1, channel='old'))
+        observed = []
+        client.on_view_change = lambda event: observed.append((event, client.messages[1]['channel']))
+        client.handle_event({'type': 'settings', 'data': {'channels': ['general', 'new']}})
+        client.handle_event({'type': 'channel_renamed', 'old_name': 'old', 'new_name': 'new'})
+        self.assertEqual(client.channel, 'general')
+        renamed, channel = observed[-1]
+        self.assertEqual((renamed.old_channel, renamed.new_channel, channel), ('old', 'new', 'new'))
+
     def test_shared_contracts_are_immutable_values(self):
         event = ViewEvent("client", "messages", 1, message_ids=(7,))
         self.assertEqual(event.message_ids, (7,))
