@@ -615,6 +615,7 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertIsInstance(args[1], chat.WorkspaceChatController)
         self.assertEqual(args[1].api.url, 'http://127.0.0.1:18300')
         self.assertFalse(args[1].plain_channel)
+        self.assertEqual(self.err.getvalue(), 'Full-screen unavailable; using plain mode.\n')
 
     def test_explicit_session_and_no_resume_are_carried_to_controller(self):
         self.main('chat', '--session', 'billing', '--no-resume')
@@ -622,6 +623,7 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertEqual(len(args), 2)
         self.assertEqual(args[1].selector, 'billing')
         self.assertTrue(args[1].no_resume)
+        self.assertEqual(self.err.getvalue(), 'Full-screen unavailable; using plain mode.\n')
 
     def test_explicit_channel_is_plain_but_still_checks_server(self):
         self.main('chat', '--channel', 'support')
@@ -630,6 +632,7 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertEqual(len(args), 2)
         self.assertTrue(args[1].plain_channel)
         self.assertEqual(args[0].channel, 'support')
+        self.assertEqual(self.err.getvalue(), 'Full-screen unavailable; using plain mode.\n')
 
     def test_explicit_url_down_never_launches_and_reports_log(self):
         self.opener.open.side_effect = URLError(ConnectionRefusedError())
@@ -638,6 +641,8 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 1)
         self.assertIn('Start it manually: python run.py', self.err.getvalue())
         self.assertIn('/tmp/cli-main-data/logs/server.log', self.err.getvalue())
+        self.assertTrue(self.err.getvalue().startswith(
+            'Full-screen unavailable; using plain mode.\n'))
         self.runner.assert_not_called()
         self.interactive.assert_not_awaited()
 

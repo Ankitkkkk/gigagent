@@ -84,6 +84,14 @@ Use matching overrides for every wrapper connecting to that instance.
   maps to API "workspace". Optional terminal dependencies live in
   `requirements-cli.txt`. Shell sends use WebSocket request IDs and server
   acknowledgments; preserve those when changing message handling.
+- `cli_view_contracts.py`: dependency-free immutable view, action, and submit
+  values shared by terminal layers. `cli_tui_state.py` owns bounded drafts,
+  notices, and viewport anchors. `cli_tui_view.py` owns sanitized prompt-toolkit
+  rendering and responsive controls. `cli_tui_dialogs.py` owns awaitable forms,
+  confirmations, navigation, and action workflows. `cli_tui.py` composes the
+  full-screen application, transport lifetime, signals, quit, and terminal
+  handoff. Keep its import from `cli.py` lazy so either module import order and
+  script entry remain safe.
 
 ## Configuration and Local State
 
@@ -156,6 +164,13 @@ token lines from failure log excerpts before temporary-directory cleanup.
 Never replace the inert shim with paid Claude/Codex sessions. Foreground attach
 and buffered WebSocket output use controlled terminal tests in
 `tests/test_cli_workspace_chat.py`; the real tmux test covers lifecycle only.
+Full-screen component and application tests use prompt-toolkit pipe input with
+captured VT screens from `tests/_tui_harness.py`. For isolated PTY QA, preserve
+the real CLI entry, terminal dimensions, input bytes, and terminal restoration;
+capture runtime cells instead of treating stripped ANSI output as a screen.
+Always remove inherited `TMUX`, use a private `TMUX_TMPDIR`, and register child
+and private tmux-server cleanup before launch. Never attach to or kill a
+developer tmux server.
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -p 'test_cli*integration.py' -v

@@ -877,6 +877,46 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(asyncio.shield(ui.task), 1)
                 self.assertIs(caught.exception, failure)
 
+    async def test_signal_cancel_failure_wakes_existing_quit_without_rescheduling(self):
+        loop = asyncio.get_running_loop()
+        old_handler = signal.getsignal(signal.SIGTERM)
+        observed = []
+        loop.add_signal_handler(signal.SIGTERM, lambda: observed.append('restored'))
+        hooks = (Mock(), Mock(), Mock(), Mock(), object(), Mock())
+        try:
+            async with self.ui(selected=workspace(), prior_hooks=hooks) as ui:
+                await self.connected(ui)
+                await ui.type_text('unsent')
+                key_quit = asyncio.create_task(ui.tui.request_quit())
+                await self.modal(ui, 'Quit with unsent')
+                failure = RuntimeError('persistent dialog cancellation failure')
+                followups = []
+                with patch.object(ui.tui, '_schedule_signal',
+                                  side_effect=lambda: followups.append(True)), \
+                        patch.object(ui.dialogs, 'cancel', side_effect=failure):
+                    forced = ui.tui._spawn(ui.tui.request_quit(signal=True), 'signal')
+                    result = await asyncio.wait_for(
+                        asyncio.gather(forced, return_exceptions=True), 1)
+                    self.assertEqual(result, [True])
+                    await asyncio.sleep(0)
+                    self.assertEqual(followups, [])
+                    self.assertTrue(ui.tui._force_quit)
+                    self.assertIs(ui.tui._run_error, failure)
+                    self.assertTrue(await asyncio.wait_for(key_quit, 1))
+                    with self.assertRaises(RuntimeError) as caught:
+                        await asyncio.wait_for(ui.task, 1)
+                    self.assertIs(caught.exception, failure)
+                actual = (ui.client.output, ui.client.on_view_change,
+                          ui.client.on_workspace, ui.client.on_settings,
+                          ui.controller.presentation, ui.controller.on_view_change)
+                for restored, original in zip(actual, hooks):
+                    self.assertIs(restored, original)
+                loop._signal_handlers[signal.SIGTERM]._run()
+                self.assertEqual(observed, ['restored'])
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, old_handler)
+
     async def test_first_failure_wins_when_two_workflow_guards_fail(self):
         async with self.ui(selected=workspace()) as ui:
             await self.connected(ui)

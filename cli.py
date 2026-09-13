@@ -5,6 +5,7 @@ import asyncio
 from collections import OrderedDict, deque
 from contextlib import redirect_stdout
 import json
+import os
 import re
 import sys
 import uuid
@@ -398,13 +399,21 @@ async def shell_command(client, args):
     raise ValueError("Connection closed before the server confirmed delivery")
 
 
+def choose_interactive_mode(*, plain, stdin_tty, stdout_tty, platform, term):
+    if plain or not stdin_tty or not stdout_tty:
+        return "plain"
+    if platform != "win32" and (not term or term.lower() == "dumb"):
+        return "plain"
+    return "tui"
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Terminal chat and shell commands for agentchattr.")
     parser.set_defaults(url=None, channel=None, session=None, name=None, history=30,
                         timeout=15, json=False, command="chat", agent_name=None,
                         history_mode="literal", cwd=None, fresh=False, archived=False,
                         yes=False, agent=None, no_resume=False, provider=None,
-                        session_name=None, target_session=None)
+                        session_name=None, target_session=None, plain=False)
 
     def options(target):
         target.add_argument("--url", default=argparse.SUPPRESS, help="Local server URL")
@@ -420,6 +429,8 @@ def build_parser():
                             help="Machine-readable output for shell commands")
 
     options(parser)
+    parser.add_argument("--plain", action="store_true", default=argparse.SUPPRESS,
+                        help="Use legacy interactive rendering")
     parser.add_argument("--no-resume", action="store_true", default=argparse.SUPPRESS,
                         help="Do not offer to resume stopped agents")
     commands = parser.add_subparsers(dest="command")
@@ -444,6 +455,9 @@ def build_parser():
         subparser = commands.add_parser(command, help=help_text)
         options(subparser)
         if command == "chat":
+            subparser.add_argument("--plain", action="store_true",
+                                   default=argparse.SUPPRESS,
+                                   help="Use legacy interactive rendering")
             subparser.add_argument("--no-resume", action="store_true",
                                    default=argparse.SUPPRESS,
                                    help="Do not offer to resume stopped agents")
@@ -486,6 +500,8 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     args.command = args.command or "chat"
+    if args.plain and args.command != "chat":
+        parser.error("--plain is only available for chat")
     json_unavailable = (f"--json is not available for {args.command}; available for "
                         + ", ".join(parser.json_commands))
     if not 1 <= args.history <= 10000:
@@ -531,6 +547,12 @@ def main(argv=None):
             parser.error(json_unavailable)
         if not sys.stdin.isatty():
             parser.exit(1, "Interactive chat requires a terminal. Use read or send for scripts.\n")
+        mode = choose_interactive_mode(plain=args.plain, stdin_tty=True,
+                                       stdout_tty=sys.stdout.isatty(),
+                                       platform=sys.platform,
+                                       term=os.environ.get("TERM"))
+        if mode == "plain" and not args.plain:
+            print("Full-screen unavailable; using plain mode.", file=sys.stderr)
     elif args.command == "send" and args.message == ["-"]:
         args.message = [sys.stdin.read()]
     with redirect_stdout(sys.stderr):
@@ -544,13 +566,25 @@ def main(argv=None):
         parser.error(str(error))
     try:
         if args.command == "chat":
+            initial_notices = []
+
+            def startup_output(text):
+                text = terminal_text(text)
+                initial_notices.append(text)
+                client.show(text)
+
             startup_status = ensure_server(url, explicit_url=args.url is not None, config=config,
-                                           output=client.show)
+                                           output=startup_output)
             controller = WorkspaceChatController(
                 client, WorkspaceAPI(url, timeout=args.timeout), selector=args.session,
                 no_resume=args.no_resume, plain_channel=args.channel is not None,
                 data_dir=startup_status.get('data_dir'), providers=config.get('agents', {}))
-            asyncio.run(interactive(client, controller))
+            if mode == "plain":
+                asyncio.run(interactive(client, controller))
+            else:
+                from cli_tui import interactive_tui
+                asyncio.run(interactive_tui(
+                    client, controller, initial_notices=initial_notices))
         elif args.command == 'attach':
             api = WorkspaceAPI(url, timeout=args.timeout)
 

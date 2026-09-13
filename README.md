@@ -25,10 +25,17 @@ Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
 `python run.py` in a separate terminal. `python cli.py chat` explicitly starts
 interactive mode.
 
-From this source checkout, `python cli.py` opens a session picker. Create a
-session or select an existing one; the picker can also show archived sessions
-and asks before restoring one. Terminal sessions group a channel, working
-directories, and persistent agent identities.
+From this source checkout, `python cli.py` opens the full-screen terminal UI and
+its session picker. Create a session or select an existing one; the picker can
+also show archived sessions and asks before restoring one. Terminal sessions
+group a channel, working directories, and persistent agent identities.
+
+Use `python cli.py --plain` or `python cli.py chat --plain` for the legacy
+scrolling prompt. When stdout is not a terminal, or on macOS/Linux when `TERM`
+is unset, empty, or `dumb`, interactive chat automatically uses that renderer
+and prints `Full-screen unavailable; using plain mode.` once to stderr. Input
+must still be a terminal. Capability fallback is decided before startup; a
+failure after full-screen startup is reported directly.
 
 ```sh
 python cli.py
@@ -49,7 +56,8 @@ provider unique within that session. `--agent-name` names an agent; `--name`
 remains the human sender name. `--history N` (also `--limit N`) remains a numeric
 message limit; `--history-mode` selects agent catch-up policy.
 
-Use `--channel` for plain channel chat; it cannot be combined with `--session`.
+Use `--channel` for channel-only chat in either renderer; it cannot be combined
+with `--session`.
 Shell `send` and `read` default to `general` without either flag and accept
 `--session billing` to target that session's channel. `sessions` lists active
 sessions; `sessions --archived` includes archived ones. Archiving from a script
@@ -59,6 +67,30 @@ Interactive chat supports live messages, `@mentions`, channel switching, recent
 history, agent status, and reconnection after server restarts. Incoming replies
 do not overwrite the input prompt. Messages entered while disconnected are
 rejected rather than queued for later delivery.
+
+The full-screen controls are:
+
+| Key | Action |
+| --- | --- |
+| F2 | Open Sessions, or Channels in channel-only chat |
+| F3 | Focus agents and their available actions |
+| F4 | Open the command palette |
+| F5 | Open Activity diagnostics |
+| F1 | Open Help |
+| Tab / Shift+Tab | Move between visible controls |
+| Enter | Select the highlighted choice or send the composer text |
+| Alt+Enter | Add a line without sending |
+| Escape | Cancel the current dialog or close Help/Activity |
+| Ctrl+C | Cancel the current dialog while preserving the message draft |
+| Ctrl+D | Delete at the cursor, or Quit when the composer is empty |
+| Ctrl+Q | Confirm unsent drafts when needed, checkpoint, and quit |
+
+The command palette exposes Help, Activity, draft clearing, session or channel
+navigation, and actions applicable to the selected session and agent. Those
+include create, rename, archive, add, attach, resume, stop, unread, retry,
+history settings, inspection, refresh, and Quit. Narrow terminals use a compact
+layout. Below 80 columns or 18 rows, the UI keeps the current model, draft, and
+focus while showing resize, Help, and Quit controls.
 
 | Interactive command | Action |
 | --- | --- |
@@ -79,11 +111,23 @@ rejected rather than queued for later delivery.
 | `/help` | Show commands |
 | `/quit` | Checkpoint the selected session and exit; server and agents keep running |
 
-Tab completes commands, agent handles, and channel names. Ctrl+C clears the
-input; Ctrl+D exits. Other slash commands are forwarded to the server.
-Leaving with `/sessions`, `/quit`, or Ctrl+D checkpoints the selected session.
-It does not stop its agents. Selecting a session can offer to resume stopped
-agents; `--no-resume` suppresses that question. If a project moved, use
+Completion suggestions cover commands, agent handles, and channel names. Tab
+chooses a suggestion; Enter applies it, and a later Enter sends. Full-screen
+Escape cancels dialogs without altering the composer. Alt+Enter inserts a
+newline; terminals that send it as Escape followed by Enter must complete that
+key sequence before the terminal timeout. Draft text and cursor position survive
+session/channel switches and resize. Up to 50 nonempty drafts are kept in
+memory, each at most 64 KiB of UTF-8 text. At capacity, send or clear one before
+opening another destination. Drafts are not persisted and disappear when the
+CLI process exits.
+
+In `--plain` mode, Tab completes words, Ctrl+C returns to a fresh prompt, and
+Ctrl+D exits. Other slash commands are forwarded to the server. In full-screen
+mode, `/sessions` opens navigation without checkpointing; committing a switch
+checkpoints the previous session, and Quit checkpoints the selected session. In
+plain mode, `/sessions`, `/quit`, and Ctrl+D keep the legacy checkpoint behavior.
+Leaving chat does not stop its agents. Selecting a session can offer to resume
+stopped agents; `--no-resume` suppresses that question. If a project moved, use
 `/resume AGENT --cwd /absolute/new/project`. An unknown native conversation ID
 is shown as `id unknown`; if ordinary resume is unavailable, use `--fresh` to
 start a new provider conversation while keeping the session agent identity.
@@ -130,10 +174,11 @@ HTTP/WebSocket requests; no token needs to be copied into shell commands.
 
 Spawn, resume, attach, and server auto-start require tmux on Linux/macOS.
 Windows supports other HTTP/chat commands against an existing server; use
-`wrapper_windows.py` for manual agent launch. Real provider authentication,
-trust dialogs, and terminal behavior depend on the installed provider CLI.
-Decision buttons, attachment uploads, and other graphical workflows still use
-the web UI.
+`wrapper_windows.py` for manual agent launch. Full-screen dispatch is covered by
+portable tests, but Windows full-screen terminal behavior has not been tested
+end to end. Real provider authentication, trust dialogs, and terminal behavior
+depend on the installed provider CLI. Decision buttons, attachment uploads, and
+other graphical workflows still use the web UI.
 
 These commands require a source checkout. `build_release.py` has a pre-existing
 packaging gap: it does not yet ship the CLI files, `requirements-cli.txt`, or

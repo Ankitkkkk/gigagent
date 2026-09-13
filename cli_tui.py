@@ -144,7 +144,8 @@ class TuiApplication:
             # run_attach's expected refusal is converted by the handoff adapter.
             return
         self._remember_failure(error)
-        self._schedule_signal()
+        if role != 'signal':
+            self._schedule_signal()
 
     @contextmanager
     def _caller(self, role):
@@ -351,7 +352,16 @@ class TuiApplication:
                 if self._quit_task is not None and not self._quit_task.done():
                     self.quitting = True
                     self._cancel_callers()
-                    self.dialogs.cancel()
+                    try:
+                        self.dialogs.cancel()
+                    except Exception as error:
+                        self._remember_failure(error)
+                        if (self.dialogs.future is not None
+                                and self.dialogs.owner is self._quit_task):
+                            try:
+                                self.dialogs.finish(False)
+                            except Exception as finish_error:
+                                self._remember_failure(finish_error)
             if self._quit_task is None or self._quit_task.done():
                 self._quit_task = self._spawn(self._quit_owned(), 'quit')
             return await _wait_owned(self._quit_task)
