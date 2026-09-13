@@ -21,8 +21,12 @@ from cli_workspaces import prepare_attach, resolve_session, run_attach
 
 
 @contextmanager
-def _signal_handlers(loop, callback):
+def _signal_handlers(loop, callback, notice):
     """Restore process handlers and, on standard asyncio, prior loop callbacks."""
+    if threading.current_thread() is not threading.main_thread():
+        notice('Signal handling unavailable outside the main thread.')
+        yield
+        return
     saved = []
     try:
         for signum in (signals.SIGINT, signals.SIGTERM):
@@ -122,8 +126,25 @@ class TuiApplication:
     def _spawn(self, coroutine, role):
         task = asyncio.create_task(coroutine)
         self._tasks[task] = role
-        task.add_done_callback(self._tasks.pop)
+        task.add_done_callback(self._task_done)
         return task
+
+    def _remember_failure(self, error):
+        if self._run_error is None:
+            self._run_error = error
+        elif self._run_error is not error:
+            self.notice('Additional local error during shutdown.')
+
+    def _task_done(self, task):
+        role = self._tasks.pop(task, None)
+        if task.cancelled():
+            return
+        error = task.exception()  # Retrieve even fire-and-forget owned failures.
+        if error is None or (role == 'foreground' and isinstance(error, CLIError)):
+            # run_attach's expected refusal is converted by the handoff adapter.
+            return
+        self._remember_failure(error)
+        self._schedule_signal()
 
     @contextmanager
     def _caller(self, role):
@@ -208,6 +229,11 @@ class TuiApplication:
         return not self.quitting and (self._quit_task is None or self._quit_task.done())
 
     async def navigate(self, mandatory=False):
+        if self._quit_task is not None and not self._quit_task.done() and not self.quitting:
+            # An archive may finish while the draft question is open. Join as a
+            # Quit waiter so the decision cannot cancel/drain its own caller.
+            if await self.request_quit():
+                return ActionOutcome('cancelled')
         if not self._admitted():
             return ActionOutcome('cancelled')
         with self._caller('navigation'):
@@ -230,7 +256,7 @@ class TuiApplication:
         try:
             return await operation
         except Exception as error:
-            self._run_error = error
+            self._remember_failure(error)
             await self.request_quit(signal=True)
             return outcome_type('failed')
 
@@ -347,32 +373,65 @@ class TuiApplication:
         # must not interpret the dismissal as Chat only and commit a new session.
         preparation = self._spawn(self.controller.cancel_selection(), 'selection_cancel')
         decision_needed = not self._force_quit and bool(len(self.state.drafts))
-        if not decision_needed:
-            self.quitting = True
-            self._cancel_callers()
-        self.view.hide_help()
-        self.dialogs.cancel()
-        if decision_needed:
-            # Open inline: no scheduling gap for required navigation to reopen.
-            accepted = await self.dialogs.confirm('Quit with unsent drafts? [y/N]', default=False, escape=False)
-            await _wait_owned(preparation)
-            if not accepted and not self._force_quit:
-                return False
-        self.quitting = True
-        callers = self._cancel_callers()
-        await _wait_owned(preparation)
-        await asyncio.gather(*callers, return_exceptions=True)
-        if self.handoff_task is not None:
-            await _wait_owned(self.handoff_task)
-        await self.controller.wait_pending()
-        await self.controller.close()
-        await self._sync_transports(stop=True)
-        self.view.hide_help()
-        self.dialogs.cancel()
-        if self.application.is_running and not self.application.is_done:
-            self.application.exit()
-        self._finished = True
+        shutdown = not decision_needed
+        try:
+            if shutdown:
+                self.quitting = True
+                self._cancel_callers()
+            self.view.hide_help()
+            self.dialogs.cancel()
+            if decision_needed:
+                # Open inline: no scheduling gap for required navigation to reopen.
+                accepted = await self.dialogs.confirm('Quit with unsent drafts? [y/N]', default=False, escape=False)
+                await self._settle(_wait_owned(preparation))
+                shutdown = accepted or self._force_quit or self._run_error is not None
+                if not shutdown:
+                    return False
+        except Exception as error:
+            self._remember_failure(error)
+            shutdown = True
+        finally:
+            if shutdown:
+                await self._finish_quit(preparation)
         return True
+
+    async def _settle(self, operation):
+        """A local cleanup failure must not skip the remaining owned resources."""
+        try:
+            await operation
+        except Exception as error:
+            self._remember_failure(error)
+
+    def _close_view(self):
+        for close in (self.view.hide_help, self.dialogs.cancel):
+            try:
+                close()
+            except Exception as error:
+                self._remember_failure(error)
+
+    async def _finish_quit(self, preparation):
+        self.quitting = True
+        try:
+            callers = self._cancel_callers()
+            await self._settle(_wait_owned(preparation))
+            await self._settle(asyncio.gather(*callers, return_exceptions=True))
+        finally:
+            # Even a failed cancellation/drain cannot restore a still-owned tty.
+            try:
+                if self.handoff_task is not None:
+                    await self._settle(_wait_owned(self.handoff_task))
+                await self._settle(self.controller.wait_pending())
+                await self._settle(self.controller.close())
+            finally:
+                try:
+                    await self._settle(self._sync_transports(stop=True))
+                finally:
+                    try:
+                        self._close_view()
+                    finally:
+                        if self.application.is_running and not self.application.is_done:
+                            self.application.exit()
+                        self._finished = True
 
     async def _startup(self):
         try:
@@ -397,7 +456,7 @@ class TuiApplication:
             if not self.quitting:
                 raise
         except Exception as error:
-            self._run_error = error
+            self._remember_failure(error)
             await self.request_quit(signal=True)
 
     async def run(self):
@@ -409,23 +468,31 @@ class TuiApplication:
         self.client.on_view_change = self._observe
         self.controller.bind_view(self, self._observe)
         app_task = None
+        cancelled = False
         try:
-            with _signal_handlers(self._loop, self._schedule_signal):
+            with _signal_handlers(self._loop, self._schedule_signal, self.notice):
                 app_task = self._spawn(self.application.run_async(handle_sigint=False,
                     pre_run=lambda: self._spawn(self._startup(), 'startup')), 'lifetime')
                 try:
                     await asyncio.shield(app_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception as error:
+                    self._remember_failure(error)
                 finally:
                     await self.request_quit(signal=True)
                     await asyncio.gather(app_task, return_exceptions=True)
-                if self._run_error is not None:
-                    raise self._run_error
+        except Exception as error:
+            self._remember_failure(error)
         finally:
-            self.view.hide_help()
-            self.dialogs.cancel()
+            self._close_view()
             (self.client.output, self.client.on_view_change, self.client.on_workspace,
              self.client.on_settings, self.controller.presentation, self.controller.on_view_change) = old
             self._loop = None
+        if self._run_error is not None:
+            raise self._run_error
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def interactive_tui(client, controller, *, initial_notices=()):

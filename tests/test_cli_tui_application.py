@@ -23,7 +23,7 @@ from tests.test_cli_workspace_chat import ControlledSocket
 class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     @asynccontextmanager
     async def ui(self, *, rows=(), selector=None, selected=None, plain=False,
-                 no_resume=True, real_terminal=False, **kwargs):
+                 no_resume=True, real_terminal=False, prior_hooks=None, **kwargs):
         self.assertIsNotNone(importlib.util.find_spec('cli_tui'), 'TuiApplication missing')
         events = []
         records = {w['id']: copy.deepcopy(w) for w in rows}
@@ -47,6 +47,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             plain_channel=plain, no_resume=no_resume, providers=['inert'])
         if selected:
             controller._select(copy.deepcopy(selected))
+        if prior_hooks is not None:
+            (client.output, client.on_view_change, client.on_workspace, client.on_settings,
+             controller.presentation, controller.on_view_change) = prior_hooks
         socket = ControlledSocket()
         foreground_started, release_foreground = threading.Event(), threading.Event()
         release_foreground.set()
@@ -587,24 +590,42 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_selection_during_receiver_cancellation_reconciles_latest_destination(self):
         stopping, release = asyncio.Event(), asyncio.Event()
+        token_started, release_token = threading.Event(), threading.Event()
         async def slow_exit(socket, *args):
             stopping.set()
             await release.wait()
             return False
+        def token(url):
+            token_started.set()
+            if not release_token.wait(3):
+                raise AssertionError('replacement token fetch not released')
+            return 'inert-token'
         with patch.object(ControlledSocket, '__aexit__', slow_exit):
             async with self.ui(selected=workspace(), rows=[workspace('ws_two', 'Two')]) as ui:
                 await self.connected(ui)
-                try:
-                    await ui.controller.execute_action('archive_session', {'confirmed': True})
-                    await asyncio.wait_for(stopping.wait(), 2)
-                    selection = await ui.tui.run_action('select_session', target_id='ws_two')
-                    self.assertEqual(selection.status, 'completed')
-                finally:
-                    release.set()
-                await ui.wait_until(lambda: ui.events.count('receiver_start') == 2)
-                self.assertIsNotNone(ui.client.websocket)
-                self.assertFalse(ui.tui.poller_task.done())
-                self.assertEqual(ui.controller.workspace['id'], 'ws_two')
+                with patch('cli.fetch_session_token', side_effect=token):
+                    try:
+                        await ui.controller.execute_action('archive_session', {'confirmed': True})
+                        await asyncio.wait_for(stopping.wait(), 2)
+                        selection = await ui.tui.run_action('select_session', target_id='ws_two')
+                        self.assertEqual(selection.status, 'completed')
+                        release.set()
+                        self.assertTrue(await asyncio.to_thread(token_started.wait, 2))
+                        self.assertEqual(ui.events.count('receiver_start'), 2)
+                        self.assertIsNone(ui.client.websocket)
+                        self.assertFalse(ui.tui.receiver_task.done())
+                        release_token.set()
+                        await self.connected(ui)
+                        await ui.socket.deliver({'type': 'message', 'data': {
+                            'id': 999, 'channel': 'ws_two', 'text': 'replacement delivered'}})
+                        self.assertEqual(ui.client.messages[999]['text'], 'replacement delivered')
+                        self.assertEqual(ui.client.messages[999]['channel'], 'ws_two')
+                        self.assertEqual(ui.events.count('receiver_start'), 2)
+                        self.assertFalse(ui.tui.poller_task.done())
+                        self.assertEqual(ui.controller.workspace['id'], 'ws_two')
+                    finally:
+                        release.set()
+                        release_token.set()
 
     async def test_unexpected_workflow_error_exits_cleanly_and_reaches_run_caller(self):
         async with self.ui(selected=workspace()) as ui:
@@ -745,3 +766,200 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({row['id'] for row in ui.view.session_rows()}, {'ws_one', 'ws_two'})
             self.assertIn('Two', ui.screen_text())
             self.assertEqual(ui.api.list.call_count, 1)
+
+    async def test_archive_completing_during_quit_decision_resumes_required_navigation(self):
+        for answer in ('n', 'y'):
+            with self.subTest(answer=answer):
+                async with self.ui(selected=workspace(), rows=[workspace('ws_two', 'Two')]) as ui:
+                    await self.connected(ui)
+                    await ui.type_text('unsent before archive')
+                    entered, release = threading.Event(), threading.Event()
+                    original = ui.api.action.side_effect
+                    def action(ident, name, **kwargs):
+                        if name == 'archive':
+                            entered.set()
+                            if not release.wait(3):
+                                raise AssertionError('archive not released')
+                        return original(ident, name, **kwargs)
+                    ui.api.action.side_effect = action
+                    archive = asyncio.create_task(ui.tui.run_action('archive_session'))
+                    try:
+                        await self.modal(ui, 'Archive session?')
+                        await ui._send('y')
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                        await ui.key('CtrlQ')
+                        await self.modal(ui, 'Quit with unsent')
+                        release.set()
+                        await ui.wait_until(lambda: ui.controller.workspace is None)
+                        await ui._send(answer)
+                        if answer == 'n':
+                            await self.modal(ui, 'Show archived')
+                            self.assertFalse(archive.done())
+                            self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'unsent before archive')
+                        else:
+                            await asyncio.wait_for(ui.task, 2)
+                            self.assertIsNone(ui.dialogs.future)
+                        self.assertNotIn('checkpoint', ui.events)
+                    finally:
+                        release.set()
+                        archive.cancel()
+                        await asyncio.gather(archive, return_exceptions=True)
+
+    async def test_receiver_view_failure_reaches_run_after_restoration(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            failure = RuntimeError('local view bug')
+            refresh = ui.view.refresh
+            def fail_message(event=None):
+                if event is not None and event.kind == 'messages':
+                    raise failure
+                return refresh(event)
+            ui.view.refresh = fail_message
+            await ui.socket.frames.put({'type': 'message', 'data': {
+                'id': 333, 'channel': 'ws_one', 'text': 'trigger view'}})
+            with self.assertRaises(RuntimeError) as caught:
+                await asyncio.wait_for(asyncio.shield(ui.task), 1)
+            self.assertIs(caught.exception, failure)
+            self.assertIsNone(ui.client.on_view_change)
+            self.assertIsNone(ui.controller.presentation)
+            self.assertTrue(ui.tui.poller_task is None or ui.tui.poller_task.done())
+
+    async def test_poller_view_failure_reaches_run_after_restoration(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            failure = RuntimeError('local poll view bug')
+            refresh = ui.view.refresh
+            def fail_workspace(event=None):
+                if event is not None and event.source == 'controller' and event.kind == 'agent_state':
+                    raise failure
+                return refresh(event)
+            ui.view.refresh = fail_workspace
+            with self.assertRaises(RuntimeError) as caught:
+                await asyncio.wait_for(asyncio.shield(ui.task), 3)
+            self.assertIs(caught.exception, failure)
+            self.assertIsNone(ui.client.on_workspace)
+            self.assertIsNone(ui.controller.presentation)
+            self.assertTrue(ui.tui.receiver_task is None or ui.tui.receiver_task.done())
+
+    async def test_quit_during_open_form_returns_cancelled_without_mutation(self):
+        hooks = (Mock(), Mock(), Mock(), Mock(), object(), Mock())
+        async with self.ui(selected=workspace(), prior_hooks=hooks) as ui:
+            await self.connected(ui)
+            await ui.type_text('saved draft')
+            rename = asyncio.create_task(ui.tui.run_action('rename_session'))
+            try:
+                await self.modal(ui, 'Rename session')
+                await ui.type_text('edited form')
+                await ui.key('CtrlQ')
+                await self.modal(ui, 'Quit with unsent')
+                await ui._send('n')
+                self.assertEqual((await asyncio.wait_for(rename, 1)).status, 'cancelled')
+                self.assertEqual(ui.api.rename.call_count, 0)
+                self.assertEqual(ui.controller.workspace['name'], 'One')
+                self.assertEqual(ui.view.composer.text, 'saved draft')
+                await ui.tui.request_quit(signal=True)
+                await ui.task
+                actual = (ui.client.output, ui.client.on_view_change, ui.client.on_workspace,
+                          ui.client.on_settings, ui.controller.presentation, ui.controller.on_view_change)
+                for restored, original in zip(actual, hooks):
+                    self.assertIs(restored, original)
+            finally:
+                rename.cancel()
+                await asyncio.gather(rename, return_exceptions=True)
+
+    async def test_spawned_refresh_failure_is_retrieved_and_reaches_run(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            failure = RuntimeError('refresh observer bug')
+            with patch.object(ui.workflows, 'refresh_sessions', side_effect=failure):
+                ui.client._set_connection_state('connected', force=True)
+                with self.assertRaises(RuntimeError) as caught:
+                    await asyncio.wait_for(asyncio.shield(ui.task), 1)
+                self.assertIs(caught.exception, failure)
+
+    async def test_first_failure_wins_when_two_workflow_guards_fail(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            first, second = RuntimeError('first local bug'), RuntimeError('second local bug')
+            async def fail(error):
+                raise error
+            tasks = [ui.tui._spawn(ui.tui._guard(fail(error)), 'action') for error in (first, second)]
+            await asyncio.wait_for(asyncio.gather(*tasks), 2)
+            with self.assertRaises(RuntimeError) as caught:
+                await asyncio.wait_for(ui.task, 2)
+            self.assertIs(caught.exception, first)
+
+    async def test_quit_internal_failure_still_exits_and_restores(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            failure = RuntimeError('quit drain bug')
+            with patch.object(ui.controller, 'wait_pending', side_effect=failure):
+                await asyncio.wait_for(ui.tui.request_quit(signal=True), 1)
+                with self.assertRaises(RuntimeError) as caught:
+                    await asyncio.wait_for(asyncio.shield(ui.task), 1)
+                self.assertIs(caught.exception, failure)
+                self.assertIsNone(ui.client.on_view_change)
+                self.assertIsNone(ui.client.websocket)
+
+    async def test_worker_thread_runs_with_one_signal_unavailable_notice(self):
+        async def worker():
+            async with self.ui(plain=True) as ui:
+                await self.connected(ui)
+                notices = [text for text in ui.state.notices.lines if 'signal' in text.lower()]
+                self.assertEqual(len(notices), 1)
+                self.assertIn('main thread', notices[0])
+                await ui.key('CtrlQ')
+                await asyncio.wait_for(ui.task, 2)
+        await asyncio.wait_for(asyncio.to_thread(lambda: asyncio.run(worker())), 5)
+
+    async def test_quit_view_cleanup_failure_still_restores_hooks(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            failure = RuntimeError('view cleanup bug')
+            with patch.object(ui.view, 'hide_help', side_effect=failure):
+                await asyncio.wait_for(ui.tui.request_quit(signal=True), 1)
+                with self.assertRaises(RuntimeError) as caught:
+                    await asyncio.wait_for(asyncio.shield(ui.task), 1)
+                self.assertIs(caught.exception, failure)
+                self.assertIsNone(ui.controller.presentation)
+                self.assertIsNone(ui.client.on_workspace)
+
+    async def test_receiver_failure_drains_real_terminal_before_exit(self):
+        async with self.ui(selected=workspace(agents=[agent()]), real_terminal=True) as ui:
+            await self.connected(ui)
+            ui.release_foreground.clear()
+            action = asyncio.create_task(ui.tui.attach(ui.controller.workspace['agents'][0]))
+            try:
+                self.assertTrue(await asyncio.to_thread(ui.foreground_started.wait, 2))
+                self.assertTrue(ui.application._running_in_terminal)
+                count = ui.render_count
+                failure = RuntimeError('receiver failed during foreground')
+                quitting = asyncio.Event()
+                finish_quit = ui.tui._finish_quit
+                async def observe_quit(preparation):
+                    quitting.set()
+                    await finish_quit(preparation)
+                ui.tui._finish_quit = observe_quit
+                refresh = ui.view.refresh
+                def fail_message(event=None):
+                    if event is not None and event.kind == 'messages':
+                        raise failure
+                    return refresh(event)
+                ui.view.refresh = fail_message
+                await ui.socket.frames.put({'type': 'message', 'data': {
+                    'id': 334, 'channel': 'ws_one', 'text': 'trigger failure'}})
+                await asyncio.wait_for(quitting.wait(), 2)
+                self.assertFalse(ui.task.done())
+                self.assertTrue(ui.application._running_in_terminal)
+                self.assertEqual(ui.render_count, count)
+                ui.release_foreground.set()
+                await asyncio.wait_for(action, 2)
+                with self.assertRaises(RuntimeError) as caught:
+                    await asyncio.wait_for(ui.task, 2)
+                self.assertIs(caught.exception, failure)
+                self.assertFalse(ui.application._running_in_terminal)
+                self.assertIsNone(ui.controller.presentation)
+                self.assertLess(ui.events.index('foreground_finished'), ui.events.index('checkpoint'))
+            finally:
+                ui.release_foreground.set()
+                await asyncio.gather(action, return_exceptions=True)
