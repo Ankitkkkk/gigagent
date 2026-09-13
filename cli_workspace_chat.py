@@ -386,6 +386,7 @@ class WorkspaceChatController:
         self._pending_mutations = set()
         self._selection_task = None
         self._selection_commit = None
+        self._selection_settled = None
 
     def bind_view(self, presentation, notify):
         self.presentation = presentation
@@ -443,6 +444,12 @@ class WorkspaceChatController:
     def selection_pending(self):
         return self._selection_task is not None or self._selection_commit is not None
 
+    async def wait_selection(self):
+        """Observe the current selection lifetime without cancelling its owner."""
+        settled = self._selection_settled
+        if settled is not None:
+            await asyncio.wait({settled})
+
     async def list_sessions(self, include_archived=False):
         """Return the API mapping (workspaces and optional warning) on demand."""
         return await asyncio.to_thread(self.api.list, include_archived=include_archived)
@@ -459,6 +466,8 @@ class WorkspaceChatController:
             return ActionOutcome('cancelled', 'Session selection already in progress.', ws_id)
         if self.workspace is not None and self.workspace['id'] == ws_id:
             return ActionOutcome('completed', workspace_id=ws_id)
+        settled = asyncio.get_running_loop().create_future()
+        self._selection_settled = settled
         generation = self._selection_version
         task = asyncio.create_task(self._prepare_selection(ws_id, generation))
         self._selection_task = task
@@ -486,6 +495,9 @@ class WorkspaceChatController:
                 self._selection_commit = None
             if commit is not None:
                 self._pending_actions.discard(commit)
+            settled.set_result(None)
+            if self._selection_settled is settled:
+                self._selection_settled = None
 
     async def _prepare_selection(self, ws_id, generation):
         cancelled = ActionOutcome('cancelled', workspace_id=ws_id)

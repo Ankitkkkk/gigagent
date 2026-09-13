@@ -83,6 +83,77 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ctl._pending_actions)
         self.assertFalse(ctl._action_lock.locked())
 
+    async def test_wait_selection_observes_dialog_and_commit_without_cancelling_owner(self):
+        ctl = self.make_controller(stopped=True)
+        self.assertTrue(hasattr(ctl, 'wait_selection'), 'selection completion wait must be public')
+        entered, release = threading.Event(), threading.Event()
+        action = self.api.action.side_effect
+        def checkpoint(*args, **kwargs):
+            if args[1] == 'checkpoint':
+                entered.set()
+                release.wait(3)
+            return action(*args, **kwargs)
+        self.api.action.side_effect = checkpoint
+        selecting = asyncio.create_task(ctl.select_session('ws_b'))
+        try:
+            await asyncio.wait_for(self.dialog_open.wait(), 2)
+            cancelled_waiter = asyncio.create_task(ctl.wait_selection())
+            waiter = asyncio.create_task(ctl.wait_selection())
+            await self.tick()
+            cancelled_waiter.cancel()
+            await asyncio.gather(cancelled_waiter, return_exceptions=True)
+            self.assertFalse(selecting.done())
+            duplicate = await ctl.select_session('ws_b')
+            self.assertEqual(duplicate.message, 'Session selection already in progress.')
+            self.assertFalse(waiter.done())
+            self.dialog_release.set()
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            self.assertFalse(waiter.done(), 'Selection completion includes the checkpoint/commit')
+            release.set()
+            self.assertEqual((await selecting).status, 'completed')
+            await asyncio.wait_for(waiter, 2)
+            self.assert_clean(ctl)
+            await asyncio.wait_for(ctl.wait_selection(), 2)
+        finally:
+            release.set()
+            self.dialog_release.set()
+            await asyncio.gather(selecting, return_exceptions=True)
+
+    async def test_wait_selection_tokens_survive_new_admission_before_old_finally(self):
+        ctl = self.make_controller(no_resume=True)
+        self.assertTrue(hasattr(ctl, 'wait_selection'), 'selection completion wait must be public')
+        entered, release = threading.Event(), threading.Event()
+        get = self.api.get.side_effect
+        newer = []
+        def delayed_get(ident):
+            if ident == 'ws_a':
+                entered.set()
+                release.wait(3)
+            return get(ident)
+        self.api.get.side_effect = delayed_get
+        def notify(event):
+            self.events.append(event)
+            if event.kind == 'selection' and event.workspace_id == 'ws_b':
+                newer.append(asyncio.create_task(ctl.select_session('ws_a')))
+        ctl.bind_view(self.presenter, notify)
+        first = asyncio.create_task(ctl.select_session('ws_b'))
+        try:
+            await self.tick()
+            old_waiter = asyncio.create_task(ctl.wait_selection())
+            self.assertEqual((await first).status, 'completed')
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            await asyncio.wait_for(old_waiter, 2)
+            new_waiter = asyncio.create_task(ctl.wait_selection())
+            await self.tick()
+            self.assertFalse(new_waiter.done(), 'Old finally must not settle the newer selection token')
+            release.set()
+            self.assertEqual((await newer[0]).status, 'completed')
+            await asyncio.wait_for(new_waiter, 2)
+            self.assert_clean(ctl)
+        finally:
+            release.set()
+            await asyncio.gather(first, *newer, return_exceptions=True)
+
     async def test_candidate_confirmation_receives_updated_candidate(self):
         ctl = self.make_controller(stopped=True, archived=True)
         contexts = []

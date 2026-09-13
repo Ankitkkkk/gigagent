@@ -50,7 +50,9 @@ class TuiHarness:
         self.controller = controller or WorkspaceChatController(self.client, _HarnessAPI())
         self.api = self.controller.api
         self.state = TuiState()
-        self.dialogs = DialogHost(lambda: self.application, self.invalidate)
+        self.dialogs = DialogHost(lambda: self.application, self.invalidate,
+            owner_is_short_lived=lambda owner: owner in getattr(self, 'tasks', ())
+            or owner in self.application._background_tasks)
 
         async def submit(text):
             self.calls.append(('submit', text))

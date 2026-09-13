@@ -65,14 +65,21 @@ class _SafeInput(Processor):
 class DialogHost:
     """Own one modal waiter and restore focus when that waiter finishes."""
 
-    def __init__(self, app_getter, invalidate):
+    def __init__(self, app_getter, invalidate, *, owner_is_short_lived=None):
         self.app_getter = app_getter
         self.invalidate = invalidate
+        self.owner_is_short_lived = owner_is_short_lived or (lambda owner: False)
         self.future = None
+        self._owner = None
         self.float = None
         self._empty = Window(height=0, width=0)
         self._saved_focus = None
         self._cancel_value = None
+
+    @property
+    def owner(self):
+        """Task owning the current modal; capture together with its Future."""
+        return self._owner
 
     @property
     def body(self):
@@ -106,6 +113,7 @@ class DialogHost:
             return cancel_value
         future = asyncio.get_running_loop().create_future()
         self.future = future
+        self._owner = asyncio.current_task()
         self._saved_focus = app.layout.current_control
         self._cancel_value = cancel_value
         self.float = FloatContainer(content=content, floats=[], modal=True,
@@ -139,6 +147,7 @@ class DialogHost:
         future, self.future = self.future, None
         if future is None:
             return
+        self._owner = None
         self.float = None
         self._cancel_value = None
         try:
@@ -489,18 +498,33 @@ class TuiWorkflows:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def navigate(self, mandatory=False):
+        generation = self.controller.selection_generation
+        def committed_elsewhere():
+            return (self.controller.workspace is not None
+                    and self.controller.selection_generation != generation)
+
         if self.controller.plain_channel:
             return await self._menu('Channel actions', {'create_channel', 'switch_channel', 'history'},
                                     None, self._scope())
         while True:
+            if committed_elsewhere():
+                return ActionOutcome('completed', workspace_id=self.controller.workspace['id'])
             result = await self._navigation()
             if result.value is _NAVIGATION_BUSY:
                 if not mandatory and self.controller.workspace is not None:
                     return ActionOutcome('cancelled')
-                # Another workflow owns this waiter. Cancellation here must not
-                # cancel its form, and a replacement dialog must also finish.
-                while self.dialogs.future is not None:
-                    await asyncio.shield(self.dialogs.future)
+                # Modal completion precedes its owner's submitted HTTP work.
+                # Observe both lifetimes without inheriting their cancellation.
+                future, owner = self.dialogs.future, self.dialogs.owner
+                await asyncio.wait({future})
+                if committed_elsewhere():
+                    continue
+                if (owner is not None and owner is not asyncio.current_task()
+                        and self.dialogs.owner_is_short_lived(owner)):
+                    await asyncio.wait({owner})
+                    if committed_elsewhere():
+                        continue
+                await self.controller.wait_selection()
                 continue
             if result.cancelled:
                 if mandatory or self.controller.workspace is None:

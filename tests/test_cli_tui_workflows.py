@@ -580,6 +580,179 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await owner).cancelled)
             self.assertNotIn(('quit',), ui.calls)
 
+    async def _competing_navigation_commit(self, *, after_archive, delay_commit):
+        import threading
+        selected = workspace() if after_archive else None
+        async with workflow_harness(selected=selected,
+                                    rows=[workspace('ws_fail'), workspace('ws_ok')]) as ui:
+            entered, release = threading.Event(), threading.Event()
+            competing, commit_release = threading.Event(), threading.Event()
+            get = ui.api.get.side_effect
+            action = ui.api.action.side_effect
+            def delayed_get(ident):
+                if ident == 'ws_fail':
+                    entered.set()
+                    release.wait(3)
+                    raise CLIError('selection failed exactly')
+                if ident == 'ws_ok' and delay_commit:
+                    competing.set()
+                    commit_release.wait(3)
+                return get(ident)
+            def delayed_action(*args, **kwargs):
+                if args[1] == 'archive':
+                    entered.set()
+                    release.wait(3)
+                return action(*args, **kwargs)
+            ui.api.get.side_effect = delayed_get
+            ui.api.action.side_effect = delayed_action
+            if after_archive:
+                task = ui.start(ui.workflows.run_action('archive_session'))
+                await self.modal(ui, 'Archive session?')
+                await ui._send('y')
+            else:
+                task = ui.start(ui.workflows.navigate(mandatory=True))
+                await self.modal(ui, 'Show archived')
+                await ui.select_row('ws_fail')
+            try:
+                await ui.wait_until(entered.is_set)
+                await ui.key('F2')
+                await self.modal(ui, 'Show archived')
+                release.set()
+                if after_archive:
+                    await ui.wait_until(lambda: ui.controller.workspace is None)
+                else:
+                    await ui.wait_until(lambda: not ui.controller.selection_pending)
+                await ui.wait_render()
+                self.assertFalse(task.done())
+                await ui.select_row('ws_ok')
+                if delay_commit:
+                    await ui.wait_until(competing.is_set)
+                    await ui.wait_render()
+                    self.assertIsNone(ui.dialogs.future,
+                                      'Older navigation must not reopen during the competing candidate read')
+                    self.assertFalse(task.done())
+                    commit_release.set()
+                await ui.wait_until(lambda: (ui.controller.workspace or {}).get('id') == 'ws_ok')
+                await ui.wait_render()
+                self.assertIsNone(ui.dialogs.future, 'Committed competing navigation must satisfy the older request')
+                self.assertTrue(task.done())
+                self.assertEqual((await task).status, 'completed')
+                await ui.key('Escape')
+                self.assertNotIn(('quit',), ui.calls)
+                self.assertEqual(ui.controller.workspace['id'], 'ws_ok')
+            finally:
+                release.set()
+                commit_release.set()
+
+    async def test_failed_mandatory_navigation_accepts_competing_f2_commit(self):
+        for delayed in (False, True):
+            with self.subTest(delayed=delayed):
+                await self._competing_navigation_commit(after_archive=False, delay_commit=delayed)
+
+    async def test_postarchive_navigation_accepts_competing_f2_commit(self):
+        for delayed in (False, True):
+            with self.subTest(delayed=delayed):
+                await self._competing_navigation_commit(after_archive=True, delay_commit=delayed)
+
+    async def test_cancel_other_modal_owner_keeps_mandatory_navigation_alive(self):
+        async with workflow_harness() as ui:
+            owner = ui.start(ui.dialogs.form('Owned form', [cli_tui_dialogs.Field('name', 'Name:')],
+                                            submit_label='Save'))
+            await self.modal(ui, 'Owned form')
+            navigation = ui.start(ui.workflows.navigate(mandatory=True))
+            await ui.wait_render()
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+            await ui.wait_render()
+            self.assertFalse(navigation.done(), 'Cancelling the modal owner must not cancel waiting navigation')
+            await self.modal(ui, 'Show archived')
+            self.assertNotIn(('quit',), ui.calls)
+            await ui.key('Escape')
+            self.assertEqual((await navigation).status, 'cancelled')
+            self.assertEqual(ui.calls.count(('quit',)), 1)
+
+    async def test_busy_confirmation_waits_through_competing_selection_commit(self):
+        import threading
+        async with workflow_harness(selected=workspace(), no_resume=False,
+                                    rows=[workspace('ws_ok', agents=[agent()])]) as ui:
+            entered, release = threading.Event(), threading.Event()
+            action = ui.api.action.side_effect
+            def delayed_checkpoint(*args, **kwargs):
+                if args[1] == 'checkpoint':
+                    entered.set()
+                    release.wait(3)
+                return action(*args, **kwargs)
+            ui.api.action.side_effect = delayed_checkpoint
+            selecting = ui.start(ui.controller.select_session('ws_ok'))
+            await self.modal(ui, 'Resume 1 stopped agents?')
+            navigation = ui.start(ui.workflows.navigate(mandatory=True))
+            try:
+                await ui.wait_render()
+                await ui._send('n')
+                await ui.wait_until(entered.is_set)
+                await ui.wait_render()
+                self.assertFalse(navigation.done())
+                self.assertIsNone(ui.dialogs.future,
+                                  'Preparation completion must not reopen navigation before checkpoint finishes')
+                release.set()
+                self.assertEqual((await selecting).status, 'completed')
+                self.assertEqual((await asyncio.wait_for(navigation, 2)).status, 'completed')
+                self.assertIsNone(ui.dialogs.future)
+                await ui.key('Escape')
+                self.assertNotIn(('quit',), ui.calls)
+            finally:
+                release.set()
+
+    async def test_busy_navigation_does_not_wait_for_long_lived_modal_owner(self):
+        async with workflow_harness() as ui:
+            ui.dialogs.owner_is_short_lived = lambda owner: False
+            modal_closed, lifetime_end = asyncio.Event(), asyncio.Event()
+            async def lifetime():
+                await ui.dialogs.form('Lifetime form', [cli_tui_dialogs.Field('name', 'Name:')],
+                                      submit_label='Save')
+                modal_closed.set()
+                await lifetime_end.wait()
+            owner = ui.start(lifetime())
+            await self.modal(ui, 'Lifetime form')
+            navigation = ui.start(ui.workflows.navigate(mandatory=True))
+            try:
+                await ui.wait_render()
+                await ui.key('Escape')
+                await asyncio.wait_for(modal_closed.wait(), 2)
+                await ui.wait_render()
+                self.assertFalse(owner.done())
+                self.assertIsNotNone(ui.dialogs.future,
+                                     'Mandatory navigation must not wait for an application-lifetime owner')
+                await self.modal(ui, 'Show archived')
+                self.assertNotIn(('quit',), ui.calls)
+                await ui.key('Escape')
+                self.assertEqual((await navigation).status, 'cancelled')
+            finally:
+                lifetime_end.set()
+
+    async def test_busy_navigation_rechecks_commit_before_waiting_modal_owner(self):
+        async with workflow_harness(rows=[workspace('ws_ok')]) as ui:
+            release = asyncio.Event()
+            async def workflow():
+                await ui.dialogs.form('Other action', [cli_tui_dialogs.Field('name', 'Name:')],
+                                      submit_label='Save')
+                await release.wait()
+            owner = ui.start(workflow())
+            await self.modal(ui, 'Other action')
+            navigation = ui.start(ui.workflows.navigate(mandatory=True))
+            try:
+                await ui.wait_render()
+                self.assertEqual((await ui.controller.select_session('ws_ok')).status, 'completed')
+                await ui.key('Escape')
+                await ui.wait_render()
+                self.assertFalse(owner.done())
+                self.assertTrue(navigation.done(), 'A committed selection satisfies navigation before further waits')
+                self.assertEqual((await navigation).status, 'completed')
+                self.assertIsNone(ui.dialogs.future)
+                self.assertNotIn(('quit',), ui.calls)
+            finally:
+                release.set()
+
     async def test_stale_agent_highlight_still_opens_add_agent_actions(self):
         for agents in ([agent('ag_remaining')], []):
             with self.subTest(remaining=len(agents)):
