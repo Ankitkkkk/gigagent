@@ -582,9 +582,15 @@ def main(argv=None):
             if mode == "plain":
                 asyncio.run(interactive(client, controller))
             else:
-                from cli_tui import interactive_tui
-                asyncio.run(interactive_tui(
-                    client, controller, initial_notices=initial_notices))
+                try:
+                    from cli_tui import interactive_tui
+                    asyncio.run(interactive_tui(
+                        client, controller, initial_notices=initial_notices))
+                except (KeyboardInterrupt, ValueError):
+                    raise
+                except Exception as error:
+                    parser.exit(1, "Full-screen terminal stopped after an unexpected "
+                                f"local error ({type(error).__name__}); rerun with --plain.\n")
         elif args.command == 'attach':
             api = WorkspaceAPI(url, timeout=args.timeout)
 

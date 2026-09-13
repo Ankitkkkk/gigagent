@@ -641,8 +641,8 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 1)
         self.assertIn('Start it manually: python run.py', self.err.getvalue())
         self.assertIn('/tmp/cli-main-data/logs/server.log', self.err.getvalue())
-        self.assertTrue(self.err.getvalue().startswith(
-            'Full-screen unavailable; using plain mode.\n'))
+        self.assertEqual(self.err.getvalue().count(
+            'Full-screen unavailable; using plain mode.\n'), 1)
         self.runner.assert_not_called()
         self.interactive.assert_not_awaited()
 

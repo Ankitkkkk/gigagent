@@ -877,35 +877,75 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(asyncio.shield(ui.task), 1)
                 self.assertIs(caught.exception, failure)
 
-    async def test_signal_cancel_failure_wakes_existing_quit_without_rescheduling(self):
+    async def test_failing_signal_role_records_error_without_rescheduling(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            failure = RuntimeError('signal task failed')
+            async def fail():
+                raise failure
+            with patch.object(ui.tui, '_schedule_signal') as schedule:
+                task = ui.tui._spawn(fail(), 'signal')
+                result = await asyncio.wait_for(
+                    asyncio.gather(task, return_exceptions=True), 1)
+                self.assertIs(result[0], failure)
+                await asyncio.sleep(0)
+                schedule.assert_not_called()
+            self.assertIs(ui.tui._run_error, failure)
+            await asyncio.wait_for(ui.tui.request_quit(signal=True), 1)
+            with self.assertRaises(RuntimeError) as caught:
+                await asyncio.wait_for(ui.task, 1)
+            self.assertIs(caught.exception, failure)
+
+    async def test_signal_cancel_failure_closes_required_navigation_without_reopening(self):
         loop = asyncio.get_running_loop()
         old_handler = signal.getsignal(signal.SIGTERM)
         observed = []
         loop.add_signal_handler(signal.SIGTERM, lambda: observed.append('restored'))
         hooks = (Mock(), Mock(), Mock(), Mock(), object(), Mock())
         try:
-            async with self.ui(selected=workspace(), prior_hooks=hooks) as ui:
-                await self.connected(ui)
-                await ui.type_text('unsent')
-                key_quit = asyncio.create_task(ui.tui.request_quit())
-                await self.modal(ui, 'Quit with unsent')
-                failure = RuntimeError('persistent dialog cancellation failure')
-                followups = []
-                with patch.object(ui.tui, '_schedule_signal',
-                                  side_effect=lambda: followups.append(True)), \
-                        patch.object(ui.dialogs, 'cancel', side_effect=failure):
-                    forced = ui.tui._spawn(ui.tui.request_quit(signal=True), 'signal')
-                    result = await asyncio.wait_for(
-                        asyncio.gather(forced, return_exceptions=True), 1)
-                    self.assertEqual(result, [True])
-                    await asyncio.sleep(0)
-                    self.assertEqual(followups, [])
-                    self.assertTrue(ui.tui._force_quit)
-                    self.assertIs(ui.tui._run_error, failure)
-                    self.assertTrue(await asyncio.wait_for(key_quit, 1))
-                    with self.assertRaises(RuntimeError) as caught:
-                        await asyncio.wait_for(ui.task, 1)
-                    self.assertIs(caught.exception, failure)
+            async with self.ui(rows=[workspace()], prior_hooks=hooks) as ui:
+                key_quit = forced = None
+                original_cancel = ui.dialogs.cancel
+                try:
+                    await self.modal(ui, 'Show archived')
+                    self.assertTrue(ui.state.drafts.set(('session', 'held'), 'unsent'))
+                    with patch.object(ui.workflows, 'navigate',
+                                      wraps=ui.workflows.navigate) as reopened:
+                        key_quit = asyncio.create_task(ui.tui.request_quit())
+                        await self.modal(ui, 'Quit with unsent')
+                        failure = RuntimeError('persistent dialog cancellation failure')
+                        followups = []
+                        with patch.object(ui.tui, '_schedule_signal',
+                                          side_effect=lambda: followups.append(True)), \
+                                patch.object(ui.dialogs, 'cancel', side_effect=failure):
+                            forced = ui.tui._spawn(ui.tui.request_quit(signal=True), 'signal')
+                            done, _ = await asyncio.wait({forced}, timeout=1)
+                            self.assertEqual(done, {forced})
+                            self.assertTrue(forced.result())
+                            await asyncio.sleep(0)
+                            self.assertEqual(followups, [])
+                            self.assertTrue(ui.tui._force_quit)
+                            self.assertIs(ui.tui._run_error, failure)
+                            self.assertTrue(key_quit.result())
+                            done, _ = await asyncio.wait({ui.task}, timeout=1)
+                            self.assertEqual(done, {ui.task})
+                            with self.assertRaises(RuntimeError) as caught:
+                                ui.task.result()
+                            self.assertIs(caught.exception, failure)
+                            self.assertIsNone(ui.dialogs.future)
+                            self.assertEqual(ui.events, [])
+                        self.assertEqual(reopened.await_count, 0)
+                finally:
+                    # Restore real cancellation before waking any mutant-stalled owner.
+                    original_cancel()
+                    pending = {task for task in (key_quit, forced, ui.task)
+                               if task is not None and not task.done()}
+                    if pending:
+                        _, pending = await asyncio.wait(pending, timeout=2)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.wait(pending, timeout=1)
                 actual = (ui.client.output, ui.client.on_view_change,
                           ui.client.on_workspace, ui.client.on_settings,
                           ui.controller.presentation, ui.controller.on_view_change)
@@ -916,6 +956,96 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             loop.remove_signal_handler(signal.SIGTERM)
             signal.signal(signal.SIGTERM, old_handler)
+
+    async def test_signal_cancel_failure_drains_blocked_handoff_before_checkpoint_and_exit(self):
+        async with self.ui(selected=workspace(agents=[agent()])) as ui:
+            await self.connected(ui)
+            await ui.type_text('unsent')
+            ui.release_foreground.clear()
+            attach = asyncio.create_task(ui.tui.attach(ui.controller.workspace['agents'][0]))
+            key_quit = forced = None
+            original_cancel = ui.dialogs.cancel
+            try:
+                self.assertTrue(await asyncio.wait_for(
+                    asyncio.to_thread(ui.foreground_started.wait, 2), 3))
+                key_quit = asyncio.create_task(ui.tui.request_quit())
+                await self.modal(ui, 'Quit with unsent')
+                failure = RuntimeError('persistent dialog cancellation failure')
+                followups = []
+                with patch.object(ui.tui, '_schedule_signal',
+                                  side_effect=lambda: followups.append(True)), \
+                        patch.object(ui.dialogs, 'cancel', side_effect=failure):
+                    forced = ui.tui._spawn(ui.tui.request_quit(signal=True), 'signal')
+                    await asyncio.sleep(0)
+                    self.assertFalse(forced.done())
+                    self.assertFalse(ui.task.done())
+                    self.assertNotIn('checkpoint', ui.events)
+                    self.assertNotIn('terminal_restored', ui.events)
+                    ui.release_foreground.set()
+                    done, _ = await asyncio.wait({forced}, timeout=2)
+                    self.assertEqual(done, {forced})
+                    self.assertTrue(forced.result())
+                    self.assertEqual(followups, [])
+                    self.assertTrue(key_quit.result())
+                    done, _ = await asyncio.wait({attach}, timeout=1)
+                    self.assertEqual(done, {attach})
+                    self.assertEqual(attach.result().status, 'completed')
+                    done, _ = await asyncio.wait({ui.task}, timeout=1)
+                    self.assertEqual(done, {ui.task})
+                    with self.assertRaises(RuntimeError) as caught:
+                        ui.task.result()
+                    self.assertIs(caught.exception, failure)
+                self.assertLess(ui.events.index('foreground_finished'),
+                                ui.events.index('terminal_restored'))
+                self.assertLess(ui.events.index('terminal_restored'),
+                                ui.events.index('checkpoint'))
+                self.assertLess(ui.events.index('checkpoint'),
+                                ui.events.index('receiver_cancel'))
+            finally:
+                # Release every dependency before bounded draining.
+                ui.release_foreground.set()
+                original_cancel()
+                pending = {task for task in (attach, key_quit, forced, ui.task)
+                           if task is not None and not task.done()}
+                if pending:
+                    _, pending = await asyncio.wait(pending, timeout=3)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.wait(pending, timeout=1)
+
+    async def test_signal_cancel_failure_never_finishes_non_quit_form_with_false(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            form = asyncio.create_task(ui.tui.run_action('rename_session'))
+            release = asyncio.Event()
+            fake_quit = asyncio.create_task(release.wait())
+            forced = None
+            try:
+                await self.modal(ui, 'Rename session')
+                self.assertIs(ui.dialogs.owner, form)
+                ui.tui._quit_task = fake_quit
+                failure = RuntimeError('non-quit dialog cancellation failure')
+                original_finish = ui.dialogs.finish
+                with patch.object(ui.dialogs, 'finish', wraps=original_finish) as finish, \
+                        patch.object(ui.dialogs, 'cancel', side_effect=failure):
+                    forced = ui.tui._spawn(ui.tui.request_quit(signal=True), 'signal')
+                    await asyncio.sleep(0)
+                    self.assertFalse(forced.done())
+                    self.assertIs(ui.tui._run_error, failure)
+                    await asyncio.sleep(0)
+                    self.assertNotIn((False,), [call.args for call in finish.call_args_list])
+                    release.set()
+                    self.assertTrue(await asyncio.wait_for(forced, 1))
+                ui.tui._quit_task = None
+                await asyncio.wait_for(ui.tui.request_quit(signal=True), 1)
+                with self.assertRaises(RuntimeError) as caught:
+                    await asyncio.wait_for(ui.task, 1)
+                self.assertIs(caught.exception, failure)
+            finally:
+                release.set()
+                pending = [task for task in (form, fake_quit, forced) if task is not None]
+                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 3)
 
     async def test_first_failure_wins_when_two_workflow_guards_fail(self):
         async with self.ui(selected=workspace()) as ui:

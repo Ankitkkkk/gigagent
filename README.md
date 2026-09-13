@@ -18,6 +18,8 @@ up the Python environment, run these commands from the source repository:
 ```sh
 python -m pip install -r requirements-cli.txt
 python cli.py
+python cli.py --plain
+python cli.py chat --plain
 ```
 
 Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
@@ -35,7 +37,8 @@ scrolling prompt. When stdout is not a terminal, or on macOS/Linux when `TERM`
 is unset, empty, or `dumb`, interactive chat automatically uses that renderer
 and prints `Full-screen unavailable; using plain mode.` once to stderr. Input
 must still be a terminal. Capability fallback is decided before startup; a
-failure after full-screen startup is reported directly.
+failure after full-screen startup exits with one line naming only the exception
+type and recommends rerunning with `--plain`.
 
 ```sh
 python cli.py

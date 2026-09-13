@@ -29,7 +29,8 @@ class TerminalStream(io.StringIO):
 class EntryHarness(unittest.TestCase):
     def run_main(self, argv=(), *, stdin_tty=True, stdout_tty=True,
                  platform="linux", term="xterm-256color", ensure=None,
-                 tui_effect=None, install_tui=True):
+                 tui_effect=None, install_tui=True, export_tui=True,
+                 tui_import_error=None, legacy_effect=None):
         stdin = TerminalStream(tty=stdin_tty)
         stdout = TerminalStream(tty=stdout_tty)
         stderr = io.StringIO()
@@ -40,10 +41,16 @@ class EntryHarness(unittest.TestCase):
             "agents": {"inert": {}},
         }
         ensure = ensure or Mock(return_value={"paused": False, "data_dir": "/tmp/entry-data"})
-        legacy = AsyncMock()
+        legacy = AsyncMock(side_effect=legacy_effect)
         tui = AsyncMock(side_effect=tui_effect)
         module = ModuleType("cli_tui")
-        module.interactive_tui = tui
+        if export_tui:
+            module.interactive_tui = tui
+        original_import = builtins.__import__
+        def import_module(name, *args, **kwargs):
+            if name == "cli_tui" and tui_import_error is not None:
+                raise tui_import_error
+            return original_import(name, *args, **kwargs)
         environment = {} if term is None else {"TERM": term}
         with patch.object(cli.sys, "stdin", stdin), \
                 patch.object(cli.sys, "platform", platform), \
@@ -52,6 +59,7 @@ class EntryHarness(unittest.TestCase):
                 patch.object(cli, "load_config", return_value=config) as load_config, \
                 patch.object(cli, "ensure_server", ensure), \
                 patch.object(cli, "interactive", legacy), \
+                patch("builtins.__import__", side_effect=import_module), \
                 patch.dict(sys.modules, {"cli_tui": module if install_tui else None}):
             try:
                 cli.main(list(argv))
@@ -212,7 +220,7 @@ class MainEntryTests(EntryHarness):
         result["legacy"].assert_not_awaited()
         result["tui"].assert_not_awaited()
 
-    def test_tui_clierror_uses_existing_exit_one_path_and_runtime_failure_never_retries_plain(self):
+    def test_tui_clierror_uses_existing_exit_one_path(self):
         for message in ("No session matches missing", "Ambiguous session selector: bill",
                         "Archived session was not selected"):
             with self.subTest(message=message):
@@ -220,11 +228,42 @@ class MainEntryTests(EntryHarness):
                 self.assertEqual(result["code"], 1)
                 self.assertEqual(result["stderr"], message + "\n")
                 result["legacy"].assert_not_awaited()
-
-        result = self.run_main(tui_effect=RuntimeError("local bug"))
+        result = self.run_main(tui_effect=ValueError("Invalid full-screen selection"))
         self.assertEqual(result["code"], 1)
-        self.assertIn("Server request failed or timed out", result["stderr"])
+        self.assertEqual(result["stderr"], "Invalid full-screen selection\n")
         result["legacy"].assert_not_awaited()
+
+    def test_unexpected_full_screen_errors_name_only_type_and_recommend_plain(self):
+        secret = "ws://127.0.0.1:18300/ws?token=authenticated-secret"
+        cases = [
+            (dict(tui_effect=RuntimeError(secret)), "RuntimeError"),
+            (dict(tui_import_error=ImportError(secret)), "ImportError"),
+            (dict(tui_effect=TimeoutError(secret)), "TimeoutError"),
+        ]
+        for options, type_name in cases:
+            with self.subTest(type_name=type_name):
+                result = self.run_main(**options)
+                self.assertEqual(result["code"], 1)
+                self.assertEqual(result["stderr"],
+                    "Full-screen terminal stopped after an unexpected local error "
+                    f"({type_name}); rerun with --plain.\n")
+                self.assertNotIn("authenticated-secret", result["stderr"])
+                self.assertNotIn("Start it manually", result["stderr"])
+                self.assertNotIn("Server request", result["stderr"])
+                result["legacy"].assert_not_awaited()
+
+    def test_full_screen_keyboard_interrupt_keeps_130_and_plain_error_mapping_stays_legacy(self):
+        result = self.run_main(tui_effect=KeyboardInterrupt())
+        self.assertEqual(result["code"], 130)
+        self.assertEqual(result["stderr"], "")
+        result = self.run_main(("--plain",),
+                               legacy_effect=RuntimeError("plain local error"))
+        self.assertEqual(result["code"], 1)
+        self.assertEqual(result["stderr"],
+            "Server request failed or timed out. Check run.py and --url. For send, "
+            "delivery may be uncertain; check history before retrying.\n")
+        self.assertNotIn("Full-screen terminal stopped", result["stderr"])
+        result["legacy"].assert_awaited_once()
 
     def test_shell_json_stays_exact_and_never_imports_tui(self):
         stdout, stderr = io.StringIO(), io.StringIO()

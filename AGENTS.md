@@ -140,9 +140,39 @@ environments, logs, and generated release archives out of commits. Consult
 ## Verification
 
 The test runner is the standard library's `unittest`; pytest is not required.
+Run full discovery only inside an outer isolated environment. This matters
+because `tests/test_inject_transport.py` uses the default tmux socket; removing
+inherited `TMUX` and supplying a private `TMUX_TMPDIR` prevents contact with a
+developer server. Register both cleanups before starting the child:
 
 ```sh
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python - <<'PY'
+from contextlib import ExitStack
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, str(Path.cwd() / 'tests'))
+from _cli_server import isolated_environment, stop_process
+
+with tempfile.TemporaryDirectory(prefix='agentchattr-suite-') as directory:
+    env = isolated_environment(directory)
+    with ExitStack() as cleanup:
+        cleanup.callback(subprocess.run, ['tmux', 'kill-server'], env=env,
+                         capture_output=True, timeout=5)
+        child = None
+        def stop_child():
+            if child is not None:
+                stop_process(child)
+        cleanup.callback(stop_child)
+        child = subprocess.Popen(
+            [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
+            env=env)
+        code = child.wait(timeout=600)
+    raise SystemExit(code)
+PY
+
 .venv/bin/python -m unittest discover -s tests -p 'test_router.py' -v
 ```
 
