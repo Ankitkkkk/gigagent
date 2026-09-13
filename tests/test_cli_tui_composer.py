@@ -510,3 +510,132 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('claude-2', ui.screen_text())
             await ui.resize(120, 30)
             self.assertEqual(ui.view.composer.text, '@cl')
+
+    async def test_enter_sends_exact_mention_and_channel_without_selecting_prefix(self):
+        for text in ('hi @claude', 'hi #dev'):
+            with self.subTest(text=text):
+                async with tui_harness() as ui:
+                    bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)))
+                    ui.client.handle_event({'type': 'agents', 'data': ['claude-2', 'claude']})
+                    ui.client.channels = ['dev-ops', 'dev']
+                    await ui._send(text)
+                    await ui.wait_until(lambda: ui.view.composer.buffer.complete_state is not None)
+                    self.assertIsNone(ui.view.composer.buffer.complete_state.complete_index)
+                    await ui.key('Enter')
+                    self.assertEqual(ui.submit_mock.await_count, 1)
+                    self.assertEqual(ui.submit_mock.await_args.args, (text,))
+                    self.assertEqual(ui.view.composer.text, '')
+
+    async def test_delayed_escape_enter_inserts_newline_within_sequence_window(self):
+        async with tui_harness() as ui:
+            bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)))
+            await ui.paste('partial')
+            await asyncio.to_thread(ui.pipe.send_text, '\x1b')
+            # Deliberately exceed VT decoding timeout, but stay inside key sequence timeout.
+            await asyncio.sleep(0.2)
+            await ui.key('Enter')
+            self.assertEqual(ui.view.composer.text, 'partial\n')
+            self.assertEqual(ui.submit_mock.await_count, 0)
+
+    async def test_enter_typeahead_uses_original_snapshot_and_claims_send_synchronously(self):
+        for status in ('completed', 'failed'):
+            with self.subTest(status=status):
+                async with tui_harness() as ui:
+                    bind(ui, AsyncMock(return_value=SubmitOutcome(status, sent=status == 'completed')))
+                    await ui.paste('hello')
+                    await ui._send('\r\rxyz')
+                    await ui.wait_until(lambda: not ui.composer_actions.sending)
+                    self.assertEqual(ui.submit_mock.await_count, 1)
+                    self.assertEqual(ui.submit_mock.await_args.args, ('hello',))
+                    self.assertEqual(ui.view.composer.text, 'helloxyz')
+                    self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'helloxyz')
+                    self.assertEqual(ui.view.composer.buffer.cursor_position, 8)
+                    if status == 'completed':
+                        self.assertIn('earlier message was sent', ui.screen_text())
+                    else:
+                        self.assertEqual(ui.state.notices.lines, ())
+
+    async def test_rename_into_active_empty_destination_reloads_moved_text_and_cursor(self):
+        async with tui_harness() as ui:
+            ui.controller.plain_channel = True
+            ui.bind_submit(AsyncMock(return_value=SubmitOutcome('failed')))
+            ui.state.drafts.set(('channel', 'old'), 'precious', cursor=3)
+            self.assertTrue(ui.composer_actions.rename_channel('old', 'general'))
+            self.assertEqual(ui.view.composer.text, 'precious')
+            self.assertEqual(ui.view.composer.buffer.cursor_position, 3)
+            await ui.paste('x')
+            self.assertEqual(ui.state.drafts.get(('channel', 'general')), 'prexcious')
+            ui.state.drafts.set(('channel', 'another'), 'another draft', cursor=5)
+            self.assertFalse(ui.composer_actions.rename_channel('another', 'general'))
+            self.assertEqual(ui.view.composer.text, 'prexcious')
+            self.assertEqual(ui.state.drafts.get(('channel', 'another')), 'another draft')
+            self.assertEqual(ui.state.drafts.get_cursor(('channel', 'another')), 5)
+
+    async def test_completer_uses_canonical_legacy_commands_and_descriptions(self):
+        from prompt_toolkit.document import Document
+        from prompt_toolkit.completion import CompleteEvent
+        from prompt_toolkit.formatted_text import fragment_list_to_text
+        from cli_workspace_chat import SESSION_COMMANDS
+        async with tui_harness() as ui:
+            bind(ui)
+            def choices():
+                return {c.text: fragment_list_to_text(c.display_meta) for c in
+                        ui.view.composer.buffer.completer.get_completions(Document('/'), CompleteEvent())}
+            self.assertTrue(SESSION_COMMANDS.issubset(choices()))
+            ui.controller.plain_channel = True
+            commands = choices()
+            self.assertIn('/continue', commands)
+            self.assertIn('/summary', commands)
+            self.assertEqual(commands['/agents'], 'Show agent availability and roles')
+            self.assertEqual(commands['/join'], 'Switch to an existing channel')
+
+    async def test_rejected_keystrokes_coalesce_until_accepted_edit_or_destination_change(self):
+        async with tui_harness() as ui:
+            bind(ui)
+            for index in range(50):
+                ui.state.drafts.set(('session', str(index)), 'saved')
+            await ui._send('abc')
+            self.assertEqual(ui.view.composer.text, '')
+            self.assertEqual(ui.state.notices.lines, ('50 unsent drafts; send or clear one',))
+            ui.state.drafts.clear(('session', '0'))
+            await ui._send('accepted')
+            ui.composer_actions.switch_draft(('session', 'next'), mandatory=True)
+            await ui._send('xyz')
+            self.assertEqual(ui.state.notices.lines, ('50 unsent drafts; send or clear one',) * 2)
+
+    async def test_bypass_edit_without_destination_uses_inactive_notice(self):
+        from prompt_toolkit.document import Document
+        async with tui_harness() as ui:
+            ui.bind_submit(AsyncMock(return_value=SubmitOutcome('failed')))
+            for text in ('attempt', 'another'):
+                ui.view.composer.buffer.set_document(Document(text), bypass_readonly=True)
+            await ui.wait_render()
+            self.assertEqual(ui.view.composer.text, '')
+            self.assertEqual(len(ui.state.drafts), 0)
+            self.assertEqual(ui.state.notices.lines, ('Select a destination before editing',))
+
+    async def test_completer_skips_malformed_agent_records(self):
+        from prompt_toolkit.document import Document
+        from prompt_toolkit.completion import CompleteEvent
+        async with tui_harness() as ui:
+            bind(ui)
+            # Navigation renderer is unrelated; drive the completer against the current model.
+            ui.controller.workspace['agents'] = [{}, None, {'registry_name': 'missing-id'},
+                {'agent_id': 'ag_valid', 'registry_name': 'claude-2'}, {'agent_id': ''}]
+            try:
+                result = list(ui.view.composer.buffer.completer.get_completions(
+                    Document('/stop '), CompleteEvent()))
+                self.assertEqual([c.text for c in result], ['claude-2'])
+            finally:
+                ui.controller.workspace['agents'] = []
+
+    async def test_single_enter_and_typeahead_keep_full_edited_draft(self):
+        async with tui_harness() as ui:
+            bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)))
+            await ui.paste('hello')
+            await ui._send('\rxyz')
+            self.assertEqual(ui.submit_mock.await_count, 1)
+            self.assertEqual(ui.submit_mock.await_args.args, ('hello',))
+            self.assertEqual(ui.view.composer.text, 'helloxyz')
+            self.assertEqual(ui.view.composer.buffer.cursor_position, 8)
+            self.assertIn('earlier message was sent', ui.screen_text())

@@ -25,7 +25,7 @@ from prompt_toolkit.widgets import Button, Frame, TextArea
 
 from cli_tui_state import MAX_DRAFT_BYTES, body_text, clip_cells, label_text, layout_mode
 from cli_view_contracts import channel_transcript
-from cli_workspace_chat import _timestamp
+from cli_workspace_chat import SESSION_COMMANDS, SESSION_HELP, _timestamp
 from cli_workspaces import WINDOWS_TMUX_ERROR
 
 
@@ -210,14 +210,31 @@ class _ActivityControl(UIControl):
 class ContextualCompleter(Completer):
     """Resolve suggestions from current authoritative models on every request."""
 
-    common = {'/agents': 'Show agents', '/channels': 'List channels',
-              '/history': 'Show history', '/jobs': 'List jobs', '/rules': 'List rules',
-              '/help': 'Show command help', '/quit': 'Quit chat'}
-    session = {'/sessions': 'Choose a session', '/spawn': 'Start a configured provider',
-               '/resume': 'Resume a stopped agent', '/stop': 'Stop a session agent',
-               '/attach': 'Open an agent terminal', '/retry': 'Retry unread delivery',
-               '/unread': 'Inspect unread messages', '/rename': 'Rename this session',
-               '/archive': 'Archive this session'}
+    @staticmethod
+    def _help_descriptions(help_text):
+        descriptions = {}
+        for line in help_text.splitlines():
+            if line.startswith('/'):
+                command = line.split()[0]
+                columns = re.split(r'\s{2,}', line, maxsplit=1)
+                descriptions[command] = (columns[1] if len(columns) == 2 else
+                                         line.partition(' ')[2]) or 'Chat command'
+        return descriptions
+
+    def _commands(self):
+        # Lazy import keeps cli's future lazy TUI entry path free of an import cycle.
+        from cli import HELP
+        commands = {command: 'Server chat command' for command in
+                    re.findall(r'/[a-z][a-z_-]*', HELP)}
+        commands.update(self._help_descriptions(HELP))
+        if not self.view.controller.plain_channel:
+            commands.pop('/join', None)
+            commands.pop('/create', None)
+            descriptions = self._help_descriptions(SESSION_HELP)
+            applicable = SESSION_COMMANDS if self.view.controller.workspace is not None else {'/sessions'}
+            commands.update({command: descriptions.get(command, 'Session command')
+                             for command in sorted(applicable)})
+        return commands
 
     def __init__(self, view):
         self.view = view
@@ -228,15 +245,15 @@ class ContextualCompleter(Completer):
         word = re.search(r'\S*$', before).group()
         prior = before[:-len(word)] if word else before
         parts = prior.split()
-        commands = dict(self.common)
-        if controller.plain_channel:
-            commands.update({'/join': 'Switch channel', '/create': 'Create channel'})
-        else:
-            commands['/sessions'] = self.session['/sessions']
-            if controller.workspace is not None:
-                commands.update(self.session)
+        commands = self._commands()
         agents = (controller.workspace or {}).get('agents', [])
-        handles = [agent.get('registry_name') or agent['agent_id'] for agent in agents]
+        handles = []
+        for agent in agents:
+            if not isinstance(agent, dict) or not isinstance(agent.get('agent_id'), str) or not agent['agent_id']:
+                continue
+            handle = agent.get('registry_name') or agent['agent_id']
+            if isinstance(handle, str):
+                handles.append(handle)
         candidates = {}
         if not parts and word.startswith('/'):
             candidates = commands
@@ -274,6 +291,7 @@ class ComposerActions:
         self.edit_version = 0
         self.sending = False
         self._restoring = False
+        self._last_rejection = None
         self.buffer = view.composer.buffer
         self._accepted = Document()
         self.buffer.on_text_changed += self._edited
@@ -300,6 +318,12 @@ class ComposerActions:
         if self.key == old_key:
             self.key = new_key
             self.edit_version += 1
+            self._last_rejection = None
+        elif self.key == new_key:
+            # Settings may have already selected the renamed destination while empty.
+            self._restore(Document(self.state.drafts.get(new_key), self.state.drafts.get_cursor(new_key)))
+            self.edit_version += 1
+            self._last_rejection = None
         self.view._app().invalidate()
         return True
 
@@ -311,6 +335,11 @@ class ComposerActions:
         finally:
             self._restoring = False
 
+    def _reject_edit(self, message):
+        if message != self._last_rejection:
+            self._last_rejection = message
+            self.notice(message)
+
     def _edited(self, buffer):
         if self._restoring:
             return
@@ -319,9 +348,11 @@ class ComposerActions:
                 self.key, document.text, cursor=document.cursor_position):
             too_large = len(document.text.encode('utf-8', 'surrogatepass')) > MAX_DRAFT_BYTES
             self._restore(self._accepted)
-            self.notice('Draft exceeds 64 KiB UTF-8; edit rejected' if too_large else
-                        self.state.drafts.capacity_notice)
+            self._reject_edit('Select a destination before editing' if self.key is None else
+                              'Draft exceeds 64 KiB UTF-8; edit rejected' if too_large else
+                              self.state.drafts.capacity_notice)
             return
+        self._last_rejection = None
         self.edit_version += 1
         self._accepted = document
 
@@ -339,22 +370,35 @@ class ComposerActions:
             self.notice(self.state.drafts.capacity_notice)
             return False
         self.key = key
+        self._last_rejection = None
         self.edit_version += 1
         self._restore(Document(self.state.drafts.get(key), self.state.drafts.get_cursor(key))
                       if key is not None else Document())
         self.view._app().invalidate()
         return True
 
-    async def send(self):
+    def _claim_send(self):
+        """Capture the Enter-time snapshot before queued typeahead can edit it."""
         if self.sending or self.key is None or not self.buffer.text.strip():
             return
         if self.key != self.destination_key():
             self.notice('Draft destination changed; select its destination before sending')
             return
         self.sending = True
-        key, text = self.key, self.buffer.text
-        revision = self.state.drafts.revision(key)
+        return self.key, self.buffer.text, self.state.drafts.revision(self.key)
+
+    async def send(self):
+        snapshot = self._claim_send()
+        if snapshot is not None:
+            await self._send_snapshot(snapshot)
+
+    async def _send_snapshot(self, snapshot):
+        key, text, revision = snapshot
         try:
+            # Selection may have changed after the synchronous key handler returned.
+            if key != self.destination_key():
+                self.notice('Draft destination changed; select its destination before sending')
+                return
             outcome = await self.submit(text)
             if outcome.status == 'completed':
                 if revision == self.state.drafts.revision(key):
@@ -392,14 +436,13 @@ class ComposerActions:
         @bindings.add('enter', filter=focused)
         def send(event):
             completion = self.buffer.complete_state
-            if completion is not None:
-                selected = completion.current_completion or next(iter(completion.completions), None)
-                if selected is not None:
-                    self.buffer.apply_completion(selected)
-                else:
-                    self.buffer.cancel_completion()
-            elif self.key is not None:
-                event.app.create_background_task(self.send())
+            if completion is not None and completion.complete_index is not None:
+                self.buffer.apply_completion(completion.current_completion)
+                return
+            self.buffer.complete_state = None
+            snapshot = self._claim_send()
+            if snapshot is not None:
+                event.app.create_background_task(self._send_snapshot(snapshot))
 
         @bindings.add('escape', 'enter', filter=editable)
         def newline(event):
@@ -418,7 +461,8 @@ class ComposerActions:
                 self.view._cancel_overlay()
 
         @bindings.add('escape', filter=focused,
-                      eager=Condition(lambda: not self.view._app().key_processor.input_queue))
+                      eager=Condition(lambda: self.buffer.complete_state is not None and
+                                      not self.view._app().key_processor.input_queue))
         def escape(event):
             if self.buffer.complete_state is not None:
                 self.buffer.complete_state = None
