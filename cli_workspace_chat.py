@@ -391,7 +391,7 @@ class WorkspaceChatController:
         self.presentation = presentation
         self.on_view_change = notify
         self.client.on_workspace = self.on_workspace
-        self.client.on_settings = self.on_settings
+        self.client.on_settings = None if self.plain_channel else self.on_settings
 
     def _notify_view(self, kind, *, agent_id=None, text=None):
         if self.on_view_change is not None:
@@ -433,6 +433,11 @@ class WorkspaceChatController:
             self.client.channel = workspace['channel']
             self.client.pending_channel = None
         self._notify_view('selection')
+
+    @property
+    def selection_generation(self):
+        """Selection identity token for presentation work spanning user input."""
+        return self._selection_version
 
     @property
     def selection_pending(self):
@@ -497,13 +502,19 @@ class WorkspaceChatController:
         candidate = await asyncio.to_thread(self.api.get, ws_id)
         if not still_current():
             return cancelled
+        async def confirm(text, *, default=False, escape=False):
+            contextual = getattr(self.presentation, 'confirm_selection', None)
+            if contextual is not None:
+                return await contextual(text, workspace=candidate, default=default, escape=escape)
+            return await self.presentation.confirm(text, default=default, escape=escape)
+
         candidate = await _unarchive_workspace(
-            self.api, candidate, confirm=self.presentation.confirm,
+            self.api, candidate, confirm=confirm,
             mutate=mutate, still_current=still_current)
         if isinstance(candidate, ActionOutcome):
             return candidate
         return await _resume_workspace(
-            self.api, candidate, confirm=self.presentation.confirm, notice=self._notice,
+            self.api, candidate, confirm=confirm, notice=self._notice,
             mutate=mutate, still_current=still_current, no_resume=self.no_resume)
 
     async def _commit_selection(self, candidate, generation):

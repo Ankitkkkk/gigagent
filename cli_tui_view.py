@@ -207,6 +207,25 @@ class _ActivityControl(UIControl):
                          line_count=len(visible), show_cursor=False)
 
 
+class _HelpControl(UIControl):
+    def __init__(self, view):
+        self.view = view
+        self.height = 1
+        self.last_line = 0
+
+    def is_focusable(self):
+        return True
+
+    def create_content(self, width, height):
+        self.height = max(1, height)
+        lines = list(_wrap(self.view._help_text, width))
+        self.last_line = max(0, len(lines) - self.height)
+        self.view._help_line = min(self.view._help_line, self.last_line)
+        visible = lines[self.view._help_line:self.view._help_line + self.height]
+        return UIContent(get_line=lambda index: [('', visible[index])],
+                         line_count=len(visible), show_cursor=False)
+
+
 class ContextualCompleter(Completer):
     """Resolve suggestions from current authoritative models on every request."""
 
@@ -366,11 +385,14 @@ class ComposerActions:
         """Bind admitted destination text/cursor; caller owns selection commits."""
         if key == self.key:
             return True
-        if key is not None and not self.state.drafts.can_open(key, mandatory=mandatory):
+        full = key is not None and not self.state.drafts.can_open(key)
+        if full and not mandatory:
             self.notice(self.state.drafts.capacity_notice)
             return False
+        if full:
+            self.notice(self.state.drafts.capacity_notice)
         self.key = key
-        self._last_rejection = None
+        self._last_rejection = self.state.drafts.capacity_notice if full else None
         self.edit_version += 1
         self._restore(Document(self.state.drafts.get(key), self.state.drafts.get_cursor(key))
                       if key is not None else Document())
@@ -442,7 +464,17 @@ class ComposerActions:
             self.buffer.complete_state = None
             snapshot = self._claim_send()
             if snapshot is not None:
-                event.app.create_background_task(self._send_snapshot(snapshot))
+                started = False
+                async def submit_snapshot():
+                    nonlocal started
+                    started = True
+                    await self._send_snapshot(snapshot)
+                task = event.app.create_background_task(submit_snapshot())
+                def release_unstarted(done):
+                    if not started:
+                        self.sending = False
+                        event.app.invalidate()
+                task.add_done_callback(release_unstarted)
 
         @bindings.add('escape', 'enter', filter=editable)
         def newline(event):
@@ -498,6 +530,11 @@ class TuiView:
         self.inspecting = False
         self._inspector_line = 0
         self.activity_visible = False
+        self.help_visible = False
+        self._help_text = ''
+        self._help_line = 0
+        self._help_focus = None
+        self.help = _HelpControl(self)
         self._activity_line = 0
         self._activity_max_line = 0
         self._activity_focus = None
@@ -520,7 +557,7 @@ class TuiView:
         agent_area = ConditionalContainer(DynamicContainer(lambda: self.agents_window
             if self.screen_mode == 'compact' and not self.inspecting else framed_agents),
             filter=Condition(lambda: not self.controller.plain_channel))
-        composer_area = self._frame(self.composer, 'Message', 'composer')
+        composer_area = self._frame(self.composer, self._composer_title, 'composer')
         activity_area = self._frame(Window(self.activity), lambda:
             f'Activity · {self.state.notices.omitted} omitted · Esc Back', 'activity')
         main = HSplit([DynamicContainer(lambda: activity_area if self.activity_visible else conversation),
@@ -548,9 +585,79 @@ class TuiView:
             floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=6,
                         extra_filter=has_focus(self.composer) & Condition(lambda:
                             self.screen_mode != 'small' and self.dialogs.future is None))),
-                    Float(content=DynamicContainer(lambda: self.dialogs.body))],
+                    Float(content=DynamicContainer(lambda: self.dialogs.body)),
+                    Float(content=ConditionalContainer(self._help_container(),
+                        filter=Condition(lambda: self.help_visible)))],
             key_bindings=self.key_bindings)
         self.refresh()
+
+    def _help_container(self):
+        bindings = KeyBindings()
+
+        @bindings.add('escape', eager=Condition(lambda: not self._app().key_processor.input_queue))
+        @bindings.add('c-c', eager=True)
+        def close(event):
+            self.hide_help()
+
+        @bindings.add('escape', Keys.Any)
+        @bindings.add('tab')
+        @bindings.add('s-tab')
+        def preserve(event):
+            pass
+
+        @bindings.add('up')
+        @bindings.add('down')
+        @bindings.add('pageup')
+        @bindings.add('pagedown')
+        @bindings.add('home')
+        @bindings.add('end')
+        def scroll(event):
+            key = event.key_sequence[-1].key
+            if key == 'home':
+                self._help_line = 0
+            elif key == 'end':
+                self._help_line = self.help.last_line
+            else:
+                amount = self.help.height if key in ('pageup', 'pagedown') else 1
+                self._help_line = max(0, self._help_line + (-amount if key in ('up', 'pageup') else amount))
+        content = Frame(Window(self.help,
+            height=lambda: max(3, min(20, self._app().output.get_size().rows - 4)),
+            width=lambda: max(10, min(90, self._app().output.get_size().columns - 4))),
+            title='Help · F1/Esc Back · PgUp/PgDn Scroll')
+        return FloatContainer(content=content, floats=[], modal=True, key_bindings=bindings)
+
+    def show_help(self, text):
+        if self.help_visible:
+            return False
+        self._help_focus = self._app().layout.current_window
+        self._help_text = body_text(text)
+        self._help_line = 0
+        self.help_visible = True
+        self._app().layout.update_parents_relations()
+        self._app().layout.focus(self.help)
+        self._app().invalidate()
+        return True
+
+    def hide_help(self):
+        if not self.help_visible:
+            return False
+        saved, self._help_focus = self._help_focus, None
+        self.help_visible = False
+        visible = [node.content for node in walk(self.root, skip_hidden=True) if isinstance(node, Window)]
+        if saved is not None and (saved.content in visible or self.screen_mode == 'small'):
+            # A resize can hide the saved pane; retain its actual focus window.
+            self._app().layout.current_window = saved
+        else:
+            self._app().layout.current_window = self.composer.window
+        self._app().invalidate()
+        return True
+
+    def _composer_title(self):
+        key = (('channel', self.client.channel) if self.controller.plain_channel else
+               ('session', self.controller.workspace['id']) if self.controller.workspace else None)
+        if key is not None and not self.state.drafts.can_open(key):
+            return 'Message · ' + self.state.drafts.capacity_notice
+        return 'Message'
 
     def _composer_height(self):
         width = max(1, self._app().output.get_size().columns -
@@ -622,6 +729,13 @@ class TuiView:
                                  deleted_ids=tuple(ident for ident in changed if ident not in rows),
                                  reconnect=event is not None and event.kind in ('history', 'selection', 'channel'))
         self._app().invalidate()
+
+    def session_rows(self):
+        return tuple(self._sessions)
+
+    @property
+    def sessions_stale(self):
+        return self._sessions_stale
 
     def set_sessions(self, rows):
         """Project navigation metadata only; caller owns fetching and warnings."""
@@ -703,15 +817,25 @@ class TuiView:
             prefix = '*' if ident == current else '>' if selected else ' '
             # Reserve cells for disambiguation/archive suffixes before clipping names.
             label = prefix + ' ' + clip_cells(name, max(0, 18 - get_cwidth(suffix))) + suffix
-            fragments.append(('class:selected' if selected else '', clip_cells(label, 20) + '\n'))
+            def activate(event, ident=ident):
+                if event.event_type == MouseEventType.MOUSE_UP and self.dialogs.future is None:
+                    self._app().create_background_task(self.callbacks['run_action'](
+                        'select_session', target_id=ident))
+            fragments.append(('class:selected' if selected else '', clip_cells(label, 20) + '\n', activate))
             if row.get('archived'):
                 fragments.append(('class:muted', '  (archived)\n'))
         if not fragments:
             fragments.append(('', 'No sessions yet\n'))
         return fragments
 
+    def agent_rows(self):
+        """Transient validated references into the authoritative workspace."""
+        return [agent for agent in (self.controller.workspace or {}).get('agents', [])
+                if isinstance(agent, dict) and isinstance(agent.get('agent_id'), str)
+                and agent['agent_id']]
+
     def _selected_agent(self):
-        return next((agent for agent in (self.controller.workspace or {}).get('agents', [])
+        return next((agent for agent in self.agent_rows()
                      if agent['agent_id'] == self.state.selected_agent_id), None)
 
     def inspector_text(self):
@@ -755,8 +879,9 @@ class TuiView:
                         ('stop', 'Stop agent', 'Stop the selected agent'),
                         ('unread', 'Unread', 'Inspect unread messages'),
                         ('retry', 'Retry unread', 'Retry delivery of unread messages'),
-                        ('history', 'History', 'Show history state'),
+                        ('history', 'History settings', 'Inspect and change selected agent history mode'),
                         ('inspect_agent', 'Inspect agent', 'Show full status and recovery details')]
+        choices.append(('quit', 'Quit', 'Checkpoint and disconnect'))
         agent_actions = {'attach', 'resume', 'stop', 'unread', 'retry', 'inspect_agent'}
         session_actions = agent_actions | {'rename_session', 'archive_session', 'new_agent', 'history'}
         result = []
@@ -775,6 +900,8 @@ class TuiView:
                     reason = 'Agent is already running'
                 if ident in {'new_agent', 'attach', 'resume', 'stop'} and sys.platform == 'win32':
                     reason = WINDOWS_TMUX_ERROR
+            if self.controller.selection_pending and ident not in {'help', 'activity', 'quit'}:
+                reason = 'Session selection in progress'
             result.append(dict(id=ident, label=label, description=description, disabled_reason=reason))
         return result
 
@@ -785,7 +912,7 @@ class TuiView:
             lines = list(_wrap(self.inspector_text(), width))
             self._inspector_line = min(self._inspector_line, max(0, len(lines) - 1))
             return [('', '\n'.join(lines[self._inspector_line:]))]
-        agents = (self.controller.workspace or {}).get('agents', [])
+        agents = self.agent_rows()
         if not agents:
             return [('', 'No agents. Add agent via F4 Commands.')]
         fragments = []
@@ -798,7 +925,11 @@ class TuiView:
             style = 'class:status.' + status if status in ('running', 'starting', 'failed') else ''
             if selected:
                 style = 'class:selected'
-            fragments.append((style, clip_cells(label_text(self.controller._agent_status(agent)), width) + '\n'))
+            def select(event, ident=agent['agent_id']):
+                if event.event_type == MouseEventType.MOUSE_UP and self.dialogs.future is None:
+                    self.state.selected_agent_id = ident
+                    self.focus_named('agents')
+            fragments.append((style, clip_cells(label_text(self.controller._agent_status(agent)), width) + '\n', select))
         return fragments
 
     def _conversation_title(self):
@@ -830,7 +961,7 @@ class TuiView:
         def dispatch(key, callback, *args):
             @self.global_key_bindings.add(key, filter=Condition(lambda:
                 (key in ('f1', 'c-q') or self.screen_mode != 'small') and
-                (key in ('f1', 'c-q') or self.dialogs.future is None)))
+                (key in ('f1', 'c-q') or self.dialogs.future is None and not self.help_visible)))
             def invoke(event):
                 event.app.create_background_task(self.callbacks[callback](*args))
 
@@ -841,7 +972,7 @@ class TuiView:
         dispatch('c-q', 'quit')
 
         @self.global_key_bindings.add('f5', filter=Condition(lambda:
-            self.screen_mode != 'small' and self.dialogs.future is None))
+            self.screen_mode != 'small' and self.dialogs.future is None and not self.help_visible))
         def activity(event):
             self.hide_activity() if self.activity_visible else self.show_activity()
 
@@ -883,7 +1014,7 @@ class TuiView:
             if navigation and self.controller.plain_channel:
                 return  # Channel selection belongs to the channel navigation workflow.
             ids = ([row['id'] for row in self._sessions] if navigation else
-                   [agent['agent_id'] for agent in (self.controller.workspace or {}).get('agents', [])])
+                   [agent['agent_id'] for agent in self.agent_rows()])
             attribute = 'selected_session_id' if navigation else 'selected_agent_id'
             selected = getattr(self.state, attribute)
             if ids:

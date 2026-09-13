@@ -1,0 +1,670 @@
+"""Guided workflows through real controller, dialogs, renderer and pipe input."""
+import asyncio
+import copy
+from contextlib import asynccontextmanager
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import AsyncMock, Mock, call, patch
+
+from cli import ChatClient
+from cli_api import CLIError
+import cli_tui_dialogs
+from cli_view_contracts import SubmitOutcome
+from cli_workspace_chat import WorkspaceChatController
+from tests._tui_harness import tui_harness
+
+
+def workspace(ident='ws_one', name='One', *, agents=(), archived=False):
+    return dict(id=ident, name=name, channel=ident, agents=list(agents), archived=archived,
+                created_at='2026-09-13T00:00:00Z', updated_at='2026-09-13T00:00:00Z')
+
+
+def agent(ident='ag_one', *, cwd='/tmp', state='exited'):
+    return dict(agent_id=ident, registry_name=ident, provider='codex', cwd=cwd,
+                last_state=state, native_session_id='native', tmux_session='inert',
+                history_mode='literal', history_state='done', history_note='literal delivered',
+                unread_count=0, last_error=None, last_launch=None)
+
+
+@asynccontextmanager
+async def workflow_harness(*, rows=(), selected=None, plain=False, no_resume=True, size=(120, 35)):
+    records = {row['id']: copy.deepcopy(row) for row in rows}
+    if selected:
+        records[selected['id']] = copy.deepcopy(selected)
+    api = Mock()
+    api.list.side_effect = lambda *, include_archived=False: {'workspaces': [copy.deepcopy(w)
+        for w in records.values() if include_archived or not w['archived']]}
+    api.get.side_effect = lambda ident: copy.deepcopy(records[ident])
+    def create(name):
+        records['ws_created'] = workspace('ws_created', name)
+        return copy.deepcopy(records['ws_created'])
+    api.create.side_effect = create
+    def rename(ident, name):
+        records[ident]['name'] = name
+        return copy.deepcopy(records[ident])
+    api.rename.side_effect = rename
+    def action(ident, action, agent_id=None, body=None):
+        ws = records[ident]
+        if action in ('archive', 'unarchive'):
+            ws['archived'] = action == 'archive'
+            return copy.deepcopy(ws)
+        if action == 'spawn':
+            value = agent('ag_created', cwd=body['cwd'], state='starting')
+            value.update(provider=body['provider'], history_mode=body['history_mode'])
+            ws['agents'].append(value)
+            return copy.deepcopy(value)
+        if agent_id:
+            value = next(a for a in ws['agents'] if a['agent_id'] == agent_id)
+            if action == 'resume':
+                value['last_state'] = 'starting'
+            if action == 'history':
+                value['history_mode'] = body['mode']
+            return copy.deepcopy(value)
+        return copy.deepcopy(ws)
+    api.action.side_effect = action
+    api.unread.return_value = {'agents': []}
+    client = ChatClient('http://127.0.0.1:18300')
+    client.channels = ['general', 'other']
+    controller = WorkspaceChatController(client, api, plain_channel=plain,
+                                         no_resume=no_resume, providers=['codex', 'kilo'])
+    if selected:
+        controller._select(copy.deepcopy(selected))
+    async with tui_harness(size=size, controller=controller) as ui:
+        ui.records = records
+        ui.bind_submit(client.submit_outcome)
+        ui.workflows = cli_tui_dialogs.TuiWorkflows(client, controller, ui.view, ui.dialogs,
+                                                  ui.state, composer_actions=ui.composer_actions)
+        ui.callbacks.update(navigate=ui.workflows.navigate, run_action=ui.workflows.run_action)
+        controller.presentation.confirm_selection = ui.workflows.confirm_selection
+        ui.tasks = []
+        def start(coro):
+            task = asyncio.create_task(coro)
+            ui.tasks.append(task)
+            return task
+        ui.start = start
+        try:
+            yield ui
+        finally:
+            ui.dialogs.cancel()
+            for task in ui.tasks:
+                task.cancel()
+            await controller.cancel_selection()
+            await asyncio.gather(*ui.tasks, return_exceptions=True)
+
+
+class WorkflowTests(unittest.IsolatedAsyncioTestCase):
+    async def modal(self, ui, text):
+        await ui.wait_until(lambda: ui.dialogs.future is not None and text in ui.screen_text())
+
+    async def test_archived_only_navigation_and_decline_keeps_no_selection(self):
+        self.assertTrue(hasattr(cli_tui_dialogs, 'TuiWorkflows'), 'guided workflows missing')
+        async with workflow_harness(rows=[workspace('ws_archived', 'Billing', archived=True)]) as ui:
+            task = ui.start(ui.workflows.navigate(mandatory=True))
+            await self.modal(ui, 'Show archived')
+            self.assertIn('New session', ui.screen_text())
+            ui.api.action.assert_not_called()
+            await ui.activate_named('show_archived')
+            await ui.wait_until(lambda: 'Billing' in ui.screen_text())
+            await ui.select_row('ws_archived')
+            await self.modal(ui, 'Unarchive it? [y/N]')
+            await ui._send('n')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertIsNone(ui.controller.workspace)
+            ui.api.action.assert_not_called()
+
+    async def test_first_escape_requests_quit(self):
+        async with workflow_harness() as ui:
+            task = ui.start(ui.workflows.navigate(mandatory=True))
+            await self.modal(ui, 'New session')
+            await ui.key('Escape')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertIn(('quit',), ui.calls)
+
+    async def test_new_blank_session_creates_then_selects(self):
+        async with workflow_harness(selected=workspace()) as ui:
+            await ui.paste('unsent')
+            task = ui.start(ui.workflows.new_session())
+            await self.modal(ui, 'New session')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            ui.api.create.assert_called_once_with('')
+            self.assertEqual(ui.controller.workspace['id'], 'ws_created')
+            self.assertEqual(ui.composer_actions.key, ('session', 'ws_created'))
+            self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'unsent')
+            self.assertLess(ui.api.mock_calls.index(call.create('')), ui.api.mock_calls.index(call.get('ws_created')))
+
+    async def test_navigation_search_stable_ids_refresh_and_mouse(self):
+        async with workflow_harness(rows=[workspace('ws_alpha', 'Same'), workspace('ws_beta', 'Same')]) as ui:
+            task = ui.start(ui.workflows.navigate())
+            await self.modal(ui, 'Show archived')
+            await ui.select_row('ws_beta')
+            self.assertEqual((await task).workspace_id, 'ws_beta')
+            task = ui.start(ui.workflows.navigate())
+            await self.modal(ui, 'Show archived')
+            await ui._send('\x01\x0b')
+            await ui.activate_named('refresh')
+            await self.modal(ui, 'Show archived')
+            self.assertEqual(ui.state.selected_session_id, 'ws_beta')
+            # Mouse handler belongs to actual rendered navigation rows.
+            for y, row in enumerate(ui.rows):
+                if 'ws_alpha' in row and 'Same' in row:
+                    await ui.click(row.index('Same'), y)
+                    break
+            else:
+                self.fail('full stable ID not visible')
+            self.assertEqual((await task).workspace_id, 'ws_alpha')
+
+    async def test_capacity_refuses_switch_and_create_before_mutation(self):
+        async with workflow_harness(selected=workspace(), rows=[workspace('ws_other')]) as ui:
+            await ui.paste('keep')
+            for i in range(49):
+                ui.state.drafts.set(('session', str(i)), 'saved')
+            before = (ui.view.composer.text, ui.view.composer.buffer.cursor_position)
+            result = await ui.workflows.run_action('select_session', target_id='ws_other')
+            self.assertEqual(result.status, 'cancelled')
+            self.assertEqual((ui.view.composer.text, ui.view.composer.buffer.cursor_position), before)
+            self.assertEqual((await ui.workflows.new_session()).status, 'cancelled')
+            ui.api.create.assert_not_called()
+            ui.api.get.assert_not_called()
+            self.assertEqual(ui.state.notices.lines[-1], '50 unsent drafts; send or clear one')
+
+    async def test_rename_form_selection_aba_cancels_no_mutation(self):
+        async with workflow_harness(selected=workspace(), rows=[workspace('ws_other')]) as ui:
+            task = ui.start(ui.workflows.run_action('rename_session'))
+            await self.modal(ui, 'Rename session')
+            await ui.controller.select_session('ws_other')
+            await ui.controller.select_session('ws_one')
+            ui.api.reset_mock()
+            await ui.paste('new')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertEqual(ui.api.mock_calls, [])
+            self.assertIn('Selection changed', ui.state.notices.lines[-1])
+
+    async def test_spawn_form_defaults_and_failed_retry_retains_values(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            async with workflow_harness(selected=workspace(agents=[agent(cwd=cwd)])) as ui:
+                action = ui.api.action.side_effect
+                ui.api.action.side_effect = CLIError('exact launch refusal')
+                task = ui.start(ui.workflows.agent_form('spawn'))
+                await self.modal(ui, 'New agent')
+                self.assertIn('codex', ui.screen_text())
+                self.assertIn('kilo', ui.screen_text())
+                self.assertIn(cwd, ui.screen_text())
+                await ui.key('Enter')
+                await self.modal(ui, 'exact launch refusal')
+                self.assertEqual(ui.api.action.call_count, 1)
+                await ui.wait_render()
+                self.assertEqual(ui.api.action.call_count, 1)
+                self.assertIn(cwd, ui.screen_text())
+                ui.api.action.side_effect = action
+                await ui.key('Enter')
+                self.assertEqual((await task).status, 'completed')
+                self.assertEqual(ui.api.action.call_args.kwargs['body'],
+                                 dict(provider='codex', cwd=cwd, history_mode='literal', name=None))
+
+    async def test_resume_starts_ordinary_and_fresh_needs_confirmation(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            ui.api.action.side_effect = CLIError('native missing; use --fresh', status=409)
+            task = ui.start(ui.workflows.agent_form('resume', 'ag_one'))
+            await self.modal(ui, 'Resume agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'native missing; use --fresh')
+            self.assertFalse(ui.api.action.call_args.kwargs['body']['fresh'])
+            await ui.focus_field('launch_mode')
+            await ui.key('Down')
+            await ui.key('Enter')
+            await self.modal(ui, 'Fresh')
+            await ui._send('n')
+            await self.modal(ui, 'Resume agent')
+            self.assertEqual(ui.api.action.call_count, 1)
+            await ui.key('Escape')
+            self.assertEqual((await task).status, 'cancelled')
+
+    async def test_candidate_resume_shows_eligible_and_missing_cwd(self):
+        candidate = workspace('ws_candidate', 'Candidate', agents=[agent('ag_eligible'),
+            agent('ag_skipped', cwd='/definitely/missing/task9')])
+        async with workflow_harness(rows=[candidate], no_resume=False) as ui:
+            task = ui.start(ui.workflows.run_action('select_session', target_id='ws_candidate'))
+            await self.modal(ui, 'Resume 1 stopped agents? [Y/n]')
+            screen = ui.screen_text()
+            self.assertIn('ag_eligible', screen)
+            self.assertIn('ag_skipped', screen)
+            self.assertIn('⚠ cwd missing — /resume ag_skipped --cwd PATH', screen)
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            ui.api.action.assert_called_once_with('ws_candidate', 'resume', 'ag_eligible', body={})
+
+    async def test_history_requires_explicit_agent_and_submit(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            task = ui.start(ui.workflows.run_action('history'))
+            await self.modal(ui, 'Choose agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'History settings')
+            self.assertIn('literal delivered', ui.screen_text())
+            ui.api.action.assert_not_called()
+            await ui.key('Down')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            ui.api.action.assert_called_once_with('ws_one', 'history', 'ag_one', body={'mode': 'none'})
+
+    async def test_plain_channel_switch_and_create_use_client(self):
+        async with workflow_harness(plain=True) as ui:
+            task = ui.start(ui.workflows.run_action('switch_channel'))
+            await self.modal(ui, 'Channels')
+            await ui.paste('other')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            self.assertEqual(ui.client.channel, 'other')
+            self.assertEqual(ui.composer_actions.key, ('channel', 'other'))
+            task = ui.start(ui.workflows.run_action('create_channel'))
+            await self.modal(ui, 'Create channel')
+            await ui.paste('general')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            self.assertEqual(ui.client.channel, 'general')
+            self.assertEqual(ui.api.mock_calls, [])
+
+    async def test_archive_releases_draft_and_uses_mandatory_navigation_callback(self):
+        async with workflow_harness(selected=workspace()) as ui:
+            await ui.paste('keep archived draft')
+            for i in range(49):
+                ui.state.drafts.set(('session', str(i)), 'saved')
+            navigations = []
+            async def navigate(mandatory=False):
+                navigations.append((mandatory, ui.controller.workspace, ui.composer_actions.key))
+                return await ui.workflows.navigate(mandatory)
+            ui.callbacks['navigate'] = navigate
+            task = ui.start(ui.workflows.run_action('archive_session'))
+            await self.modal(ui, 'Archive session? [y/N]')
+            self.assertIn('One', ui.screen_text())
+            await ui._send('y')
+            await self.modal(ui, 'Show archived')
+            self.assertEqual(navigations, [(True, None, None)])
+            self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'keep archived draft')
+            await ui.activate_named('new_session')
+            await self.modal(ui, 'Session name:')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            self.assertEqual(ui.controller.workspace['id'], 'ws_created')
+            self.assertEqual(ui.composer_actions.key, ('session', 'ws_created'))
+            self.assertEqual(len(ui.state.drafts), 50)
+            self.assertEqual(ui.api.action.call_args_list, [call('ws_one', 'archive')])
+
+    async def test_cancel_loading_preserves_selection_draft_and_viewport(self):
+        import threading
+        async with workflow_harness(selected=workspace()) as ui:
+            await ui.paste('keep')
+            before = (ui.controller.workspace, ui.view.composer.text, ui.state.viewport.anchor_id,
+                      ui.state.viewport.follow, ui.composer_actions.key)
+            entered, release = threading.Event(), threading.Event()
+            def blocked(*, include_archived=False):
+                entered.set()
+                release.wait(2)
+                return {'workspaces': []}
+            ui.api.list.side_effect = blocked
+            task = ui.start(ui.workflows.navigate())
+            try:
+                await self.modal(ui, 'Loading sessions')
+                await ui.key('Escape')
+                self.assertEqual((await task).status, 'cancelled')
+                self.assertEqual((ui.controller.workspace, ui.view.composer.text, ui.state.viewport.anchor_id,
+                                  ui.state.viewport.follow, ui.composer_actions.key), before)
+                ui.api.action.assert_not_called()
+            finally:
+                release.set()
+
+    async def test_refresh_failure_retains_rows_warning_is_once(self):
+        async with workflow_harness(rows=[workspace()]) as ui:
+            ui.api.list.side_effect = CLIError('exact list error')
+            result = await ui.workflows.refresh_sessions()
+            self.assertEqual(result.status, 'failed')
+            self.assertEqual(ui.view.session_rows()[0]['id'], 'ws_one')
+            self.assertTrue(ui.view.sessions_stale)
+            self.assertEqual(ui.state.notices.lines.count('exact list error'), 1)
+            ui.api.list.side_effect = None
+            ui.api.list.return_value = {'workspaces': [workspace()], 'warning': 'one warning'}
+            await ui.workflows.refresh_sessions()
+            self.assertFalse(ui.view.sessions_stale)
+            self.assertEqual(ui.state.notices.lines.count('one warning'), 1)
+
+    async def test_palette_target_agent_survives_changed_highlight(self):
+        async with workflow_harness(selected=workspace(agents=[agent('ag_first'), agent('ag_second')])) as ui:
+            ui.state.selected_agent_id = 'ag_first'
+            task = ui.start(ui.workflows.show_palette())
+            await self.modal(ui, 'Commands')
+            ui.state.selected_agent_id = 'ag_second'
+            await ui.paste('Resume agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'Resume agent')
+            await ui.key('Enter')
+            self.assertEqual((await task).agent_id, 'ag_first')
+            self.assertEqual(ui.api.action.call_args.args[2], 'ag_first')
+
+    async def test_sidebar_mouse_selects_captured_session_id(self):
+        async with workflow_harness(rows=[workspace('ws_mouse', 'Mouse target')]) as ui:
+            await ui.wait_render()
+            for y, row in enumerate(ui.rows):
+                if 'Mouse target' in row:
+                    await ui.click(row.index('Mouse target'), y)
+                    break
+            await ui.wait_until(lambda: ui.controller.workspace is not None)
+            self.assertEqual(ui.controller.workspace['id'], 'ws_mouse')
+
+    async def test_plain_pending_create_settings_and_unavailable_fallback(self):
+        async with workflow_harness(plain=True) as ui:
+            ui.client.send = AsyncMock(return_value=True)
+            task = ui.start(ui.workflows.run_action('create_channel'))
+            await self.modal(ui, 'Create channel')
+            await ui.paste('created')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            self.assertEqual(ui.client.pending_channel, 'created')
+            self.assertEqual(ui.client.channel, 'general')
+            ui.client.handle_event({'type': 'settings', 'data': {'channels': ['general', 'created']}})
+            self.assertEqual(ui.client.channel, 'created')
+            self.assertIsNone(ui.client.pending_channel)
+            # Task10 observer owns asynchronous draft reconciliation.
+            ui.client.handle_event({'type': 'settings', 'data': {'channels': ['general']}})
+            self.assertEqual(ui.client.channel, 'general')
+            self.assertEqual(ui.api.mock_calls, [])
+
+    async def test_spawn_invalid_directory_cannot_mutate(self):
+        async with workflow_harness(selected=workspace(agents=[agent(cwd='relative/path')])) as ui:
+            task = ui.start(ui.workflows.agent_form('spawn'))
+            await self.modal(ui, 'New agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'absolute existing directory')
+            ui.api.action.assert_not_called()
+            await ui.key('Escape')
+            await task
+
+    async def test_history_exact_refusal_survives_until_explicit_resubmit(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            message = 'summary history mode is not available in this version; use literal or none'
+            ui.api.action.side_effect = CLIError(message)
+            task = ui.start(ui.workflows.run_action('history'))
+            await self.modal(ui, 'History settings')
+            await ui.key('Enter')
+            await self.modal(ui, 'summary history mode')
+            self.assertEqual(ui.api.action.call_count, 1)
+            self.assertIn(message, '\n'.join(ui.state.notices.lines))
+            await ui.key('Escape')
+            self.assertEqual((await task).status, 'cancelled')
+
+    async def test_committed_selection_binds_destination_when_capacity_fills_during_read(self):
+        import threading
+        async with workflow_harness(selected=workspace(), rows=[workspace('ws_other')]) as ui:
+            for i in range(49):
+                ui.state.drafts.set(('session', str(i)), 'saved')
+            entered, release = threading.Event(), threading.Event()
+            original = ui.api.get.side_effect
+            def get(ident):
+                entered.set()
+                release.wait(2)
+                return original(ident)
+            ui.api.get.side_effect = get
+            task = ui.start(ui.workflows.run_action('select_session', target_id='ws_other'))
+            try:
+                await ui.wait_until(entered.is_set)
+                await ui.paste('fiftieth draft')
+                self.assertEqual(len(ui.state.drafts), 50)
+                release.set()
+                self.assertEqual((await task).status, 'completed')
+                self.assertEqual(ui.composer_actions.key, ('session', 'ws_other'))
+                self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'fiftieth draft')
+                self.assertEqual(ui.view.composer.text, '')
+                await ui.paste('refused')
+                self.assertEqual(ui.view.composer.text, '')
+                self.assertEqual(len(ui.state.drafts), 50)
+                self.assertEqual(ui.state.notices.lines.count('50 unsent drafts; send or clear one'), 1)
+                self.assertIn('Message · 50 unsent drafts; send or clear one', ui.screen_text())
+                ui.state.drafts.clear(('session', '0'))
+                await ui.paste('now allowed')
+                self.assertEqual(ui.view.composer.text, 'now allowed')
+                self.assertNotIn('Message · 50 unsent', ui.screen_text())
+            finally:
+                release.set()
+
+    async def test_duplicate_activation_and_pending_palette_do_not_mutate_twice(self):
+        async with workflow_harness(selected=workspace(agents=[agent(state='running')])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            task = ui.start(ui.workflows.run_action('stop'))
+            await self.modal(ui, 'Stop ag_one?')
+            self.assertEqual((await ui.workflows.run_action('stop')).status, 'cancelled')
+            await ui._send('y')
+            self.assertEqual((await task).status, 'completed')
+            ui.api.action.assert_called_once_with('ws_one', 'stop', 'ag_one')
+            import threading
+            entered, release = threading.Event(), threading.Event()
+            ui.records['ws_next'] = workspace('ws_next')
+            def get(ident):
+                entered.set()
+                release.wait(2)
+                return copy.deepcopy(ui.records[ident])
+            ui.api.get.side_effect = get
+            selecting = ui.start(ui.workflows.run_action('select_session', target_id='ws_next'))
+            try:
+                await ui.wait_until(entered.is_set)
+                choices = {c['id']: c for c in ui.view.action_choices()}
+                self.assertEqual(choices['rename_session']['disabled_reason'], 'Session selection in progress')
+                self.assertEqual(choices['quit']['disabled_reason'], '')
+            finally:
+                release.set()
+                await selecting
+
+    async def test_resume_changed_directory_and_explicit_fresh_payload(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            async with workflow_harness(selected=workspace(agents=[agent(cwd='/missing/old')])) as ui:
+                task = ui.start(ui.workflows.agent_form('resume', 'ag_one'))
+                await self.modal(ui, 'Resume agent')
+                await ui.paste(cwd)
+                await ui.focus_field('launch_mode')
+                await ui.key('Down')
+                await ui.key('Enter')
+                await self.modal(ui, 'Fresh launch')
+                await ui._send('y')
+                self.assertEqual((await task).status, 'completed')
+                ui.api.action.assert_called_once_with('ws_one', 'resume', 'ag_one',
+                    body={'fresh': True, 'cwd': cwd, 'name': None})
+
+    async def test_small_help_and_modal_help_preserve_focus_values_on_resize(self):
+        async with workflow_harness(selected=workspace(), size=(70, 16)) as ui:
+            await ui.key('F1')
+            await ui.wait_until(lambda: 'Alt+Enter adds a line' in ui.screen_text())
+            await ui.key('F2')
+            self.assertIsNone(ui.dialogs.future)
+            await ui.key('Escape')
+            await ui.resize(120, 35)
+            task = ui.start(ui.workflows.run_action('rename_session'))
+            await self.modal(ui, 'Rename session')
+            await ui.paste('edited')
+            focused, future = ui.application.layout.current_control, ui.dialogs.future
+            await ui.key('F1')
+            await ui.wait_until(lambda: 'Alt+Enter adds a line' in ui.screen_text())
+            self.assertIs(ui.dialogs.future, future)
+            await ui.resize(70, 16)
+            await ui.resize(120, 35)
+            await ui.key('F1')
+            self.assertIs(ui.application.layout.current_control, focused)
+            self.assertIs(ui.dialogs.future, future)
+            self.assertIn('editedOne', ui.screen_text())
+            await ui.key('Escape')
+            self.assertEqual((await task).status, 'cancelled')
+            ui.api.rename.assert_not_called()
+
+    async def test_palette_captured_empty_agent_does_not_use_later_highlight(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            task = ui.start(ui.workflows.show_palette())
+            await self.modal(ui, 'Commands')
+            ui.state.selected_agent_id = 'ag_one'
+            await ui.paste('History settings')
+            await ui.key('Enter')
+            await self.modal(ui, 'Choose agent')
+            ui.api.action.assert_not_called()
+            await ui.key('Escape')
+            await task
+
+    async def test_minimum_compact_agent_form_all_providers_and_buttons_reachable(self):
+        async with workflow_harness(selected=workspace(agents=[agent()]), size=(80, 18)) as ui:
+            ui.controller.providers = ['claude', 'codex', 'kilo', 'gemini']
+            task = ui.start(ui.workflows.agent_form('spawn'))
+            await self.modal(ui, 'New agent')
+            self.assertNotIn('Window too small', ui.screen_text())
+            await ui.key('Down')
+            await ui.key('Down')
+            await ui.key('Down')
+            self.assertIn('gemini', ui.screen_text())
+            await ui.focus_field('cwd')
+            self.assertIn('/tmp', ui.screen_text())
+            await ui.focus_field('name')
+            await ui.paste('compact agent')
+            await ui.key('Tab')
+            await ui.key('Tab')
+            # Submit remains visible and focusable at the minimum usable size.
+            self.assertIn('Start agent', ui.screen_text())
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            self.assertEqual(ui.api.action.call_args.kwargs['body']['provider'], 'gemini')
+            self.assertEqual(ui.api.action.call_args.kwargs['body']['name'], 'compact agent')
+
+    async def test_same_session_selection_preserves_viewport_and_agent(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            ui.client.handle_event({'type': 'message', 'data': {'id': 7, 'timestamp': 1,
+                'channel': 'ws_one', 'text': 'saved anchor', 'sender': 'human'}})
+            ui.state.viewport.anchor(7, {7: ui.client.messages[7]})
+            await ui.paste('saved draft')
+            outcome = await ui.workflows.run_action('select_session', target_id='ws_one')
+            self.assertEqual(outcome.status, 'completed')
+            self.assertFalse(ui.state.viewport.follow)
+            self.assertEqual(ui.state.viewport.anchor_id, 7)
+            self.assertEqual(ui.state.selected_agent_id, 'ag_one')
+            self.assertEqual(ui.view.composer.text, 'saved draft')
+            ui.api.action.assert_not_called()
+
+    async def test_late_session_list_cannot_replace_newer_refresh(self):
+        import threading
+        async with workflow_harness(rows=[workspace()]) as ui:
+            entered, release = threading.Event(), threading.Event()
+            count = 0
+            def listing(*, include_archived=False):
+                nonlocal count
+                count += 1
+                if count == 1:
+                    entered.set()
+                    release.wait(2)
+                    return {'workspaces': [workspace(name='Obsolete')], 'warning': 'obsolete warning'}
+                return {'workspaces': [workspace(name='Latest')]}
+            ui.api.list.side_effect = listing
+            first = ui.start(ui.workflows.refresh_sessions())
+            try:
+                await ui.wait_until(entered.is_set)
+                await ui.workflows.refresh_sessions()
+                release.set()
+                await first
+                self.assertEqual(ui.view.session_rows()[0]['name'], 'Latest')
+                self.assertNotIn('obsolete warning', ui.state.notices.lines)
+            finally:
+                release.set()
+
+    async def test_rename_success_refreshes_active_stable_id_and_keeps_draft(self):
+        async with workflow_harness(selected=workspace()) as ui:
+            await ui.paste('keep draft')
+            task = ui.start(ui.workflows.run_action('rename_session'))
+            await self.modal(ui, 'Rename session')
+            await ui._send('\x01\x0b')
+            await ui.paste('Renamed session')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            ui.api.rename.assert_called_once_with('ws_one', 'Renamed session')
+            self.assertEqual(ui.controller.workspace['name'], 'Renamed session')
+            self.assertEqual(ui.view.session_rows()[0]['name'], 'Renamed session')
+            self.assertEqual(ui.view.composer.text, 'keep draft')
+
+    async def test_archive_default_no_and_stop_escape_are_non_mutating(self):
+        async with workflow_harness(selected=workspace(agents=[agent(state='running')])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            for action, text, key in [('archive_session', 'Archive session?', 'Enter'),
+                                      ('stop', 'Stop ag_one?', 'Escape')]:
+                task = ui.start(ui.workflows.run_action(action))
+                await self.modal(ui, text)
+                await ui.key(key)
+                self.assertEqual((await task).status, 'cancelled')
+            ui.api.action.assert_not_called()
+            self.assertEqual(ui.controller.workspace['id'], 'ws_one')
+
+    async def test_delayed_candidate_confirmation_closes_help_before_taking_focus(self):
+        import threading
+        candidate = workspace('ws_candidate', agents=[agent()])
+        async with workflow_harness(rows=[candidate], no_resume=False) as ui:
+            entered, release = threading.Event(), threading.Event()
+            def get(ident):
+                entered.set()
+                release.wait(2)
+                return copy.deepcopy(candidate)
+            ui.api.get.side_effect = get
+            task = ui.start(ui.workflows.run_action('select_session', target_id='ws_candidate'))
+            try:
+                await ui.wait_until(entered.is_set)
+                await ui.key('F1')
+                self.assertTrue(ui.view.help_visible)
+                release.set()
+                await self.modal(ui, 'Resume 1 stopped agents?')
+                self.assertFalse(ui.view.help_visible)
+                await ui._send('n')
+                self.assertEqual((await task).status, 'completed')
+                ui.api.action.assert_not_called()
+            finally:
+                release.set()
+
+    async def test_busy_candidate_confirmation_preserves_help_and_original_dialog(self):
+        async with workflow_harness(selected=workspace()) as ui:
+            task = ui.start(ui.workflows.run_action('rename_session'))
+            await self.modal(ui, 'Rename session')
+            future = ui.dialogs.future
+            await ui.key('F1')
+            self.assertTrue(ui.view.help_visible)
+            self.assertFalse(await ui.workflows.confirm_selection('Unarchive it? [y/N]',
+                workspace=workspace('ws_other'), escape=False))
+            self.assertTrue(ui.view.help_visible)
+            self.assertIs(ui.dialogs.future, future)
+            await ui.key('F1')
+            await ui.key('Escape')
+            await task
+
+    async def test_plain_history_returns_to_actual_transcript_from_activity(self):
+        async with workflow_harness(plain=True) as ui:
+            ui.client.handle_event({'type': 'message', 'data': {'id': 7, 'timestamp': 1,
+                'channel': 'general', 'text': 'server history message', 'sender': 'human'}})
+            ui.view.show_activity()
+            outcome = await ui.workflows.run_action('history')
+            self.assertEqual(outcome.status, 'completed')
+            await ui.wait_render()
+            self.assertIn('server history message', ui.screen_text())
+            self.assertFalse(ui.view.activity_visible)
+            ui.api.action.assert_not_called()
+
+    async def test_palette_quit_and_disabled_windows_reason(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            with patch('cli_tui_view.sys.platform', 'win32'):
+                task = ui.start(ui.workflows.show_palette())
+                await self.modal(ui, 'Commands')
+                await ui.paste('Resume agent')
+                await ui.wait_render()
+                self.assertIn('Requires tmux (Linux/macOS).', ui.screen_text())
+                await ui.key('Enter')
+                self.assertFalse(task.done())
+                ui.api.action.assert_not_called()
+                await ui.key('Escape')
+                await task
+            task = ui.start(ui.workflows.show_palette())
+            await self.modal(ui, 'Commands')
+            await ui.paste('Quit')
+            await ui.key('Enter')
+            await task
+            self.assertIn(('quit',), ui.calls)

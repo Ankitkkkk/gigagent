@@ -2,7 +2,7 @@
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from cli_view_contracts import SubmitOutcome
 from tests._tui_harness import tui_harness
@@ -14,6 +14,27 @@ def bind(ui, submit=None):
 
 
 class ComposerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_scheduled_send_before_start_releases_reservation(self):
+        async with tui_harness() as ui:
+            bind(ui)
+            await ui.paste('keep')
+            original = ui.application.create_background_task
+            cancelled = []
+            def cancel_before_start(coro):
+                task = original(coro)
+                task.cancel()
+                cancelled.append(task)
+                return task
+            with patch.object(ui.application, 'create_background_task', side_effect=cancel_before_start):
+                await ui.key('Enter')
+            self.assertTrue(cancelled)
+            await asyncio.gather(*cancelled, return_exceptions=True)
+            await ui.wait_render()
+            self.assertFalse(ui.composer_actions.sending)
+            self.assertEqual(ui.view.composer.text, 'keep')
+            await ui.key('Enter')
+            await ui.wait_until(lambda: ui.submit_mock.await_count == 1)
+
     async def test_failed_send_keeps_multiline_draft(self):
         async with tui_harness() as ui:
             bind(ui)
@@ -619,13 +640,15 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
         from prompt_toolkit.completion import CompleteEvent
         async with tui_harness() as ui:
             bind(ui)
-            # Navigation renderer is unrelated; drive the completer against the current model.
+            # Both renderer and completer tolerate malformed records.
             ui.controller.workspace['agents'] = [{}, None, {'registry_name': 'missing-id'},
                 {'agent_id': 'ag_valid', 'registry_name': 'claude-2'}, {'agent_id': ''}]
             try:
                 result = list(ui.view.composer.buffer.completer.get_completions(
                     Document('/stop '), CompleteEvent()))
                 self.assertEqual([c.text for c in result], ['claude-2'])
+                await ui.wait_render()
+                self.assertIn('claude-2', ui.screen_text())
             finally:
                 ui.controller.workspace['agents'] = []
 

@@ -8,6 +8,18 @@ from tests._tui_harness import tui_harness
 
 
 class ViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_agent_records_are_skipped_by_real_renderer(self):
+        async with tui_harness() as ui:
+            ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': []})
+            ui.controller.workspace['agents'] = [None, {}, {'agent_id': ''},
+                {'agent_id': 'ag_good', 'registry_name': 'valid-agent', 'last_state': 'exited'}]
+            await ui.wait_render()
+            self.assertIn('valid-agent', ui.screen_text())
+            ui.view.focus_named('agents')
+            await ui.key('Down')
+            await ui.key('Enter')
+            self.assertIn('ag_good', ui.screen_text())
+
     async def test_compact_resize_keeps_draft_and_focus(self):
         async with tui_harness(size=(120, 30)) as ui:
             composer = ui.view.composer

@@ -83,6 +83,42 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ctl._pending_actions)
         self.assertFalse(ctl._action_lock.locked())
 
+    async def test_candidate_confirmation_receives_updated_candidate(self):
+        ctl = self.make_controller(stopped=True, archived=True)
+        contexts = []
+        async def confirm_selection(text, *, workspace, default=False, escape=False):
+            contexts.append((text, copy.deepcopy(workspace), default, escape))
+            return text.startswith('Unarchive')
+        self.presenter.confirm_selection = confirm_selection
+        self.dialog_release.set()
+        result = await ctl.select_session('ws_b')
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(len(contexts), 2)
+        self.assertTrue(contexts[0][1]['archived'])
+        self.assertFalse(contexts[1][1]['archived'])
+        self.assertEqual(contexts[1][1]['id'], 'ws_b')
+        self.presenter.confirm.assert_not_awaited()
+
+    async def test_public_generation_detects_selection_aba(self):
+        ctl = self.make_controller(no_resume=True)
+        before = getattr(ctl, 'selection_generation', None)
+        self.assertIsNotNone(before, 'selection generation must be public')
+        await ctl.select_session('ws_b')
+        await ctl.select_session('ws_a')
+        self.assertEqual(ctl.workspace['id'], 'ws_a')
+        self.assertGreater(ctl.selection_generation, before)
+
+    async def test_bound_plain_settings_preserve_client_channel_policy(self):
+        ctl = self.make_controller(old=False)
+        ctl.plain_channel = True
+        ctl.bind_view(self.presenter, self.events.append)
+        ctl.client.pending_channel = 'created'
+        ctl.client.handle_event({'type': 'settings', 'data': {'channels': ['general', 'created']}})
+        self.assertEqual(ctl.client.channel, 'created')
+        self.assertIsNone(ctl.client.pending_channel)
+        ctl.client.handle_event({'type': 'settings', 'data': {'channels': ['general']}})
+        self.assertEqual(ctl.client.channel, 'general')
+
     async def test_cancel_dialog_preserves_old_selection(self):
         ctl = self.make_controller(stopped=True)
         ctl._failed_launches.add('ag_old')

@@ -7,7 +7,10 @@ import io
 from prompt_toolkit.application import Application
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
-from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout import Layout, Window
+from prompt_toolkit.layout.layout import walk
+from prompt_toolkit.formatted_text import to_formatted_text
+from prompt_toolkit.widgets import Button
 from prompt_toolkit.output.vt100 import Vt100_Output
 
 from cli import ChatClient
@@ -182,6 +185,64 @@ class TuiHarness:
                 await self.input_processed.wait()
         await asyncio.wait_for(processed(), 2)
         await self.wait_render()
+
+    async def activate_named(self, name):
+        """Reach an actual visible button with Tab, then activate with Enter."""
+        caption = {'show_archived': 'Show archived', 'new_session': 'New session',
+                   'refresh': 'Refresh'}[name]
+        target = None
+        for container in walk(self.application.layout.container, skip_hidden=True):
+            if isinstance(container, Window):
+                owner = getattr(getattr(container.content, 'text', None), '__self__', None)
+                if isinstance(owner, Button) and owner.text == caption:
+                    target = container.content
+        if target is None:
+            raise AssertionError('Visible button missing: ' + caption)
+        for _ in range(30):
+            if self.application.layout.current_control is target:
+                await self.key('Enter')
+                return
+            await self.key('Tab')
+        raise AssertionError('Button cannot be reached by Tab: ' + caption)
+
+    async def focus_field(self, name):
+        captions = {'launch_mode': 'Launch mode:', 'cwd': 'Working directory',
+                    'name': 'Agent name', 'mode': 'History mode:', 'provider': 'Provider:'}
+        found, target = False, None
+        for container in walk(self.dialogs.body, skip_hidden=True):
+            if not isinstance(container, Window):
+                continue
+            control = container.content
+            if found and control.is_focusable():
+                target = control
+                break
+            text = getattr(control, 'text', '')
+            rendered = ''.join(fragment[1] for fragment in to_formatted_text(text))
+            if rendered.startswith(captions[name]):
+                found = True
+        if target is None:
+            raise AssertionError('Visible field missing: ' + name)
+        for _ in range(30):
+            if self.application.layout.current_control is target:
+                return
+            await self.key('Tab')
+        raise AssertionError('Field cannot be reached by Tab: ' + name)
+
+    async def select_row(self, ident):
+        """Search and activate only after asserting the full highlighted ID."""
+        from prompt_toolkit.layout.controls import BufferControl
+        for _ in range(30):
+            if isinstance(self.application.layout.current_control, BufferControl):
+                break
+            await self.key('Tab')
+        else:
+            raise AssertionError('Search is not keyboard reachable')
+        await self._send('\x01\x0b')
+        await self.paste(ident.swapcase())
+        await self.wait_until(lambda: self.state.selected_session_id == ident)
+        if self.state.selected_session_id != ident:
+            raise AssertionError('Focused stable ID differs from intended target')
+        await self.key('Enter')
 
     async def resize(self, columns, rows):
         before = self.render_count
