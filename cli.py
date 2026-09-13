@@ -16,7 +16,8 @@ from cli_api import (CLIError, SessionTokenParser, fetch_session_token, get_api,
 from cli_workspaces import (WorkspaceAPI, attach_agent, format_workspace_result,
                             require_tmux_platform, resolve_agent, run_workspace_command)
 from cli_workspace_chat import WorkspaceChatController, ensure_server
-from cli_view_contracts import SubmitOutcome, ViewEvent
+from cli_view_contracts import (SubmitOutcome, ViewEvent, channel_transcript,
+                                terminal_text)
 from config_loader import load_config
 
 
@@ -31,12 +32,6 @@ HELP = """/channels           List channels
 /quit               Disconnect
 Type a message to send it; @mentions wake agents. Tab completes names.
 Server commands such as /continue and /summary @agent are sent to chat."""
-
-
-def terminal_text(value):
-    """Keep chat content from emitting terminal control sequences."""
-    return "".join(c for c in str(value) if c in "\n\t" or
-                   (c.isprintable() and c != "\x1b"))
 
 
 class ChatClient:
@@ -120,10 +115,7 @@ class ChatClient:
             self.show("  Choices: " + " | ".join(map(str, choices)))
 
     def history(self):
-        messages = sorted((m for m in self.messages.values()
-                           if m.get("channel", "general") == self.channel),
-                          key=lambda m: (m.get("timestamp", 0), m["id"]))
-        messages = messages[-self.history_limit:]
+        messages = channel_transcript(self.messages, self.channel)[-self.history_limit:]
         if self.on_view_change is not None:
             self._notify_view("history", message_ids=(m["id"] for m in messages))
             return

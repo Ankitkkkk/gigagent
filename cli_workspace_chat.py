@@ -18,16 +18,12 @@ from cli_api import CLIError
 from cli_workspaces import (WINDOWS_TMUX_ERROR, WorkspaceCommandResult,
                             attach_agent, format_workspace_result, require_tmux_platform,
                             resolve_agent, resolve_session)
-from cli_view_contracts import ActionOutcome, ViewEvent
+from cli_view_contracts import ActionOutcome, ViewEvent, _safe, terminal_text
 
 
 ROOT = Path(__file__).resolve().parent
 SERVER_SESSION = 'agentchattr-server'
 _RESUME_COMMAND = ContextVar('resume_command', default=None)
-
-
-def _safe(value):
-    return ''.join(c for c in str(value) if c.isprintable() and c != '\x1b')
 
 
 def _resolved_path(value):
@@ -243,9 +239,9 @@ async def _resume_workspace(api, workspace, *, confirm, notice, mutate, still_cu
                 return result
             resumed = True
         except CLIError as error:
-            notice(_safe(error))
+            notice(str(error))
             if error.status == 409 and '--fresh' in str(error):
-                notice(_safe(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh'))
+                notice(f'/resume {shlex.quote(str(_agent_label(agent)))} --fresh')
         if not still_current():
             return cancelled
     if resumed:
@@ -259,7 +255,8 @@ async def _offer_resume(api, workspace, prompt, output, no_resume):
     for agent in workspace.get('agents', []):
         output(_agent_line(agent))
     return await _resume_workspace(
-        api, workspace, confirm=_legacy_confirm(prompt), notice=output,
+        api, workspace, confirm=_legacy_confirm(prompt),
+        notice=lambda text: output(_safe(text)),
         mutate=asyncio.to_thread, still_current=lambda: True, no_resume=no_resume)
 
 
@@ -702,7 +699,7 @@ class WorkspaceChatController:
             self.client.show(text)
 
     def _failed_action(self, error, ws_id=None, agent_id=None, *, resume=None):
-        message = ('\n'.join(_safe(line) for line in str(error).split('\n'))
+        message = (terminal_text(error)
                    if isinstance(error, CLIError) else
                    'Session request failed or timed out. Check the local server and retry.')
         self._notice(message)

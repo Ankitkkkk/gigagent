@@ -8,6 +8,7 @@ import sys
 
 import cli_api
 from cli_api import CLIError
+from cli_view_contracts import _safe
 from urllib.parse import quote, urlencode
 
 
@@ -30,11 +31,6 @@ class AttachTarget:
     label: str
     hint: str
     nested: bool
-
-
-def _safe(value):
-    return "".join(char for char in str(value)
-                   if char.isprintable() and char != "\x1b")
 
 
 def _session_choices(items):
