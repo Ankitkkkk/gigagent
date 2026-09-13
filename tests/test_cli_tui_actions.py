@@ -42,7 +42,8 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         ctl._select(copy.deepcopy(self.ws))
         ctl.prompt = AsyncMock(side_effect=AssertionError('unexpected legacy prompt'))
         self.events = []
-        self.presenter = Mock()
+        self.presenter = Mock(spec=['confirm', 'attach', 'notice'])
+        self.presenter.confirm = AsyncMock()
         self.presenter.attach = AsyncMock(return_value=ActionOutcome(
             'completed', workspace_id='ws_a', agent_id='ag_a'))
         if tui:
@@ -102,6 +103,8 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
                  ('stop', {'agent_id': 'codex'}), ('stop', {'agent_id': 'ag_other'}),
                  ('stop', {'agent_id': None}), ('archive_session', {'confirmed': 'yes'}),
                  ('spawn', {'provider': '', 'cwd': None, 'name': None, 'history_mode': 'literal'}),
+                 ('spawn', {'provider': 'codex', 'cwd': None, 'name': None, 'history_mode': 'literal'}),
+                 ('spawn', {'provider': 'codex', 'cwd': '', 'name': None, 'history_mode': 'literal'}),
                  ('resume', {'agent_id': 'ag_a', 'fresh': 'yes', 'cwd': None, 'name': None}),
                  ('history', {'agent_id': 'ag_a', 'mode': 'summary'}), ('unread', []),
                  ('create_session', {'name': None})]
@@ -120,7 +123,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.message, SUMMARY_ERROR)
         with patch('cli_workspaces.os.name', 'nt'):
             for action, payload in [('resume', {'agent_id': 'ag_a', 'fresh': False, 'cwd': None, 'name': None}),
-                                    ('spawn', {'provider': 'codex', 'cwd': None, 'name': None, 'history_mode': 'literal'}),
+                                    ('spawn', {'provider': 'codex', 'cwd': '/tmp/project', 'name': None, 'history_mode': 'literal'}),
                                     ('attach', {'agent_id': 'ag_a'})]:
                 outcome = await ctl.execute_action(action, payload)
                 self.assertEqual(outcome.message, WINDOWS_TMUX_ERROR)
@@ -266,6 +269,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         other = None
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            self.assertTrue(ctl._action_lock.locked())
             duplicate = await ctl.execute_action('stop', {'agent_id': 'ag_a'})
             self.assertEqual(duplicate.status, 'cancelled')
             self.assertIn('progress', duplicate.message)
@@ -274,6 +278,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
             asyncio.get_running_loop().call_soon(barrier.set_result, None)
             await barrier
             self.assertEqual(calls, ['stop'])
+            self.assertFalse(other.done())
             first.cancel()
             barrier = asyncio.get_running_loop().create_future()
             asyncio.get_running_loop().call_soon(barrier.set_result, None)
@@ -481,3 +486,89 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         result = await ctl.dispatch_action('/spawn codex')
         self.assertEqual(result, ActionOutcome('cancelled', workspace_id='ws_a'))
         self.api.action.assert_not_called()
+
+
+    async def test_legacy_multiline_error_preserves_lines_and_removes_controls(self):
+        ctl = self.controller_with_workspace(tui=False)
+        self.api.action.side_effect = CLIError('first line\nsecond line\x1b[2J')
+        outcome = await ctl.dispatch_action('/stop codex')
+        self.assertEqual(outcome.status, 'failed')
+        self.assertEqual(outcome.message, 'first line\nsecond line[2J')
+        self.assertEqual(self.output, ['first line\nsecond line[2J'])
+
+    async def test_optional_unread_payloads_share_admission_before_lock(self):
+        ctl = self.controller_with_workspace()
+        await ctl._action_lock.acquire()
+        first = asyncio.create_task(ctl.execute_action('unread', {}))
+        second = None
+        try:
+            barrier = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(barrier.set_result, None)
+            await barrier
+            second = asyncio.create_task(ctl.execute_action('unread', {'agent_id': None}))
+            barrier = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(barrier.set_result, None)
+            await barrier
+            self.assertTrue(second.done())
+            self.assertEqual(second.result().status, 'cancelled')
+            self.assertFalse(first.done())
+            self.api.unread.assert_not_called()
+        finally:
+            ctl._action_lock.release()
+            await asyncio.gather(*[task for task in (first, second) if task], return_exceptions=True)
+        self.assertEqual(first.result().status, 'completed')
+        self.api.unread.assert_called_once_with('ws_a', None)
+
+    async def test_identical_callers_queued_behind_lock_are_deduplicated(self):
+        ctl = self.controller_with_workspace()
+        await ctl._action_lock.acquire()
+        first = asyncio.create_task(ctl.execute_action('stop', {'agent_id': 'ag_a'}))
+        second = None
+        try:
+            barrier = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(barrier.set_result, None)
+            await barrier
+            second = asyncio.create_task(ctl.execute_action('stop', {'agent_id': 'ag_a'}))
+            barrier = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(barrier.set_result, None)
+            await barrier
+            self.assertTrue(second.done())
+            self.assertEqual(second.result().status, 'cancelled')
+            self.assertFalse(first.done())
+            self.api.action.assert_not_called()
+        finally:
+            ctl._action_lock.release()
+            await asyncio.gather(*[task for task in (first, second) if task], return_exceptions=True)
+        self.assertEqual(first.result().status, 'completed')
+        self.api.action.assert_called_once_with('ws_a', 'stop', 'ag_a')
+
+    async def test_same_action_different_payloads_are_both_executed(self):
+        ctl = self.controller_with_workspace()
+        await ctl._action_lock.acquire()
+        first = asyncio.create_task(ctl.execute_action('history', {'agent_id': 'ag_a', 'mode': 'none'}))
+        second = asyncio.create_task(ctl.execute_action('history', {'agent_id': 'ag_a', 'mode': 'literal'}))
+        try:
+            barrier = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(barrier.set_result, None)
+            await barrier
+            self.assertFalse(first.done())
+            self.assertFalse(second.done())
+            self.api.action.assert_not_called()
+        finally:
+            ctl._action_lock.release()
+            await asyncio.gather(first, second, return_exceptions=True)
+        self.assertEqual(first.result().status, 'completed')
+        self.assertEqual(second.result().status, 'completed')
+        self.assertEqual(self.api.mock_calls, [
+            call.action('ws_a', 'history', 'ag_a', body={'mode': 'none'}),
+            call.action('ws_a', 'history', 'ag_a', body={'mode': 'literal'})])
+
+    async def test_noncreate_action_without_selection_fails_before_api(self):
+        ctl = self.controller_with_workspace()
+        ctl._select(None)
+        outcome = await ctl.execute_action('stop', {'agent_id': 'ag_a'})
+        self.assertEqual(outcome.status, 'failed')
+        self.assertIsNone(outcome.workspace_id)
+        self.assertIn('requires a selected session', outcome.message)
+        self.assertEqual(self.api.mock_calls, [])
+        ctl.prompt.assert_not_awaited()

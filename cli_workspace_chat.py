@@ -562,7 +562,8 @@ class WorkspaceChatController:
             self.client.show(text)
 
     def _failed_action(self, error, ws_id=None, agent_id=None, *, resume=None):
-        message = (_safe(error) if isinstance(error, CLIError) else
+        message = ('\n'.join(_safe(line) for line in str(error).split('\n'))
+                   if isinstance(error, CLIError) else
                    'Session request failed or timed out. Check the local server and retry.')
         self._notice(message)
         if resume is not None and isinstance(error, CLIError):
@@ -596,7 +597,12 @@ class WorkspaceChatController:
             self._pending_mutations.discard(task)
 
     async def wait_pending(self):
-        """Drain admitted operations and their workers without replaying requests."""
+        """Drain owned operations/workers without replay; cancellation waits for them.
+
+        Cancel queued/uncommitted action callers first: they can extend this drain.
+        A presenter's attach must never re-enter execute_action or wait_pending.
+        The action lock is not reentrant, and attach itself is owned pending work.
+        """
         while self._pending_actions or self._pending_mutations:
             tasks = self._pending_actions | self._pending_mutations
             # return_exceptions consumes completed failures even during shutdown.
@@ -626,12 +632,13 @@ class WorkspaceChatController:
             if key in ('fresh', 'confirmed'):
                 if not isinstance(value, bool):
                     raise CLIError(f'{key} must be a boolean')
-            elif value is None and (key == 'cwd' or key == 'name' and action in ('spawn', 'resume')
+            elif value is None and (key == 'cwd' and action == 'resume'
+                                    or key == 'name' and action in ('spawn', 'resume')
                                     or key == 'agent_id' and action == 'unread'):
                 continue
             elif not isinstance(value, str):
                 raise CLIError(f'{key} must be text')
-            elif key in ('provider', 'agent_id') and not value:
+            elif (key in ('provider', 'agent_id') or key == 'cwd' and action == 'spawn') and not value:
                 raise CLIError(f'{key} is required')
         mode = payload.get('history_mode', payload.get('mode'))
         if mode is not None:
@@ -655,6 +662,8 @@ class WorkspaceChatController:
         try:
             self._validate_action(action, payload)
             payload = dict(payload)
+            if action == 'unread':
+                payload.setdefault('agent_id', None)
             agent_id = payload.get('agent_id')
         except CLIError as error:
             return self._failed_action(error, ws_id, agent_id)
@@ -713,7 +722,7 @@ class WorkspaceChatController:
                 agent_id = agent['agent_id']
                 if self._accept_snapshot(version):
                     self._store_agent(agent)
-                if (payload['provider'] == 'claude' and payload['cwd'] is not None
+                if (payload['provider'] == 'claude'
                         and not (Path(payload['cwd']) / '.claude').exists()):
                     self._notice(f'Claude may be waiting at a trust prompt; use '
                                  f'/attach {shlex.quote(str(_agent_label(agent)))} to answer it.')
