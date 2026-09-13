@@ -211,6 +211,8 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ui.view.composer.text, '@claude-2')
             self.assertEqual(ui.submit_mock.await_count, 0)
             await ui.key('Tab')
+            self.assertEqual(ui.focused_control, 'clear_draft')
+            await ui.key('Tab')
             self.assertEqual(ui.focused_control, 'navigation')
             ui.view.focus_named('composer')
             await ui._send(' @cl')

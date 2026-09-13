@@ -136,7 +136,7 @@ class TuiHarness:
     @property
     def focused_control(self):
         current = self.application.layout.current_control
-        for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity'):
+        for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'clear_draft'):
             target = getattr(self.view, name)
             if current is getattr(target, 'control', target):
                 return name
@@ -189,12 +189,13 @@ class TuiHarness:
     async def activate_named(self, name):
         """Reach an actual visible button with Tab, then activate with Enter."""
         caption = {'show_archived': 'Show archived', 'new_session': 'New session',
-                   'refresh': 'Refresh'}[name]
+                   'refresh': 'Refresh', 'more_actions': 'More actions', 'agent_actions': 'Actions', 'clear_draft': 'Clear draft'}[name]
         target = None
         for container in walk(self.application.layout.container, skip_hidden=True):
             if isinstance(container, Window):
                 owner = getattr(getattr(container.content, 'text', None), '__self__', None)
-                if isinstance(owner, Button) and owner.text == caption:
+                if isinstance(owner, Button) and (owner.text == caption or
+                        caption == 'Show archived' and owner.text.startswith(caption + ' [')):
                     target = container.content
         if target is None:
             raise AssertionError('Visible button missing: ' + caption)
@@ -207,7 +208,7 @@ class TuiHarness:
 
     async def focus_field(self, name):
         captions = {'launch_mode': 'Launch mode:', 'cwd': 'Working directory',
-                    'name': 'Agent name', 'mode': 'History mode:', 'provider': 'Provider:'}
+                    'name': 'Agent name', 'mode': 'History mode [none/literal]:', 'provider': 'Provider:'}
         found, target = False, None
         for container in walk(self.dialogs.body, skip_hidden=True):
             if not isinstance(container, Window):

@@ -552,12 +552,20 @@ class TuiView:
         self.agents_window = Window(self.agents, height=lambda: 8 if self.inspecting else
                                     1 if self.screen_mode == 'compact' else 3, wrap_lines=False)
         conversation = self._frame(self.conversation_window, self._conversation_title, 'conversation')
-        framed_agents = self._frame(self.agents_window, lambda: 'Agent details · Esc Back' if self.inspecting
-                                    else 'Agents · Enter Inspect · F3 Actions', 'agents')
-        agent_area = ConditionalContainer(DynamicContainer(lambda: self.agents_window
+        self.agent_actions = Button('Actions', width=12, handler=lambda:
+            self._app().create_background_task(self.callbacks['run_action'](
+                'agents', target_id=self.state.selected_agent_id)))
+        agent_contents = VSplit([self.agents_window, self.agent_actions], padding=1)
+        framed_agents = self._frame(agent_contents, lambda: 'Agent details · Esc Back' if self.inspecting
+                                    else 'Agents · Enter Actions · F3 Actions', 'agents')
+        agent_area = ConditionalContainer(DynamicContainer(lambda: agent_contents
             if self.screen_mode == 'compact' and not self.inspecting else framed_agents),
             filter=Condition(lambda: not self.controller.plain_channel))
-        composer_area = self._frame(self.composer, self._composer_title, 'composer')
+        self.clear_draft = Button('Clear draft', width=15, handler=lambda:
+            self._app().create_background_task(self.callbacks['run_action']('clear_draft')))
+        composer_area = FloatContainer(
+            content=self._frame(self.composer, self._composer_title, 'composer'),
+            floats=[Float(top=0, right=1, content=self.clear_draft)])
         activity_area = self._frame(Window(self.activity), lambda:
             f'Activity · {self.state.notices.omitted} omitted · Esc Back', 'activity')
         main = HSplit([DynamicContainer(lambda: activity_area if self.activity_visible else conversation),
@@ -644,7 +652,15 @@ class TuiView:
         saved, self._help_focus = self._help_focus, None
         self.help_visible = False
         visible = [node.content for node in walk(self.root, skip_hidden=True) if isinstance(node, Window)]
-        if saved is not None and (saved.content in visible or self.screen_mode == 'small'):
+        if self.dialogs.future is not None:
+            modal = [node for node in walk(self.dialogs.body, skip_hidden=True)
+                     if isinstance(node, Window) and node.content.is_focusable()]
+            current = self._app().layout.current_window
+            if saved in modal:
+                self._app().layout.current_window = saved
+            elif current not in modal and modal:
+                self._app().layout.current_window = modal[0]
+        elif saved is not None and (saved.content in visible or self.screen_mode == 'small'):
             # A resize can hide the saved pane; retain its actual focus window.
             self._app().layout.current_window = saved
         else:
@@ -689,7 +705,7 @@ class TuiView:
         return style
 
     def focus_named(self, name):
-        if name not in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity'):
+        if name not in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'clear_draft'):
             raise ValueError('Unknown focus target: ' + name)
         target = getattr(self, name)
         control = getattr(target, 'control', target)
@@ -881,7 +897,7 @@ class TuiView:
                         ('retry', 'Retry unread', 'Retry delivery of unread messages'),
                         ('history', 'History settings', 'Inspect and change selected agent history mode'),
                         ('inspect_agent', 'Inspect agent', 'Show full status and recovery details')]
-        choices.append(('quit', 'Quit', 'Checkpoint and disconnect'))
+        choices.append(('quit', 'Quit', 'Disconnect' if self.controller.plain_channel else 'Checkpoint and disconnect'))
         agent_actions = {'attach', 'resume', 'stop', 'unread', 'retry', 'inspect_agent'}
         session_actions = agent_actions | {'rename_session', 'archive_session', 'new_agent', 'history'}
         result = []
@@ -908,15 +924,15 @@ class TuiView:
     def _agent_fragments(self):
         if self.inspecting:
             width = max(1, self._app().output.get_size().columns -
-                        (22 if self.screen_mode == 'wide' else 0) - 2)
+                        (22 if self.screen_mode == 'wide' else 0) - 15)
             lines = list(_wrap(self.inspector_text(), width))
             self._inspector_line = min(self._inspector_line, max(0, len(lines) - 1))
             return [('', '\n'.join(lines[self._inspector_line:]))]
         agents = self.agent_rows()
         if not agents:
-            return [('', 'No agents. Add agent via F4 Commands.')]
+            return [('', 'No agents. Actions → Add agent.')]
         fragments = []
-        width = max(1, self._app().output.get_size().columns - (22 if self.screen_mode == 'wide' else 0) - 2)
+        width = max(1, self._app().output.get_size().columns - (22 if self.screen_mode == 'wide' else 0) - 15)
         for agent in agents:
             selected = agent['agent_id'] == self.state.selected_agent_id
             if selected:
@@ -967,7 +983,11 @@ class TuiView:
 
         dispatch('f1', 'run_action', 'help')
         dispatch('f2', 'navigate', False)
-        dispatch('f3', 'run_action', 'agents')
+        @self.global_key_bindings.add('f3', filter=Condition(lambda:
+            self.screen_mode != 'small' and self.dialogs.future is None and not self.help_visible))
+        def agent_actions(event):
+            event.app.create_background_task(self.callbacks['run_action'](
+                'agents', target_id=self.state.selected_agent_id))
         dispatch('f4', 'run_action', 'commands')
         dispatch('c-q', 'quit')
 
@@ -985,12 +1005,13 @@ class TuiView:
         def focus(event):
             if self.screen_mode == 'small':
                 return
-            names = ['navigation', 'new_session', 'conversation', 'agents', 'composer'] if self.screen_mode == 'wide' else [
-                'conversation', 'agents', 'composer']
+            names = ['navigation', 'new_session', 'conversation', 'agents', 'agent_actions', 'composer', 'clear_draft'] if self.screen_mode == 'wide' else [
+                'conversation', 'agents', 'agent_actions', 'composer', 'clear_draft']
             if self.activity_visible:
                 names[names.index('conversation')] = 'activity'
             if self.controller.plain_channel:
                 names.remove('agents')
+                names.remove('agent_actions')
                 if 'new_session' in names:
                     names.remove('new_session')
             current = next((name for name in names if event.app.layout.current_control is
@@ -1035,8 +1056,9 @@ class TuiView:
                         'select_session', target_id=self.state.selected_session_id))
                 else:
                     event.app.create_background_task(self.callbacks['run_action']('new_session'))
-            elif self._selected_agent() is not None:
-                self.show_inspector()
+            else:
+                event.app.create_background_task(self.callbacks['run_action'](
+                    'agents', target_id=self.state.selected_agent_id))
 
         @bindings.add('escape', filter=has_focus(self.agents),
                       eager=Condition(lambda: not self._app().key_processor.input_queue))

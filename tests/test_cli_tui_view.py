@@ -18,6 +18,9 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             ui.view.focus_named('agents')
             await ui.key('Down')
             await ui.key('Enter')
+            self.assertIn(('run_action', 'agents', 'ag_good'), ui.calls)
+            ui.view.show_inspector()
+            await ui.wait_render()
             self.assertIn('ag_good', ui.screen_text())
 
     async def test_compact_resize_keeps_draft_and_focus(self):
@@ -345,6 +348,9 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             ui.state.selected_agent_id = 'ag_log'
             ui.view.focus_named('agents')
             await ui.key('Enter')
+            self.assertIn(('run_action', 'agents', ui.state.selected_agent_id), ui.calls)
+            ui.view.show_inspector()
+            await ui.wait_render()
             self.assertIn('Agent details', ui.screen_text())
             for _ in range(70):
                 await ui.key('Down')
@@ -698,6 +704,8 @@ class ActivityComposerFocusTests(unittest.IsolatedAsyncioTestCase):
             ui.view.focus_named('navigation')
             await ui.key('F5')
             await ui.key('Tab')
+            await ui.key('Tab')
+            self.assertEqual(ui.focused_control, 'agent_actions')
             await ui.key('Tab')
             self.assertEqual(ui.focused_control, 'composer')
             await ui.paste('typing')

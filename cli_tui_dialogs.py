@@ -13,7 +13,7 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
-from prompt_toolkit.layout import FloatContainer, HSplit, Window
+from prompt_toolkit.layout import FloatContainer, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import walk
@@ -303,6 +303,13 @@ class TuiWorkflows:
         self.state.notices.add(text)
         self.dialogs.invalidate()
 
+    async def _dialog(self, method, *args, **kwargs):
+        # Busy calls retain the existing modal and Help. No await separates
+        # hiding Help from constructing/focusing the next actual dialog.
+        if self.dialogs.future is None:
+            self.view.hide_help()
+        return await getattr(self.dialogs, method)(*args, **kwargs)
+
     def _scope(self):
         return ((self.controller.workspace or {}).get('id'), self.controller.selection_generation)
 
@@ -326,13 +333,13 @@ class TuiWorkflows:
         self.view.hide_help()
         # The controller supplies its actual candidate, including unarchive changes.
         lines = ['Session: ' + label_text(workspace.get('name') or workspace['id']),
-                 label_text(workspace['id'])]
+                 label_text(workspace['id']) + (' (archived)' if workspace.get('archived') else '')]
         for agent in workspace.get('agents', []):
             if isinstance(agent, dict) and agent.get('last_state') == 'exited':
                 prefix = 'Eligible: ' if _agent_cwd(agent) is not None else 'Skipped: '
                 lines.append(prefix + _agent_line(agent))
         lines.extend(['', text])
-        return await self.dialogs.confirm('\n'.join(lines), default=default, escape=escape)
+        return await self._dialog('confirm', '\n'.join(lines), default=default, escape=escape)
 
     async def refresh_sessions(self):
         """Refresh navigation metadata; errors retain old rows and publish once."""
@@ -343,6 +350,10 @@ class TuiWorkflows:
             response = await self.controller.list_sessions(include_archived=self.include_archived)
             if request != self._list_request:
                 return ActionOutcome('cancelled')
+            if (not isinstance(response, dict) or not isinstance(response.get('workspaces'), list)
+                    or any(not isinstance(row, dict) or not isinstance(row.get('id'), str)
+                           or not row['id'] for row in response['workspaces'])):
+                raise CLIError('Invalid session list response; retry Refresh.')
             self.view.set_sessions(response['workspaces'])
             if response.get('warning'):
                 self.notice(response['warning'])
@@ -420,18 +431,31 @@ class TuiWorkflows:
 
         def refresh():
             if loading or tasks:
+                self.notice('Loading sessions… Refresh is already in progress.')
                 return
             task = asyncio.create_task(fetch())
             tasks.add(task)
             task.add_done_callback(tasks.discard)
 
         def toggle():
-            if not loading and not tasks:
-                self.include_archived = not self.include_archived
-                refresh()
+            if loading or tasks:
+                self.notice('Loading sessions… Wait before changing Show archived.')
+                return
+            self.include_archived = not self.include_archived
+            archived.text = 'Show archived [' + ('on' if self.include_archived else 'off') + ']'
+            refresh()
 
         new = Button('New session', width=15, handler=lambda: self.dialogs.finish(ModalResult('__new__')))
-        archived = Button('Show archived', width=17, handler=toggle)
+        archived = Button('Show archived [' + ('on' if self.include_archived else 'off') + ']',
+                          width=25, handler=toggle)
+        def more_actions():
+            if self.controller.workspace is None:
+                self.notice('Select a session first')
+            else:
+                self.dialogs.finish(ModalResult('__actions__'))
+        more = Button('More actions', width=16, handler=more_actions)
+        more_reason = Label(lambda: 'More actions: Select a session first'
+                            if self.controller.workspace is None else '')
         refresh_button = Button('Refresh', handler=refresh)
         cancel = Button('Cancel', handler=self.dialogs.cancel)
         bindings = self.dialogs._bindings(cancelled)
@@ -451,11 +475,12 @@ class TuiWorkflows:
             if self.state.selected_session_id in [row['id'] for row in visible()]:
                 choose(self.state.selected_session_id)
 
-        dialog = Dialog(title='Sessions', body=HSplit([search, status, rows]),
-                        buttons=[new, archived, refresh_button, cancel], modal=False)
+        dialog = Dialog(title='Sessions', body=HSplit([search, status, rows, more_reason,
+                        VSplit([more, refresh_button, cancel], padding=1)]),
+                        buttons=[new, archived], modal=False)
         refresh()
         try:
-            return await self.dialogs._open(dialog, bindings, search, cancelled)
+            return await self._dialog('_open', dialog, bindings, search, cancelled)
         finally:
             for task in tasks:
                 task.cancel()
@@ -463,17 +488,34 @@ class TuiWorkflows:
 
     async def navigate(self, mandatory=False):
         if self.controller.plain_channel:
-            return await self.run_action('switch_channel')
+            return await self._menu('Channel actions', {'create_channel', 'switch_channel', 'history'},
+                                    None, self._scope())
         if self.dialogs.future is not None:
             return ActionOutcome('cancelled')
-        result = await self._navigation()
-        if result.cancelled:
-            if self.controller.workspace is None:
-                await self.view.callbacks['quit']()
-            return ActionOutcome('cancelled')
-        if result.value == '__new__':
-            return await self.new_session(mandatory=mandatory)
-        return await self._select(result.value, mandatory=mandatory)
+        while True:
+            result = await self._navigation()
+            if result.cancelled:
+                if mandatory or self.controller.workspace is None:
+                    await self.view.callbacks['quit']()
+                return ActionOutcome('cancelled')
+            if result.value == '__new__':
+                outcome = await self.new_session(mandatory=mandatory)
+            elif result.value == '__actions__':
+                scope = self._scope()
+                name = (self.controller.workspace or {}).get('name') or scope[0] or 'No active session'
+                outcome = await self._menu('Session actions: ' + label_text(name),
+                                           {'rename_session', 'archive_session', 'refresh'}, scope[0], scope)
+                if outcome.status == 'completed' and not self._unchanged(scope):
+                    return outcome
+                if self.controller.workspace is None:
+                    return ActionOutcome('cancelled')
+                continue
+            else:
+                outcome = await self._select(result.value, mandatory=mandatory)
+            if outcome.status == 'completed':
+                return outcome
+            if outcome.message == 'Archived session was not selected':
+                self.notice(outcome.message)
 
     async def _select(self, ident, *, mandatory=False):
         if not self._admit(('session', ident), mandatory):
@@ -499,7 +541,7 @@ class TuiWorkflows:
         fields = [Field('name', 'Session name:')]
         error = None
         while True:
-            result = await self.dialogs.form('New session', fields, submit_label='Create session', error=error)
+            result = await self._dialog('form', 'New session', fields, submit_label='Create session', error=error)
             if result.cancelled:
                 return ActionOutcome('cancelled')
             if not self._unchanged(scope):
@@ -520,7 +562,7 @@ class TuiWorkflows:
         rows = self.view.agent_rows()
         if agent_id is not None:
             return agent_id if any(a['agent_id'] == agent_id for a in rows) else None
-        result = await self.dialogs.choose('Choose agent', [dict(id=a['agent_id'],
+        result = await self._dialog('choose', 'Choose agent', [dict(id=a['agent_id'],
             label=_agent_label(a), description=_agent_line(a)) for a in rows])
         return None if result.cancelled else result.value
 
@@ -546,12 +588,12 @@ class TuiWorkflows:
                             choices=('none', 'literal'), required=True)]
             title, submit = 'New agent', 'Start agent'
         elif action == 'resume':
-            fields = [Field('cwd', 'Working directory (blank keeps stored):'),
+            fields = [Field('cwd', 'Working directory:'),
                       Field('name', 'Agent name (blank keeps stored):'),
                       Field('launch_mode', 'Launch mode:', default='ordinary', choices=('ordinary', 'fresh'))]
             title, submit = 'Resume agent', 'Resume agent'
         elif action == 'history':
-            fields = [Field('mode', 'History mode:', default=agent.get('history_mode', 'literal'),
+            fields = [Field('mode', 'History mode [none/literal]:', default=agent.get('history_mode', 'literal'),
                             choices=('literal', 'none'), required=True)]
             title, submit = 'History settings', 'Apply history mode'
         else:
@@ -564,7 +606,9 @@ class TuiWorkflows:
                 context = '\n'.join([_agent_line(current),
                     'History: ' + str(current.get('history_state') or 'unknown'),
                     str(current.get('history_note') or '')])
-            result = await self.dialogs.form(title, fields, submit_label=submit,
+                if action == 'resume':
+                    context += '\nBlank working directory keeps the stored directory.'
+            result = await self._dialog('form', title, fields, submit_label=submit,
                                              error='\n'.join(filter(None, [context, error])) or None)
             if result.cancelled:
                 return ActionOutcome('cancelled')
@@ -581,7 +625,7 @@ class TuiWorkflows:
             elif action == 'resume':
                 fresh = values['launch_mode'] == 'fresh'
                 if fresh:
-                    accepted = await self.dialogs.confirm(
+                    accepted = await self._dialog('confirm',
                         'Fresh launch for ' + _agent_label(agent) + '? [y/N]', default=False, escape=False)
                     if not self._unchanged(scope):
                         return self._cancelled_selection()
@@ -599,10 +643,33 @@ class TuiWorkflows:
         self.notice(message)
         return ActionOutcome('failed', message)
 
+    async def _menu(self, title, actions, target_id, scope):
+        choices = [choice for choice in self.view.action_choices() if choice['id'] in actions]
+        result = await self._dialog('choose', title, choices)
+        if result.cancelled:
+            return ActionOutcome('cancelled')
+        if not self._unchanged(scope):
+            return self._cancelled_selection()
+        return await self._dispatch(result.value, target_id, scope)
+
+    async def _agent_menu(self, target_id, scope):
+        if self.view.agent_rows():
+            target_id = await self._choose_agent(target_id)
+            if not self._unchanged(scope):
+                return self._cancelled_selection()
+            if target_id is None:
+                return ActionOutcome('cancelled')
+            if not any(a['agent_id'] == target_id for a in self.view.agent_rows()):
+                return self._cancelled_selection()
+            self.state.selected_agent_id = target_id
+        title = 'Agent actions' + (': ' + label_text(target_id) if target_id else '')
+        return await self._menu(title, {'new_agent', 'resume', 'stop', 'attach', 'unread',
+                                      'retry', 'history', 'inspect_agent'}, target_id, scope)
+
     async def show_palette(self):
         scope = self._scope()
         agent_id = self.state.selected_agent_id
-        result = await self.dialogs.choose('Commands', self.view.action_choices())
+        result = await self._dialog('choose', 'Commands', self.view.action_choices())
         if result.cancelled:
             return ActionOutcome('cancelled')
         if not self._unchanged(scope):
@@ -672,7 +739,7 @@ class TuiWorkflows:
             if action == 'rename_session':
                 fields, error = [Field('name', 'Session name:', default=name)], None
                 while True:
-                    result = await self.dialogs.form('Rename session', fields, submit_label='Rename', error=error)
+                    result = await self._dialog('form', 'Rename session', fields, submit_label='Rename', error=error)
                     if result.cancelled:
                         return ActionOutcome('cancelled')
                     if not self._unchanged(scope):
@@ -683,7 +750,10 @@ class TuiWorkflows:
                     error = outcome.message
                     fields = [replace(f, default=result.value[f.name]) for f in fields]
             else:
-                accepted = await self.dialogs.confirm(label_text(name) + '\nArchive session? [y/N]',
+                running = sum(a.get('last_state') in ('running', 'starting') for a in self.view.agent_rows())
+                accepted = await self._dialog('confirm', label_text(name) +
+                    f'\n{running} running agent(s) will be checkpointed and stopped.' +
+                    '\nArchive session? [y/N]',
                                                        default=False, escape=False)
                 if not self._unchanged(scope):
                     return self._cancelled_selection()
@@ -702,6 +772,8 @@ class TuiWorkflows:
                 result = await self.client.submit_outcome('/agents')
                 self.view.show_activity()
                 return ActionOutcome(result.status, result.message)
+            if action == 'agents':
+                return await self._agent_menu(target_id, scope)
             ident = await self._choose_agent(target_id)
             if not self._unchanged(scope):
                 return self._cancelled_selection()
@@ -714,8 +786,10 @@ class TuiWorkflows:
                 if action in ('attach', 'stop') and sys.platform == 'win32':
                     return self._failure(WINDOWS_TMUX_ERROR)
                 if action == 'stop':
-                    agent = next(a for a in self.view.agent_rows() if a['agent_id'] == ident)
-                    accepted = await self.dialogs.confirm('Stop ' + _agent_label(agent) + '? [y/N]',
+                    agent = next((a for a in self.view.agent_rows() if a['agent_id'] == ident), None)
+                    if agent is None:
+                        return self._cancelled_selection()
+                    accepted = await self._dialog('confirm', 'Stop ' + _agent_label(agent) + '? [y/N]',
                                                           default=False, escape=False)
                     if not self._unchanged(scope):
                         return self._cancelled_selection()
@@ -736,22 +810,23 @@ class TuiWorkflows:
         fields, error = [Field('name', 'Channel name:', required=True)], None
         while True:
             if action == 'switch_channel':
-                result = await self.dialogs.choose('Channels', [dict(id=name, label=name)
+                result = await self._dialog('choose', 'Channels', [dict(id=name, label=name)
                                                                for name in self.client.channels])
                 name = result.value
             else:
-                result = await self.dialogs.form('Create channel', fields, submit_label='Create channel', error=error)
+                result = await self._dialog('form', 'Create channel', fields, submit_label='Create channel', error=error)
                 name = result.value['name'] if not result.cancelled else None
             if result.cancelled:
                 return ActionOutcome('cancelled')
             if original != self.client.channel:
                 return self._cancelled_selection()
-            if not self._admit(('channel', name)):
+            normalized = name.strip().removeprefix('#')
+            if not self._admit(('channel', normalized)):
                 return ActionOutcome('cancelled')
             outcome = await self.client.submit_outcome(('/join ' if action == 'switch_channel' else '/create ') + name)
             if outcome.status != 'failed' or action == 'switch_channel':
                 if outcome.status == 'completed' and self.client.channel != original:
-                    self.composer_actions.switch_draft(self.composer_actions.destination_key())
+                    self.composer_actions.switch_draft(self.composer_actions.destination_key(), mandatory=True)
                     self.state.viewport.mark_seen()
                 return ActionOutcome(outcome.status, outcome.message)
             error = outcome.message

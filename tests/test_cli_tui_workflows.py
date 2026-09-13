@@ -12,6 +12,7 @@ from cli_api import CLIError
 import cli_tui_dialogs
 from cli_view_contracts import SubmitOutcome
 from cli_workspace_chat import WorkspaceChatController
+from cli_workspaces import WorkspaceAPI
 from tests._tui_harness import tui_harness
 
 
@@ -32,7 +33,7 @@ async def workflow_harness(*, rows=(), selected=None, plain=False, no_resume=Tru
     records = {row['id']: copy.deepcopy(row) for row in rows}
     if selected:
         records[selected['id']] = copy.deepcopy(selected)
-    api = Mock()
+    api = Mock(spec=WorkspaceAPI)
     api.list.side_effect = lambda *, include_archived=False: {'workspaces': [copy.deepcopy(w)
         for w in records.values() if include_archived or not w['archived']]}
     api.get.side_effect = lambda ident: copy.deepcopy(records[ident])
@@ -97,7 +98,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def modal(self, ui, text):
         await ui.wait_until(lambda: ui.dialogs.future is not None and text in ui.screen_text())
 
-    async def test_archived_only_navigation_and_decline_keeps_no_selection(self):
+    async def test_archived_decline_returns_to_mandatory_navigation(self):
         self.assertTrue(hasattr(cli_tui_dialogs, 'TuiWorkflows'), 'guided workflows missing')
         async with workflow_harness(rows=[workspace('ws_archived', 'Billing', archived=True)]) as ui:
             task = ui.start(ui.workflows.navigate(mandatory=True))
@@ -109,9 +110,388 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             await ui.select_row('ws_archived')
             await self.modal(ui, 'Unarchive it? [y/N]')
             await ui._send('n')
-            self.assertEqual((await task).status, 'cancelled')
+            await self.modal(ui, 'Show archived')
+            self.assertFalse(task.done())
             self.assertIsNone(ui.controller.workspace)
+            self.assertEqual(ui.state.selected_session_id, 'ws_archived')
+            self.assertEqual(ui.state.notices.lines.count('Archived session was not selected'), 1)
             ui.api.action.assert_not_called()
+            await ui.key('Escape')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertIn(('quit',), ui.calls)
+
+    async def test_help_during_failed_mutation_closes_before_retry_form(self):
+        import threading
+        async with workflow_harness(selected=workspace()) as ui:
+            entered, release = threading.Event(), threading.Event()
+            def rename(ident, name):
+                entered.set()
+                release.wait(2)
+                raise CLIError('rename failed exactly')
+            ui.api.rename.side_effect = rename
+            task = ui.start(ui.workflows.run_action('rename_session'))
+            await self.modal(ui, 'Rename session')
+            await ui.key('Enter')
+            try:
+                await ui.wait_until(entered.is_set)
+                await ui.key('F1')
+                self.assertTrue(ui.view.help_visible)
+                release.set()
+                await ui.wait_until(lambda: ui.dialogs.future is not None)
+                await ui.wait_render()
+                self.assertFalse(ui.view.help_visible)
+                self.assertIn('rename failed exactly', ui.screen_text())
+                self.assertEqual(ui.api.rename.call_count, 1)
+                await ui.key('Escape')
+                self.assertEqual((await task).status, 'cancelled')
+                self.assertEqual(ui.api.rename.call_count, 1)
+            finally:
+                release.set()
+
+    async def test_hide_help_keeps_newer_open_modal_focus(self):
+        async with workflow_harness(selected=workspace()) as ui:
+            await ui.key('F1')
+            task = ui.start(ui.dialogs.form('Later form', [cli_tui_dialogs.Field('name', 'Name:')],
+                                           submit_label='Save'))
+            await ui.wait_until(lambda: ui.dialogs.future is not None)
+            modal_focus = ui.application.layout.current_control
+            ui.view.hide_help()
+            self.assertIs(ui.application.layout.current_control, modal_focus)
+            await ui.key('Escape')
+            self.assertTrue((await task).cancelled)
+
+    async def test_failed_selection_returns_to_navigation_with_search(self):
+        async with workflow_harness(rows=[workspace('ws_target', 'Target')]) as ui:
+            ui.api.get.side_effect = CLIError('cannot select target')
+            task = ui.start(ui.workflows.navigate(mandatory=True))
+            await self.modal(ui, 'Show archived')
+            await ui.select_row('ws_target')
+            await self.modal(ui, 'Show archived')
+            self.assertFalse(task.done())
+            self.assertEqual(ui.state.search, 'WS_TARGET')
+            self.assertEqual(ui.state.selected_session_id, 'ws_target')
+            self.assertEqual(ui.state.notices.lines.count('cannot select target'), 1)
+            await ui.key('Escape')
+            await task
+
+    async def test_navigation_more_actions_targets_named_active_session(self):
+        async with workflow_harness(selected=workspace(), rows=[workspace('ws_other', 'Other')]) as ui:
+            task = ui.start(ui.workflows.navigate())
+            await self.modal(ui, 'Show archived')
+            await ui.paste('ws_other')
+            await ui.activate_named('more_actions')
+            await self.modal(ui, 'Session actions: One')
+            self.assertIn('Rename session', ui.screen_text())
+            self.assertIn('Archive session', ui.screen_text())
+            await ui.paste('Rename session')
+            await ui.key('Enter')
+            await self.modal(ui, 'Rename session')
+            await ui._send('\x01\x0b')
+            await ui.paste('Renamed active')
+            await ui.key('Enter')
+            await self.modal(ui, 'Show archived')
+            ui.api.rename.assert_called_once_with('ws_one', 'Renamed active')
+            self.assertEqual(ui.controller.workspace['id'], 'ws_one')
+            ui.api.action.assert_not_called()
+            await ui.key('Escape')
+            await task
+
+    async def test_agent_actions_menu_real_f3_enter_and_mouse(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            for open_menu in ('F3', 'Enter', 'mouse'):
+                if open_menu == 'F3':
+                    await ui.key('F3')
+                elif open_menu == 'Enter':
+                    ui.view.focus_named('agents')
+                    await ui.key('Enter')
+                else:
+                    await ui.wait_render()
+                    for y, row in enumerate(ui.rows):
+                        if '<' in row and 'Actions' in row:
+                            await ui.click(row.index('Actions'), y)
+                            break
+                    else:
+                        self.fail('No visible agent Actions control')
+                await self.modal(ui, 'Agent actions: ag_one')
+                for label in ('Resume agent', 'Stop agent', 'Attach', 'Unread', 'Retry unread',
+                              'History settings', 'Inspect agent'):
+                    self.assertIn(label, ui.screen_text())
+                await ui.key('Escape')
+            await ui.key('F3')
+            await self.modal(ui, 'Agent actions: ag_one')
+            await ui.paste('History settings')
+            await ui.key('Enter')
+            await self.modal(ui, 'History settings')
+            await ui.key('Enter')
+            await ui.wait_until(lambda: ui.api.action.call_count == 1)
+            ui.api.action.assert_called_once_with('ws_one', 'history', 'ag_one', body={'mode': 'literal'})
+
+    async def test_archive_confirmation_explains_checkpoint_and_stop(self):
+        async with workflow_harness(selected=workspace(agents=[agent(state='running')])) as ui:
+            task = ui.start(ui.workflows.run_action('archive_session'))
+            await self.modal(ui, 'Archive session? [y/N]')
+            self.assertIn('checkpointed and stopped', ui.screen_text())
+            self.assertIn('1 running agent', ui.screen_text())
+            await ui.key('Escape')
+            await task
+            ui.api.action.assert_not_called()
+
+    async def test_stale_agent_form_no_mutation(self):
+        async with workflow_harness(selected=workspace(agents=[agent()]),
+                                    rows=[workspace('ws_other', agents=[agent()])]) as ui:
+            task = ui.start(ui.workflows.agent_form('resume', 'ag_one'))
+            await self.modal(ui, 'Resume agent')
+            await ui.controller.select_session('ws_other')
+            ui.api.reset_mock()
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertEqual(ui.api.mock_calls, [])
+            self.assertIn('Selection changed', ui.state.notices.lines[-1])
+
+    async def test_stale_stop_confirmation_no_mutation(self):
+        async with workflow_harness(selected=workspace(agents=[agent(state='running')]),
+                                    rows=[workspace('ws_other', agents=[agent(state='running')])]) as ui:
+            task = ui.start(ui.workflows.run_action('stop', target_id='ag_one'))
+            await self.modal(ui, 'Stop ag_one?')
+            await ui.controller.select_session('ws_other')
+            ui.api.reset_mock()
+            await ui._send('y')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertEqual(ui.api.mock_calls, [])
+            self.assertIn('Selection changed', ui.state.notices.lines[-1])
+
+    async def test_stale_palette_no_mutation(self):
+        async with workflow_harness(selected=workspace(agents=[agent()]),
+                                    rows=[workspace('ws_other', agents=[agent()])]) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            task = ui.start(ui.workflows.show_palette())
+            await self.modal(ui, 'Commands')
+            await ui.controller.select_session('ws_other')
+            ui.api.reset_mock()
+            await ui.paste('New session')
+            await ui.key('Enter')
+            self.assertTrue(task.done(), 'Stale palette must not open another form')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertEqual(ui.api.mock_calls, [])
+            self.assertIn('Selection changed', ui.state.notices.lines[-1])
+
+    async def test_wide_help_blocks_f2_through_f5(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            await ui.key('F1')
+            self.assertTrue(ui.view.help_visible)
+            ui.api.reset_mock()
+            for key in ('F2', 'F3', 'F4', 'F5'):
+                await ui.key(key)
+                self.assertTrue(ui.view.help_visible)
+                self.assertIsNone(ui.dialogs.future)
+                self.assertFalse(ui.view.activity_visible)
+                self.assertIs(ui.application.layout.current_control, ui.view.help)
+                self.assertEqual(ui.api.mock_calls, [])
+            await ui.key('F1')
+
+    async def test_removed_agent_while_stop_chooser_open_cancels(self):
+        async with workflow_harness(selected=workspace(agents=[agent(state='running')])) as ui:
+            task = ui.start(ui.workflows.run_action('stop'))
+            await self.modal(ui, 'Choose agent')
+            ui.controller.workspace['agents'] = []
+            ui.api.reset_mock()
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'cancelled')
+            self.assertIn('Selection changed', ui.state.notices.lines[-1])
+            self.assertEqual(ui.api.mock_calls, [])
+
+    async def test_plain_hash_channel_admission_uses_normalized_identity(self):
+        async with workflow_harness(plain=True) as ui:
+            ui.state.drafts.set(('channel', 'other'), 'existing')
+            for i in range(49):
+                ui.state.drafts.set(('channel', str(i)), 'saved')
+            task = ui.start(ui.workflows.run_action('create_channel'))
+            await self.modal(ui, 'Create channel')
+            await ui.paste('#other')
+            await ui.key('Enter')
+            self.assertEqual((await task).status, 'completed')
+            self.assertEqual(ui.composer_actions.key, ('channel', 'other'))
+            self.assertEqual(ui.view.composer.text, 'existing')
+
+    async def test_malformed_list_response_retains_rows_and_marks_stale(self):
+        async with workflow_harness(rows=[workspace()]) as ui:
+            ui.api.list.side_effect = None
+            ui.api.list.return_value = {'warning': 'missing rows'}
+            result = await ui.workflows.refresh_sessions()
+            self.assertEqual(result.status, 'failed')
+            self.assertTrue(ui.view.sessions_stale)
+            self.assertEqual(ui.view.session_rows()[0]['id'], 'ws_one')
+            self.assertEqual(len(ui.state.notices.lines), 1)
+
+    async def test_plain_quit_description_has_no_checkpoint(self):
+        async with workflow_harness(plain=True) as ui:
+            choice = next(c for c in ui.view.action_choices() if c['id'] == 'quit')
+            self.assertEqual(choice['description'], 'Disconnect')
+
+    async def test_empty_agent_actions_can_add_and_composer_clear_is_visible(self):
+        async with workflow_harness(selected=workspace()) as ui:
+            await ui.key('F3')
+            await self.modal(ui, 'Agent actions')
+            self.assertIn('Add agent', ui.screen_text())
+            await ui.paste('Add agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'New agent')
+            await ui.key('Escape')
+            await ui.paste('clear me')
+            await ui.activate_named('clear_draft')
+            await self.modal(ui, 'Clear draft?')
+            await ui._send('y')
+            await ui.wait_until(lambda: ui.view.composer.text == '')
+
+    async def test_plain_channel_menu_exposes_create_switch_history(self):
+        async with workflow_harness(plain=True) as ui:
+            await ui.key('F2')
+            await self.modal(ui, 'Channel actions')
+            for label in ('Create channel', 'Switch channel', 'History'):
+                self.assertIn(label, ui.screen_text())
+            await ui.key('Escape')
+
+    async def test_navigation_no_active_session_disables_more_actions(self):
+        async with workflow_harness(rows=[workspace()]) as ui:
+            task = ui.start(ui.workflows.navigate(mandatory=True))
+            await self.modal(ui, 'Show archived')
+            self.assertIn('More actions: Select a session first', ui.screen_text())
+            await ui.activate_named('more_actions')
+            self.assertFalse(task.done())
+            self.assertIn('Show archived', ui.screen_text())
+            await ui.key('Escape')
+            await task
+
+    async def test_loading_buttons_explain_wait_and_archived_toggle_state(self):
+        import threading
+        async with workflow_harness(rows=[workspace()]) as ui:
+            entered, release = threading.Event(), threading.Event()
+            original = ui.api.list.side_effect
+            def listing(*, include_archived=False):
+                entered.set()
+                release.wait(2)
+                return original(include_archived=include_archived)
+            ui.api.list.side_effect = listing
+            task = ui.start(ui.workflows.navigate())
+            try:
+                await self.modal(ui, 'Loading sessions')
+                self.assertIn('Show archived [off]', ui.screen_text())
+                await ui.activate_named('show_archived')
+                self.assertIn('Wait before changing Show archived', ui.state.notices.lines[-1])
+                await ui.activate_named('refresh')
+                self.assertIn('Refresh is already in progress', ui.state.notices.lines[-1])
+                release.set()
+                await ui.wait_until(lambda: not ui.view._sessions_loading)
+                await ui.activate_named('show_archived')
+                await ui.wait_until(lambda: 'Show archived [on]' in ui.screen_text())
+                await ui.key('Escape')
+                await task
+            finally:
+                release.set()
+
+    async def test_committed_plain_channel_change_force_binds_full_destination(self):
+        async with workflow_harness(plain=True) as ui:
+            for i in range(49):
+                ui.state.drafts.set(('channel', str(i)), 'saved')
+            original = ui.client.submit_outcome
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def submit(text):
+                entered.set()
+                await release.wait()
+                return await original(text)
+            ui.client.submit_outcome = submit
+            task = ui.start(ui.workflows.run_action('create_channel'))
+            await self.modal(ui, 'Create channel')
+            await ui.paste('other')
+            await ui.key('Enter')
+            await ui.wait_until(entered.is_set)
+            await ui.paste('fiftieth')
+            release.set()
+            self.assertEqual((await task).status, 'completed')
+            self.assertEqual(ui.composer_actions.key, ('channel', 'other'))
+            self.assertEqual(ui.state.drafts.get(('channel', 'general')), 'fiftieth')
+            self.assertEqual(len(ui.state.drafts), 50)
+
+    async def test_exact_form_labels_and_archived_context(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            for action, expected in [('resume', 'Working directory:'),
+                                     ('history', 'History mode [none/literal]:')]:
+                task = ui.start(ui.workflows.agent_form(action, 'ag_one'))
+                await self.modal(ui, expected)
+                self.assertNotIn('Working directory (', ui.screen_text())
+                if action == 'resume':
+                    self.assertIn('Blank working directory keeps', ui.screen_text())
+                await ui.key('Escape')
+                await task
+            task = ui.start(ui.workflows.confirm_selection('Unarchive it? [y/N]',
+                workspace=workspace('ws_archived', archived=True)))
+            await self.modal(ui, 'Unarchive it? [y/N]')
+            self.assertLess(ui.screen_text().index('(archived)'), ui.screen_text().index('Unarchive it?'))
+            await ui.key('Escape')
+            await task
+
+    async def test_clear_draft_mouse_control_keeps_composer_full_width(self):
+        async with workflow_harness(selected=workspace(), size=(80,18)) as ui:
+            await ui.paste('mouse draft')
+            self.assertGreaterEqual(ui.view.composer.window.render_info.window_width, 75)
+            self.assertGreaterEqual(ui.view.conversation_window.render_info.window_height, 8)
+            for y, row in enumerate(ui.rows):
+                if 'Clear draft' in row:
+                    await ui.click(row.index('Clear draft'), y)
+                    break
+            else:
+                self.fail('Missing visible Clear draft')
+            await self.modal(ui, 'Clear draft?')
+            await ui._send('n')
+            self.assertEqual(ui.view.composer.text, 'mouse draft')
+
+    async def test_archive_from_more_actions_finishes_after_mandatory_selection(self):
+        async with workflow_harness(selected=workspace()) as ui:
+            task = ui.start(ui.workflows.navigate())
+            await self.modal(ui, 'Show archived')
+            await ui.activate_named('more_actions')
+            await self.modal(ui, 'Session actions: One')
+            await ui.paste('Archive session')
+            await ui.key('Enter')
+            await self.modal(ui, 'Archive session?')
+            await ui._send('y')
+            await self.modal(ui, 'Show archived')
+            await ui.activate_named('new_session')
+            await self.modal(ui, 'Session name:')
+            await ui.key('Enter')
+            await ui.wait_until(lambda: (ui.controller.workspace or {}).get('id') == 'ws_created')
+            await ui.wait_render()
+            self.assertTrue(task.done(), 'Completed mandatory selection must not reopen outer navigation')
+            self.assertEqual((await task).status, 'completed')
+            self.assertIsNone(ui.dialogs.future)
+
+    async def test_busy_selection_returns_to_navigation_without_quit(self):
+        import threading
+        async with workflow_harness(rows=[workspace('ws_first'), workspace('ws_second')]) as ui:
+            entered, release = threading.Event(), threading.Event()
+            original = ui.api.get.side_effect
+            def get(ident):
+                entered.set()
+                release.wait(2)
+                return original(ident)
+            ui.api.get.side_effect = get
+            selecting = ui.start(ui.controller.select_session('ws_first'))
+            await ui.wait_until(entered.is_set)
+            task = ui.start(ui.workflows.navigate(mandatory=True))
+            try:
+                await self.modal(ui, 'Show archived')
+                await ui.select_row('ws_second')
+                await self.modal(ui, 'Show archived')
+                self.assertFalse(task.done())
+                self.assertNotIn(('quit',), ui.calls)
+                self.assertEqual(ui.state.selected_session_id, 'ws_second')
+                release.set()
+                await selecting
+                await ui.key('Escape')
+                await task
+            finally:
+                release.set()
 
     async def test_first_escape_requests_quit(self):
         async with workflow_harness() as ui:
