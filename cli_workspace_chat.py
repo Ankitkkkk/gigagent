@@ -17,6 +17,7 @@ from cli_api import CLIError
 from cli_workspaces import (WINDOWS_TMUX_ERROR, WorkspaceCommandResult,
                             attach_agent, format_workspace_result, require_tmux_platform,
                             resolve_agent, resolve_session)
+from cli_view_contracts import ViewEvent
 
 
 ROOT = Path(__file__).resolve().parent
@@ -338,6 +339,22 @@ class WorkspaceChatController:
         self._selection_version = 0
         self._state_revision = 0
         self._poll_error = None
+        self.presentation = None
+        self.on_view_change = None
+
+    def bind_view(self, presentation, notify):
+        self.presentation = presentation
+        self.on_view_change = notify
+        self.client.on_workspace = self.on_workspace
+        self.client.on_settings = self.on_settings
+
+    def _notify_view(self, kind, *, agent_id=None, text=None):
+        if self.on_view_change is not None:
+            workspace_id = self.workspace.get('id') if self.workspace is not None else None
+            self.on_view_change(ViewEvent(
+                'controller', kind, self._state_revision,
+                workspace_id=workspace_id, agent_id=agent_id,
+                selection_generation=self._selection_version, text=text))
 
     async def initialize(self, prompt):
         self.prompt = prompt
@@ -370,6 +387,7 @@ class WorkspaceChatController:
         if workspace is not None:
             self.client.channel = workspace['channel']
             self.client.pending_channel = None
+        self._notify_view('selection')
 
     async def close(self):
         if self.workspace is None or self._closed:
@@ -482,9 +500,10 @@ class WorkspaceChatController:
                 self._failed_launches.discard(agent_id)
             line = self._agent_status(agent)
             states[agent_id] = line
-            if self._agent_states.get(agent_id) != line:
+            if self.on_view_change is None and self._agent_states.get(agent_id) != line:
                 self.client.show(line)
         self._agent_states = states
+        self._notify_view('agent_state')
 
     def on_settings(self, data):
         if self.workspace is not None:

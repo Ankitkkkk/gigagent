@@ -16,6 +16,7 @@ from cli_api import (CLIError, SessionTokenParser, fetch_session_token, get_api,
 from cli_workspaces import (WorkspaceAPI, attach_agent, format_workspace_result,
                             require_tmux_platform, resolve_agent, run_workspace_command)
 from cli_workspace_chat import WorkspaceChatController, ensure_server
+from cli_view_contracts import SubmitOutcome, ViewEvent
 from config_loader import load_config
 
 
@@ -57,6 +58,9 @@ class ChatClient:
         self.pending_channel = None
         self.on_workspace = None
         self.on_settings = None
+        self.on_view_change = None
+        self.view_revision = 0
+        self.connection_state = "connecting"
         self._output_paused = False
         self._output_buffer = deque(maxlen=10000)
         self._output_omitted = 0
@@ -90,7 +94,23 @@ class ChatClient:
             self.messages.popitem(last=False)
         return fresh
 
+    def _notify_view(self, kind, *, message_ids=(), text=None):
+        self.view_revision += 1
+        if self.on_view_change is not None:
+            self.on_view_change(ViewEvent('client', kind, self.view_revision,
+                                          message_ids=tuple(message_ids), text=text))
+
+    def _set_connection_state(self, state, *, force=False):
+        if not force and self.connection_state == state:
+            return
+        self.connection_state = state
+        self._notify_view("connection")
+
     def show_message(self, message):
+        if self.on_view_change is not None:
+            message_id = message.get("id")
+            self._notify_view("messages", message_ids=(() if message_id is None else (message_id,)))
+            return
         self.show(f"[{message.get('time', '')}] {message.get('sender', '?')}: "
                   f"{message.get('text', '')}")
         for attachment in message.get("attachments", []):
@@ -103,14 +123,20 @@ class ChatClient:
         messages = sorted((m for m in self.messages.values()
                            if m.get("channel", "general") == self.channel),
                           key=lambda m: (m.get("timestamp", 0), m["id"]))
+        messages = messages[-self.history_limit:]
+        if self.on_view_change is not None:
+            self._notify_view("history", message_ids=(m["id"] for m in messages))
+            return
         self.show(f"# {self.channel}")
-        for message in messages[-self.history_limit:]:
+        for message in messages:
             self.show_message(message)
 
     def handle_event(self, event):
         kind = event.get("type")
         data = event.get("data", {})
         if kind == "settings":
+            previous_channel = self.channel
+            show_history = False
             self.channels = data.get("channels", ["general"])
             if self.username is None:
                 self.username = data.get("username", "user")
@@ -119,14 +145,21 @@ class ChatClient:
             elif self.pending_channel in self.channels:
                 self.channel = self.pending_channel
                 self.pending_channel = None
-                self.history()
+                show_history = True
             elif self.channel not in self.channels:
                 self.show(f"Channel {self.channel!r} is unavailable; using #general.")
                 self.channel = "general"
+            self._notify_view("settings")
+            if self.channel != previous_channel:
+                self._notify_view("channel")
+            if show_history:
+                self.history()
         elif kind == "agents":
             self.agent_names = list(data)
+            self._notify_view("status")
         elif kind == "status":
             self.status = data
+            self._notify_view("status")
         elif kind == "workspace" and self.on_workspace is not None:
             self.on_workspace(data)
         elif kind == "jobs":
@@ -142,30 +175,45 @@ class ChatClient:
             for message in event.get("messages", []):
                 self.remember(message)
         elif kind == "history_complete":
-            self.history()
             self.ready.set()
+            self.history()
         elif kind == "message":
             fresh = self.remember(data)
             if fresh and self.ready.is_set() and data.get("channel", "general") == self.channel:
                 self.show_message(data)
+            else:
+                self._notify_view("messages", message_ids=(data["id"],))
         elif kind == "message_update":
-            self.remember(event["message"])
+            updated = event["message"]
+            self.remember(updated)
+            self._notify_view("messages", message_ids=(updated["id"],))
         elif kind == "delete":
-            for key in event.get("ids", []):
+            ids = event.get("ids", [])
+            for key in ids:
                 self.messages.pop(key, None)
+            self._notify_view("messages", message_ids=ids)
         elif kind == "clear":
             channel = event.get("channel")
+            removed = tuple(k for k, m in self.messages.items()
+                            if not channel or m.get("channel", "general") == channel)
             self.messages = OrderedDict((k, m) for k, m in self.messages.items()
                                         if channel and m.get("channel", "general") != channel)
+            self._notify_view("messages", message_ids=removed)
             self.show(f"History cleared: #{channel or 'all channels'}")
         elif kind == "agent_renamed":
-            for message in self.messages.values():
+            changed = []
+            for key, message in self.messages.items():
                 if message.get("sender") == event.get("old_name"):
                     message["sender"] = event["new_name"]
+                    changed.append(key)
+            self._notify_view("messages", message_ids=changed)
         elif kind == "channel_renamed":
-            for message in self.messages.values():
+            changed = []
+            for key, message in self.messages.items():
                 if message.get("channel") == event["old_name"]:
                     message["channel"] = event["new_name"]
+                    changed.append(key)
+            self._notify_view("channel", message_ids=changed)
         elif kind.endswith("_error"):
             self.show(event.get("error", "Request failed"))
 
@@ -173,6 +221,7 @@ class ChatClient:
         from websockets.asyncio.client import connect
         from websockets.exceptions import WebSocketException
 
+        self._set_connection_state("connecting", force=True)
         while True:
             try:
                 token = await asyncio.to_thread(fetch_session_token, self.url)
@@ -181,6 +230,7 @@ class ChatClient:
                                    close_timeout=2, max_size=16 * 1024 * 1024) as socket:
                     self.websocket = socket
                     self.messages.clear()
+                    self._set_connection_state("connected")
                     self.show(f"Connected to {self.url}")
                     async for raw in socket:
                         self.handle_event(json.loads(raw))
@@ -190,6 +240,7 @@ class ChatClient:
             finally:
                 self.websocket = None
                 self.ready.clear()
+                self._set_connection_state("reconnecting")
             await asyncio.sleep(3)
 
     async def send(self, event):
@@ -206,33 +257,45 @@ class ChatClient:
             return False
 
     async def submit(self, text):
+        return (await self.submit_outcome(text)).keep_running
+
+    async def submit_outcome(self, text):
         text = text.strip()
         if not text:
-            return True
+            return SubmitOutcome("completed")
         command, _, argument = text.partition(" ")
         argument = argument.strip().removeprefix("#")
         if command in ("/quit", "/exit"):
-            return False
+            return SubmitOutcome("completed", keep_running=False)
         if command == "/help":
             self.show(HELP)
         elif command == "/channels":
             self.show("  ".join("#" + ch for ch in self.channels) or "Connecting...")
         elif command == "/join":
             if argument not in self.channels:
-                self.show("Unknown channel. Use /channels or /create NAME.")
+                message = "Unknown channel. Use /channels or /create NAME."
+                self.show(message)
+                return SubmitOutcome("failed", message=message)
             else:
                 self.channel = argument
+                self._notify_view("channel")
                 self.history()
         elif command == "/create":
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,19}", argument):
-                self.show("Use 1-20 lowercase letters, numbers, or hyphens; start with a letter or number.")
+                message = "Use 1-20 lowercase letters, numbers, or hyphens; start with a letter or number."
+                self.show(message)
+                return SubmitOutcome("failed", message=message)
             elif argument in self.channels:
                 self.channel = argument
+                self._notify_view("channel")
                 self.history()
             else:
                 self.pending_channel = argument
-                if not await self.send({"type": "channel_create", "name": argument}):
+                accepted = await self.send({"type": "channel_create", "name": argument})
+                if not accepted:
                     self.pending_channel = None
+                    return SubmitOutcome("failed")
+                return SubmitOutcome("completed", sent=True)
         elif command == "/history":
             self.history()
         elif command == "/agents":
@@ -250,9 +313,10 @@ class ChatClient:
             if not records:
                 self.show("No records.")
         else:
-            await self.send({"type": "message", "text": text,
-                             "channel": self.channel, "sender": self.username})
-        return True
+            accepted = await self.send({"type": "message", "text": text,
+                                        "channel": self.channel, "sender": self.username})
+            return SubmitOutcome("completed" if accepted else "failed", sent=accepted)
+        return SubmitOutcome("completed")
 
 
 async def interactive(client, controller=None):
