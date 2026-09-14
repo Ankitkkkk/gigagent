@@ -314,7 +314,8 @@ class RuntimeRegistry:
                     del self._reserved[preferred_name]
         return result
 
-    def deregister(self, name: str, reclaimable: bool = False) -> dict | None:
+    def deregister(self, name: str, reclaimable: bool = False, *, expected_token: str | None = None,
+                   rename_remaining: bool = True) -> dict | None:
         """Remove an instance. Name is reserved for GRACE_PERIOD seconds.
 
         `reclaimable` decides whether the token survives:
@@ -334,6 +335,8 @@ class RuntimeRegistry:
             if name not in self._instances:
                 return None
             inst_removed = self._instances[name]
+            if expected_token is not None and inst_removed.token != expected_token:
+                return None
             base = inst_removed.base
             del self._instances[name]
             self._reserved[name] = time.time()
@@ -343,7 +346,7 @@ class RuntimeRegistry:
             # If family drops to 1 instance with a numbered name, rename back to base
             renamed_back = None
             family = [i for i in self._instances.values() if i.base == base]
-            if len(family) == 1:
+            if rename_remaining and len(family) == 1:
                 remaining = family[0]
                 r_base, r_slot = self._parse_name(remaining.name)
                 if r_base == base and remaining.name != base:

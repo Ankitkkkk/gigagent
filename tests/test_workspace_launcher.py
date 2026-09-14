@@ -42,6 +42,11 @@ class FakePopen:
 
 
 class FakeTmux:
+    def remove_session(self, name):
+        self.kill_session(name)
+        if self.has_session(name):
+            raise RuntimeError('session is still running')
+
     def __init__(self):
         self.sessions = set()
         self.killed = []
@@ -277,6 +282,61 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(json.loads(ident.read_text())["floor_id"], 0)
         self.assertEqual(self.registry.get_instance("claude-1")["state"], "active")
 
+    def test_provider_args_persist_and_reach_wrapper_after_separator(self):
+        flags = ['--model', 'custom model', '--port', '9999', '--label', 'provider label', '$(touch nope)']
+        ag = self.launcher.spawn(self.ws['id'], 'claude', str(self.proj), 'none', provider_args=flags)
+        cmd = self.popen_calls[-1][0]
+        self.assertEqual(cmd[cmd.index('--') + 1:], ['--session-id', ag['native_session_id'], *flags])
+        reloaded = WorkspaceStore(self.data / 'workspaces.json', self.data / 'identity')
+        self.assertEqual(reloaded.get_agent(self.ws['id'], ag['agent_id'])['provider_args'], flags)
+
+    def test_resume_reuses_replaces_and_clears_provider_args(self):
+        ag = self._running_claude()
+        proj = self.home / '.claude' / 'projects' / 'x'
+        proj.mkdir(parents=True)
+        (proj / f"{ag['native_session_id']}.jsonl").write_text('{}\n')
+        self.store.update_agent(self.ws['id'], ag['agent_id'], provider_args=['--model', 'one'])
+        for supplied, expected in [(None, ['--model', 'one']), (['--model', 'two'], ['--model', 'two']), ([], [])]:
+            self.launcher.stop(self.ws['id'], ag['agent_id'])
+            got = self.launcher.resume(self.ws['id'], ag['agent_id'], provider_args=supplied)
+            cmd = self.popen_calls[-1][0]
+            self.assertEqual(got['provider_args'], expected)
+            self.assertEqual(cmd[cmd.index('--') + 1:], ['--resume', ag['native_session_id'], *expected])
+
+    def test_invalid_provider_args_do_not_register_or_launch(self):
+        for bad in ('--model one', [1], ['bad\x00arg']):
+            with self.assertRaises(LaunchError) as caught:
+                self.launcher.spawn(self.ws['id'], 'claude', str(self.proj), 'none', provider_args=bad)
+            self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(self.popen_calls, [])
+        self.assertEqual(self.registry.get_all_names(), [])
+
+    def test_api_passes_flags_through_spawn_and_fresh_resume(self):
+        import asyncio
+        import app
+        class Request:
+            def __init__(self, payload): self.payload = payload
+            async def body(self): return json.dumps(self.payload).encode()
+        with patch.object(app, 'workspace_launcher', self.launcher):
+            got = asyncio.run(app.spawn_agent(self.ws['id'], Request({
+                'provider': 'claude', 'cwd': str(self.proj), 'history_mode': 'none',
+                'provider_args': ['--model', 'one']})))
+            self.assertEqual(got['provider_args'], ['--model', 'one'])
+            self.launcher.stop(self.ws['id'], got['agent_id'])
+            changed = asyncio.run(app.resume_agent(self.ws['id'], got['agent_id'], Request({
+                'fresh': True, 'provider_args': ['--model', 'two']})))
+            self.assertEqual(changed['provider_args'], ['--model', 'two'])
+            self.assertEqual(self.popen_calls[-1][0][-2:], ['--model', 'two'])
+
+    def test_failed_resume_restores_saved_provider_flags(self):
+        ag = self._running_claude()
+        self.store.update_agent(self.ws['id'], ag['agent_id'], provider_args=['--model', 'saved'])
+        self.launcher.stop(self.ws['id'], ag['agent_id'])
+        with patch.object(self.launcher, '_popen', side_effect=OSError('launch failed')):
+            with self.assertRaises(LaunchError):
+                self.launcher.resume(self.ws['id'], ag['agent_id'], fresh=True, provider_args=['--model', 'new'])
+        self.assertEqual(self.agent(ag)['provider_args'], ['--model', 'saved'])
+
     def test_spawn_none_mode_floor_is_latest_plus_one(self):
         for i in range(3):
             self.messages.add("ankit", f"m{i}", channel=self.ws["channel"])
@@ -337,6 +397,29 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.ws["id"])["agents"], [])
         identities = list((self.data / "identity").glob("*")) if (self.data / "identity").exists() else []
         self.assertEqual(identities, [])
+
+    def test_ready_prompt_names_custom_agent_even_without_history(self):
+        for mode in ('none', 'literal'):
+            with self.subTest(mode=mode):
+                name = 'user-provided-' + mode
+                ag = self.launcher.spawn(self.ws['id'], 'claude', str(self.proj), mode, name=name)
+                self.launcher.on_heartbeat(name, ready=True, pid=77)
+                queued = self.queue(name)
+                self.assertEqual(len(queued), 1)
+                self.assertIn(name, queued[0]['prompt'])
+                self.assertIn(self.ws['channel'], queued[0]['prompt'])
+                self.assertIn('assigned agent name', queued[0]['prompt'])
+                self.assertEqual('since_id=-1' in queued[0]['prompt'], mode == 'literal')
+                self.launcher._after_ready(self.ws['id'], ag['agent_id'], ag['last_launch']['nonce'])
+                self.assertEqual(len(self.queue(name)), 1)
+
+    def test_identity_enqueue_failure_leaves_startup_retryable(self):
+        ag = self.launcher.spawn(self.ws['id'], 'claude', str(self.proj), 'none', name='reviewer')
+        with patch.object(self.agents, 'trigger_sync', side_effect=OSError('queue unavailable')):
+            self.launcher.on_heartbeat('reviewer', ready=True, pid=77)
+        self.assertFalse(self.agent(ag)['last_launch'].get('identity_prompt_sent'))
+        self.launcher.on_heartbeat('reviewer', ready=True, pid=77)
+        self.assertIn('reviewer', self.queue('reviewer')[0]['prompt'])
 
     def test_ready_heartbeat_runs_literal_catchup(self):
         ag = self.launcher.spawn(self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="literal")
@@ -469,9 +552,24 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--resume") + 1], sid)
         self.launcher.on_heartbeat("claude-1", ready=True, pid=2)
         q = self.queue("claude-1")
-        self.assertEqual(len(q), 1)
-        self.assertIn("While you were away, 2 messages", q[0]["prompt"])
-        self.assertIn(f"since_id={m1['id'] - 1}", q[0]["prompt"])
+        self.assertEqual(len(q), 3)  # Spawn identity, resume identity, then unread bundle.
+        self.assertIn("claude-1", q[-2]["prompt"])
+        self.assertIn("While you were away, 2 messages", q[-1]["prompt"])
+        self.assertIn(f"since_id={m1['id'] - 1}", q[-1]["prompt"])
+        self.launcher._after_ready(self.ws['id'], ag['agent_id'], got['last_launch']['nonce'])
+        self.assertEqual(len(self.queue('claude-1')), 3)
+
+    def test_failed_startup_bundle_retries_without_repeating_identity(self):
+        ag = self.launcher.spawn(self.ws['id'], 'claude', str(self.proj), 'none')
+        launch = dict(ag['last_launch'], kind='resume')
+        self.store.update_agent(self.ws['id'], ag['agent_id'], last_launch=launch)
+        with patch.object(self.launcher, '_send_bundle', side_effect=[OSError('queue unavailable'), 0]) as send:
+            with self.assertLogs('workspace_launcher', level='ERROR'):
+                self.launcher.on_heartbeat('claude-1', ready=True, pid=77)
+            self.launcher.on_heartbeat('claude-1', ready=True, pid=77)
+            self.launcher.on_heartbeat('claude-1', ready=True, pid=77)
+            self.assertEqual(send.call_count, 2)
+        self.assertEqual(len(self.queue('claude-1')), 1)
 
     def test_resume_consumes_pending_literal_catchup_once(self):
         ag = self._running_claude(mode="literal")
@@ -491,7 +589,8 @@ class LauncherTests(unittest.TestCase):
         self.launcher.stop(self.ws["id"], ag["agent_id"])
         self.launcher.resume(self.ws["id"], ag["agent_id"])
         self.launcher.on_heartbeat("claude-1", ready=True, pid=3)
-        self.assertEqual(len(self.queue("claude-1")), before + 1)
+        self.assertEqual(len(self.queue("claude-1")), before + 2)
+        self.assertNotIn("since_id=-1", self.queue("claude-1")[-1]["prompt"])
 
     def test_resume_name_in_use_and_rename(self):
         ag = self._running_claude()

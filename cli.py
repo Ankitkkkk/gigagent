@@ -333,7 +333,7 @@ async def interactive(client, controller=None):
     with patch_stdout():
         if controller is not None and not await controller.initialize(prompt):
             return
-        client.show("agentchattr terminal | /help for commands | /quit to exit")
+        client.show("gigagent terminal | /help for commands | /quit to exit")
         receiver = asyncio.create_task(client.receive_forever())
         tasks = [receiver]
         try:
@@ -407,8 +407,8 @@ def choose_interactive_mode(*, plain, stdin_tty, stdout_tty, platform, term):
     return "tui"
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(description="Terminal chat and shell commands for agentchattr.")
+def build_parser(*, prog=None):
+    parser = argparse.ArgumentParser(prog=prog, description="gigagent: terminal chat and shell commands for Agentchattr.")
     parser.set_defaults(url=None, channel=None, session=None, name=None, history=30,
                         timeout=15, json=False, command="chat", agent_name=None,
                         history_mode="literal", cwd=None, fresh=False, archived=False,
@@ -471,12 +471,14 @@ def build_parser():
             subparser.add_argument("session_name", metavar="NAME")
         elif command == "spawn":
             subparser.add_argument("provider", metavar="PROVIDER")
+            subparser.add_argument('--provider-flags', help='Quoted provider flags; saved for later resumes')
             subparser.add_argument("--cwd", required=True)
             subparser.add_argument("--agent-name", default=argparse.SUPPRESS)
             subparser.add_argument("--history-mode", default=argparse.SUPPRESS,
                                    metavar="MODE")
         elif command == "resume":
             subparser.add_argument("agent", metavar="AGENT")
+            subparser.add_argument('--provider-flags', help='Replace saved provider flags; empty text clears them')
             subparser.add_argument("--fresh", action="store_true",
                                    default=argparse.SUPPRESS)
             subparser.add_argument("--agent-name", default=argparse.SUPPRESS)
@@ -496,8 +498,8 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
-    parser = build_parser()
+def main(argv=None, *, prog=None):
+    parser = build_parser(prog=prog)
     args = parser.parse_args(argv)
     args.command = args.command or "chat"
     if args.plain and args.command != "chat":

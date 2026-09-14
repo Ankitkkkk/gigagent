@@ -24,6 +24,27 @@ from _workspace_helpers import app_cfg as cfg
 
 
 class HooksTests(unittest.TestCase):
+    def test_waiting_hint_is_authenticated_transient_and_clears(self):
+        with patch.dict(mcp_bridge._input_waiting, {}, clear=True):
+            def report(body, token=self.reg['token']):
+                return asyncio.run(app_module.heartbeat('different-name', self.request(token, body)))
+            report({'waiting_for_input': True}, token=None)
+            self.assertFalse(mcp_bridge.is_waiting_for_input('different-name'))
+            report({'waiting_for_input': True})
+            self.assertTrue(mcp_bridge.is_waiting_for_input('claude-1'))
+            self.assertFalse(mcp_bridge.is_waiting_for_input('different-name'))
+            self.assertTrue(app_module.agents.get_status()['claude-1']['waiting_for_input'])
+            record = self.ws_store.get(self.ws['id'])
+            self.assertTrue(app_module._ws_view(record)['agents'][0]['waiting_for_input'])
+            self.assertNotIn('waiting_for_input', self.ws_store.get(self.ws['id'])['agents'][0])
+            report({'ready': True})
+            report({'waiting_for_input': 'false'})
+            self.assertTrue(mcp_bridge.is_waiting_for_input('claude-1'))
+            self.ws_store.update_agent(self.ws['id'], self.agent['agent_id'], last_state='exited')
+            self.assertFalse(app_module._ws_view(self.ws_store.get(self.ws['id']))['agents'][0]['waiting_for_input'])
+            report({'waiting_for_input': False})
+            self.assertFalse(mcp_bridge.is_waiting_for_input('claude-1'))
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)

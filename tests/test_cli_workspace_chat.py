@@ -706,6 +706,13 @@ class ControllerFixture:
 
 
 class ControllerCommandTests(ControllerFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_provider_flags_pass_through_slash_spawn(self):
+        flags = '--model "custom model" --verbose'
+        await self.handle('/spawn codex --cwd ' + shlex.quote(self.cwd) +
+                          ' --history-mode none --provider-flags=' + shlex.quote(flags))
+        self.assertEqual(self.api.action.call_args.kwargs['body']['provider_args'],
+                         ['--model', 'custom model', '--verbose'])
+
     async def test_spawn_parses_quoted_values_and_stores_real_record(self):
         path = str(Path(self.cwd) / 'project space')
         self.api.action.return_value = dict(self.agent, agent_id='ag_new',

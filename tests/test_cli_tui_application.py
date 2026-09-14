@@ -21,6 +21,49 @@ from tests.test_cli_workspace_chat import ControlledSocket
 
 
 class ApplicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_f7_releases_terminal_mouse_without_changing_message_focus(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            ui.view.focus_named('composer')
+            await ui.type_text('keep draft')
+            await ui.key('Left')
+            cursor = ui.view.composer.buffer.cursor_position
+            self.assertTrue(ui.application.mouse_support())
+            output_start = len(ui.stream.getvalue())
+            await ui._send('\x1b[18~')
+            self.assertFalse(ui.application.mouse_support())
+            self.assertIn('\x1b[?1000l', ui.stream.getvalue()[output_start:])
+            self.assertIn('Ctrl+Shift+C', ui.screen_text())
+            self.assertEqual(ui.focused_control, 'composer')
+            self.assertEqual(ui.view.composer.buffer.cursor_position, cursor)
+            output_start = len(ui.stream.getvalue())
+            await ui._send('\x1b[18~')
+            self.assertTrue(ui.application.mouse_support())
+            self.assertIn('\x1b[?1000h', ui.stream.getvalue()[output_start:])
+            self.assertEqual(ui.focused_control, 'composer')
+            self.assertEqual(ui.view.composer.buffer.cursor_position, cursor)
+            self.assertEqual(ui.view.composer.text, 'keep draft')
+
+    async def test_f7_selection_can_exit_after_resize_or_opening_dialog(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            await ui._send('\x1b[18~')
+            await ui.resize(70, 16)
+            self.assertIn('F7 return', ui.screen_text())
+            await ui._send('\x1b[18~')
+            self.assertTrue(ui.application.mouse_support())
+            await ui.resize(120, 35)
+            await ui._send('\x1b[18~')
+            await ui.key('F4')
+            await self.modal(ui, 'Commands')
+            focused = ui.application.layout.current_control
+            await ui._send('\x1b[18~')
+            self.assertTrue(ui.application.mouse_support())
+            self.assertIs(ui.application.layout.current_control, focused)
+            await ui._send('\x1b[18~')
+            self.assertTrue(ui.application.mouse_support())
+            await ui.key('Escape')
+
     @asynccontextmanager
     async def ui(self, *, rows=(), selector=None, selected=None, plain=False,
                  no_resume=True, real_terminal=False, prior_hooks=None, **kwargs):
@@ -139,6 +182,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         async with self.ui(selected=workspace()) as ui:
             await self.connected(ui)
             await ui.key('F1')
+            # Key processing/render can precede the scheduled Help workflow.
+            await ui.wait_until(lambda: ui.view.help_visible)
             self.assertTrue(ui.view.help_visible)
             self.assertIn('/history            Jump to conversation', ui.view._help_text)
             self.assertNotIn('Show recent channel messages', ui.view._help_text)

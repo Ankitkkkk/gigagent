@@ -20,6 +20,8 @@ import sys
 import time
 import uuid
 
+from prompt_signals import PromptMonitor, generic_waiting_for_input as waiting_for_input
+
 TMUX_COMMAND_TIMEOUT = 5.0
 
 
@@ -166,30 +168,40 @@ def _without_codex_input_animation(output: bytes) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def get_activity_checker(session_name, trigger_flag=None, *, provider=""):
+def get_activity_checker(session_name, trigger_flag=None, *, provider="", adapter=None, events_dir=None):
     """Return a callable that detects tmux pane output by hashing content."""
     last_hash = [None]
+    if adapter is None:
+        from providers import get_adapter
+        adapter = get_adapter(provider)
+    prompts = PromptMonitor(adapter, events_dir)
 
     def check():
         # External trigger: queue watcher injected a message
-        if trigger_flag is not None and trigger_flag[0]:
+        triggered = trigger_flag is not None and bool(trigger_flag[0])
+        if triggered:
             trigger_flag[0] = False
-            return True
         try:
             result = subprocess.run(
                 ["tmux", "capture-pane", "-t", session_name, "-p"],
                 capture_output=True, timeout=2,
             )
+            if result.returncode != 0:
+                check.waiting_for_input = prompts.observe(None)
+                return triggered
             output = result.stdout
+            check.waiting_for_input = prompts.observe(output)
             if provider == "codex":
                 output = _without_codex_input_animation(output)
             h = hash(output)
             changed = last_hash[0] is not None and h != last_hash[0]
             last_hash[0] = h
-            return changed
+            return triggered or changed
         except Exception:
-            return False
+            check.waiting_for_input = False
+            return triggered
 
+    check.waiting_for_input = False
     return check
 
 

@@ -1,6 +1,7 @@
 """Awaitable, terminal-safe dialogs hosted by one running Application."""
 
 import asyncio
+import shlex
 import sys
 from bisect import bisect_right
 from dataclasses import dataclass, replace
@@ -21,12 +22,15 @@ from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.widgets import Button, Dialog, Label, RadioList, TextArea
 
 from cli_api import CLIError
+from provider_args import parse_provider_flags
 from cli_tui_state import body_text, label_text
 from cli_view_contracts import ActionOutcome
 from cli_workspace_chat import _agent_cwd, _agent_line, _agent_label, SESSION_HELP
 from cli_workspaces import WINDOWS_TMUX_ERROR
 
 _NAVIGATION_BUSY = object()
+_CHOICE_BACK = object()
+_ADD_AGENT = object()
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,7 @@ class Field:
     default: str = ''
     choices: tuple = ()
     required: bool = False
+    read_only: bool = False
 
 
 class _SafeInput(Processor):
@@ -199,6 +204,8 @@ class DialogHost:
                                     default=field.default, select_on_focus=True)
             else:
                 control = TextArea(text=field.default, multiline=False, height=1,
+                                   read_only=field.read_only,
+                                   focus_on_click=True,
                                    input_processors=[_SafeInput()])
             controls[field.name] = control
             rows.extend([Label(label_text(field.label)), control])
@@ -227,10 +234,11 @@ class DialogHost:
 
         dialog = Dialog(title=label_text(title), body=HSplit(rows),
                         buttons=[submit_button, cancel_button], modal=False)
-        first = next(iter(controls.values()), submit_button)
+        first = next((controls[field.name] for field in fields if not field.read_only), submit_button)
         return await self._open(dialog, bindings, first, cancelled)
 
-    async def choose(self, title, choices, *, searchable=True):
+    async def choose(self, title, choices, *, searchable=True, cancel_label='Cancel',
+                     back_key=None, extra_buttons=()):
         """Choose mapping ID; descriptions and disabled reasons stay visible."""
         cancelled = ModalResult(cancelled=True)
         if self.future is not None:
@@ -275,27 +283,61 @@ class DialogHost:
             if choice is not None and not choice.get('disabled_reason'):
                 self.finish(ModalResult(choice['id']))
 
+        user_cancel = ModalResult(_CHOICE_BACK, cancelled=True) if back_key else cancelled
         select_button = Button('Select', handler=submit)
-        cancel_button = Button('Cancel', handler=self.cancel)
-        bindings = self._bindings(cancelled)
+        cancel_button = Button(cancel_label, handler=lambda: self.finish(user_cancel))
+        action_buttons = [Button(label_text(label), handler=lambda value=value:
+                                 self.finish(ModalResult(value))) for label, value in extra_buttons]
+        buttons = [select_button, *action_buttons, cancel_button]
+        button_focus = Condition(lambda: self.app_getter().layout.current_control in
+                                 [button.control for button in buttons])
+        bindings = self._bindings(user_cancel)
+        if back_key is not None:
+            @bindings.add(back_key, eager=True)
+            def back(event):
+                self.finish(user_cancel)
+
+        @bindings.add('left', filter=button_focus | has_focus(rows), eager=True)
+        @bindings.add('right', filter=button_focus | has_focus(rows), eager=True)
+        def move_button(event):
+            current = event.app.layout.current_control
+            controls = [button.control for button in buttons]
+            if current in controls:
+                offset = -1 if event.key_sequence[-1].key == 'left' else 1
+                index = (controls.index(current) + offset) % len(buttons)
+            else:
+                index = 0
+            event.app.layout.focus(buttons[index])
 
         @bindings.add('up', eager=True)
         @bindings.add('down', eager=True)
         def move(event):
             nonlocal selected_id
-            if visible:
-                ids = [choice['id'] for choice in visible]
-                index = ids.index(selected_id)
-                offset = -1 if event.key_sequence[-1].key == 'up' else 1
-                selected_id = ids[max(0, min(len(ids) - 1, index + offset))]
+            down = event.key_sequence[-1].key == 'down'
+            if button_focus():
+                if not down:
+                    event.app.layout.focus(rows if visible or not searchable else search)
+                return
+            if not visible:
+                event.app.layout.focus(select_button if down else search if searchable else rows)
+                return
+            ids = [choice['id'] for choice in visible]
+            index = ids.index(selected_id)
+            if down and index == len(ids) - 1:
+                event.app.layout.focus(select_button)
+            elif not down and index == 0 and searchable:
+                event.app.layout.focus(search)
+            else:
+                selected_id = ids[max(0, min(len(ids) - 1, index + (1 if down else -1)))]
+                event.app.layout.focus(rows)
 
-        @bindings.add('enter', filter=~has_focus(cancel_button), eager=True)
+        @bindings.add('enter', filter=has_focus(search) | has_focus(rows) | has_focus(select_button), eager=True)
         def accept(event):
             submit()
 
         content = HSplit([search, rows] if searchable else [rows])
         dialog = Dialog(title=label_text(title), body=content,
-                        buttons=[select_button, cancel_button], modal=False)
+                        buttons=buttons, modal=False)
         return await self._open(dialog, bindings, search if searchable else rows, cancelled)
 
 
@@ -613,12 +655,13 @@ class TuiWorkflows:
             return await self._select(outcome.workspace_id, mandatory=mandatory)
         return outcome
 
-    async def _choose_agent(self, agent_id):
+    async def _choose_agent(self, agent_id, *, allow_add=False):
         rows = self.view.agent_rows()
         if agent_id is not None:
             return agent_id if any(a['agent_id'] == agent_id for a in rows) else None
         result = await self._dialog('choose', 'Choose agent', [dict(id=a['agent_id'],
-            label=_agent_label(a), description=_agent_line(a)) for a in rows])
+            label=_agent_label(a), description=_agent_line(a)) for a in rows],
+            extra_buttons=(('Add agent', _ADD_AGENT),) if allow_add else ())
         return None if result.cancelled else result.value
 
     async def agent_form(self, action, agent_id=None, *, _scope=None):
@@ -642,12 +685,14 @@ class TuiWorkflows:
                       Field('cwd', 'Working directory:', default=last_cwd or str(Path.cwd()), required=True),
                       Field('name', 'Agent name:'),
                       Field('history_mode', 'History mode [none/literal]:', default='literal',
-                            choices=('none', 'literal'), required=True)]
+                            choices=('none', 'literal'), required=True),
+                      Field('provider_flags', 'Provider flags:')]
             title, submit = 'New agent', 'Start agent'
         elif action == 'resume':
-            fields = [Field('cwd', 'Working directory:'),
+            fields = [Field('cwd', 'Working directory (read-only):', default=agent.get('cwd', ''), read_only=True),
                       Field('name', 'Agent name (blank keeps stored):'),
-                      Field('launch_mode', 'Launch mode:', default='ordinary', choices=('ordinary', 'fresh'))]
+                      Field('launch_mode', 'Launch mode:', default='ordinary', choices=('ordinary', 'fresh')),
+                      Field('provider_flags', 'Provider flags:', default=shlex.join(agent.get('provider_args', [])))]
             title, submit = 'Resume agent', 'Resume agent'
         elif action == 'history':
             fields = [Field('mode', 'History mode [none/literal]:', default=agent.get('history_mode', 'literal'),
@@ -664,7 +709,7 @@ class TuiWorkflows:
                     'History: ' + str(current.get('history_state') or 'unknown'),
                     str(current.get('history_note') or '')])
                 if action == 'resume':
-                    context += '\nBlank working directory keeps the stored directory.'
+                    context += '\nResume automatically uses the saved working directory.'
             result = await self._dialog('form', title, fields, submit_label=submit,
                                              error='\n'.join(filter(None, [context, error])) or None)
             if result.cancelled:
@@ -673,12 +718,21 @@ class TuiWorkflows:
                 return self._cancelled_selection()
             values = result.value
             fields = [replace(f, default=values[f.name]) for f in fields]
+            if action in ('spawn', 'resume'):
+                try:
+                    provider_args = parse_provider_flags(values.get('provider_flags', ''))
+                except ValueError as exc:
+                    error = str(exc)
+                    continue
             cwd = values.get('cwd')
-            if cwd and (not Path(cwd).is_absolute() or not Path(cwd).is_dir()):
+            if action == 'spawn' and cwd and (not Path(cwd).is_absolute() or not Path(cwd).is_dir()):
                 error = 'Working directory must be an absolute existing directory.'
                 continue
             if action == 'spawn':
-                payload = dict(values, name=values['name'] or None)
+                payload = {key: value for key, value in values.items() if key != 'provider_flags'}
+                payload['name'] = values['name'] or None
+                if provider_args:
+                    payload['provider_args'] = provider_args
             elif action == 'resume':
                 fresh = values['launch_mode'] == 'fresh'
                 if fresh:
@@ -688,10 +742,39 @@ class TuiWorkflows:
                         return self._cancelled_selection()
                     if not accepted:
                         continue
-                payload = dict(agent_id=agent_id, fresh=fresh, cwd=cwd or None, name=values['name'] or None)
+                payload = dict(agent_id=agent_id, fresh=fresh, cwd=None, name=values['name'] or None)
+                payload['provider_args'] = provider_args
             else:
                 payload = dict(agent_id=agent_id, mode=values['mode'])
             outcome = await self.controller.execute_action(action, payload)
+            if outcome.status != 'failed':
+                return outcome
+            error = outcome.message
+
+    async def loop_guard_form(self):
+        try:
+            settings = await asyncio.to_thread(self.controller.api.settings)
+        except (CLIError, OSError, TimeoutError) as error:
+            return self._failure(str(error))
+        if not isinstance(settings, dict) or type(settings.get('max_agent_hops')) is not int:
+            return self._failure('Server did not provide the current loop guard limit.')
+        field = Field('hops', 'Maximum hops (1–50):', default=str(settings['max_agent_hops']), required=True)
+        context = 'Applies to all sessions. Use /continue if a conversation is already paused.'
+        error = None
+        while True:
+            result = await self._dialog('form', 'Loop guard', [field], submit_label='Save',
+                                       error='\n'.join(filter(None, [context, error])))
+            if result.cancelled:
+                return ActionOutcome('cancelled')
+            field = replace(field, default=result.value['hops'])
+            try:
+                hops = int(field.default)
+                if not 1 <= hops <= 50:
+                    raise ValueError
+            except ValueError:
+                error = 'Enter a whole number from 1 to 50'
+                continue
+            outcome = await self.controller.execute_action('set_loop_guard', {'max_agent_hops': hops})
             if outcome.status != 'failed':
                 return outcome
             error = outcome.message
@@ -710,23 +793,40 @@ class TuiWorkflows:
         return await self._dispatch(result.value, target_id, scope)
 
     async def _agent_menu(self, target_id, scope):
-        rows = self.view.agent_rows()
-        stale = target_id is not None and not any(a['agent_id'] == target_id for a in rows)
-        if rows and not stale:
-            target_id = await self._choose_agent(target_id)
+        actions = {'new_agent', 'resume', 'stop', 'remove', 'attach', 'unread',
+                   'retry', 'history', 'inspect_agent'}
+        while self._unchanged(scope):
+            rows = self.view.agent_rows()
+            stale = target_id is not None and not any(a['agent_id'] == target_id for a in rows)
+            if not stale:
+                target_id = await self._choose_agent(target_id, allow_add=self.controller.workspace is not None)
+                if not self._unchanged(scope):
+                    return self._cancelled_selection()
+                if target_id is _ADD_AGENT:
+                    return await self._dispatch('new_agent', None, scope)
+                if target_id is None:
+                    if self.dialogs.future is None and not self.view.help_visible:
+                        self.view.focus_named('composer')
+                    return ActionOutcome('cancelled')
+                stale = not any(a['agent_id'] == target_id for a in self.view.agent_rows())
+                if not stale:
+                    self.state.selected_agent_id = target_id
+            if stale:
+                self.state.selected_agent_id = target_id = None
+                self.notice('Selected agent is no longer available.')
+            title = 'Agent actions' + (': ' + label_text(target_id) if target_id else '')
+            choices = [choice for choice in self.view.action_choices() if choice['id'] in actions]
+            result = await self._dialog('choose', title, choices,
+                                       cancel_label='Back' if rows else 'Cancel', back_key='f3')
             if not self._unchanged(scope):
                 return self._cancelled_selection()
-            if target_id is None:
-                return ActionOutcome('cancelled')
-            stale = not any(a['agent_id'] == target_id for a in self.view.agent_rows())
-            if not stale:
-                self.state.selected_agent_id = target_id
-        if stale:
-            self.state.selected_agent_id = target_id = None
-            self.notice('Selected agent is no longer available.')
-        title = 'Agent actions' + (': ' + label_text(target_id) if target_id else '')
-        return await self._menu(title, {'new_agent', 'resume', 'stop', 'attach', 'unread',
-                                      'retry', 'history', 'inspect_agent'}, target_id, scope)
+            if result.cancelled:
+                if result.value is not _CHOICE_BACK or not self.view.agent_rows():
+                    return ActionOutcome('cancelled')
+                target_id = None
+                continue
+            return await self._dispatch(result.value, target_id, scope)
+        return self._cancelled_selection()
 
     async def show_palette(self):
         scope = self._scope()
@@ -740,8 +840,10 @@ class TuiWorkflows:
 
     async def run_action(self, action_id, *, target_id=None):
         scope = self._scope()
-        agent_actions = {'resume', 'stop', 'attach', 'unread', 'retry', 'history', 'inspect_agent'}
-        if target_id is None and action_id in agent_actions:
+        agent_actions = {'resume', 'stop', 'remove', 'attach', 'unread', 'retry', 'history', 'inspect_agent'}
+        if action_id == 'choose_attach':
+            action_id, target_id = 'attach', None
+        elif target_id is None and action_id in agent_actions:
             target_id = self.state.selected_agent_id
         return await self._dispatch(action_id, target_id, scope)
 
@@ -756,7 +858,9 @@ class TuiWorkflows:
             self._active.discard(key)
 
     async def _run(self, action, target_id, scope):
-        if action == 'commands':
+        if action == 'loop_guard':
+            return await self.loop_guard_form()
+        elif action == 'commands':
             return await self.show_palette()
         if action == 'quit':
             await self.view.callbacks['quit']()
@@ -777,7 +881,9 @@ class TuiWorkflows:
                 self.view.hide_help()
                 return ActionOutcome('completed')
             from cli import HELP
-            text = ('F2 Sessions/Channels · F3 Agents · F4 Commands · F5 Activity\n'
+            text = ('F2 Sessions/Channels · F3 Agents · F4 Commands · F5 Activity · F6 Attach\n'
+                    'F7 Select text: drag, terminal Copy (Ctrl+Shift+C), F7 return\n'
+                    'Shift-drag also bypasses mouse capture in supporting terminals.\n'
                     'Tab changes focus · Enter selects/sends · Alt+Enter adds a line\n'
                     'Ctrl+Q Quit · Escape cancels · Ctrl+C preserves draft\n'
                     'Sessions opens navigation. Committed switches and Quit checkpoint.\n\n' +
@@ -836,7 +942,7 @@ class TuiWorkflows:
             if outcome.status == 'completed':
                 await self.refresh_sessions()
             return outcome
-        elif action in ('agents', 'inspect_agent', 'stop', 'attach', 'unread', 'retry'):
+        elif action in ('agents', 'inspect_agent', 'stop', 'remove', 'attach', 'unread', 'retry'):
             if self.controller.plain_channel and action == 'agents':
                 result = await self.client.submit_outcome('/agents')
                 self.view.show_activity()
@@ -852,19 +958,28 @@ class TuiWorkflows:
                 self.state.selected_agent_id = ident
                 self.view.show_inspector()
             else:
-                if action in ('attach', 'stop') and sys.platform == 'win32':
+                if action in ('attach', 'stop', 'remove') and sys.platform == 'win32':
                     return self._failure(WINDOWS_TMUX_ERROR)
-                if action == 'stop':
+                if action in ('stop', 'remove'):
                     agent = next((a for a in self.view.agent_rows() if a['agent_id'] == ident), None)
                     if agent is None:
                         return self._cancelled_selection()
-                    accepted = await self._dialog('confirm', 'Stop ' + _agent_label(agent) + '? [y/N]',
+                    prompt = ('Remove ' + _agent_label(agent) + '? [y/N]\n'
+                              'Stops its wrapper and tmux session, then removes the saved entry.\n'
+                              'Session chat and provider conversation files are kept.'
+                              if action == 'remove' else 'Stop ' + _agent_label(agent) + '? [y/N]')
+                    accepted = await self._dialog('confirm', prompt,
                                                           default=False, escape=False)
                     if not self._unchanged(scope):
                         return self._cancelled_selection()
                     if not accepted:
                         return ActionOutcome('cancelled')
                 outcome = await self.controller.execute_action(action, {'agent_id': ident})
+                if action == 'remove' and outcome.status == 'completed' and self._unchanged(scope):
+                    if self.state.selected_agent_id == ident:
+                        self.state.selected_agent_id = None
+                    self.view.inspecting = False
+                    self.view.focus_named('composer')
                 if action in ('unread', 'retry'):
                     self.view.show_activity()
                 return outcome

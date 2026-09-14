@@ -75,6 +75,22 @@ class _SafeComposer(Processor):
             display_to_source=lambda position: max(0, bisect_right(offsets, position) - 1))
 
 
+class _SidebarControl(FormattedTextControl):
+    """Give blank cells coordinates so Window cannot remap their clicks to row zero."""
+
+    def create_content(self, width, height):
+        content = super().create_content(width, height)
+
+        def get_line(index):
+            line = content.get_line(index) if index < content.line_count else []
+            used = sum(get_cwidth(fragment[1]) for fragment in line)
+            return [*line, ('', ' ' * max(0, width - used))]
+
+        return UIContent(get_line=get_line, line_count=max(height or 0, content.line_count),
+                         cursor_position=content.cursor_position,
+                         menu_position=content.menu_position, show_cursor=content.show_cursor)
+
+
 class _ConversationControl(UIControl):
     """Use actual render dimensions, never FormattedTextControl sizing caches."""
 
@@ -142,24 +158,49 @@ class _ConversationControl(UIControl):
     def create_content(self, width, height):
         self.width, self.height = width, height
         lines = self._lines(width, height)
-        return UIContent(get_line=lambda index: [('', lines[index])],
+        return UIContent(get_line=lambda index: lines[index],
                          line_count=len(lines), show_cursor=False)
 
     def text(self):
-        """Sanitized source fragments, also useful to renderer-level tests."""
-        return [('', '\n'.join(self._lines(self.width, self.height)))]
+        """Sanitized styled fragments, also useful to renderer-level tests."""
+        fragments = []
+        for index, line in enumerate(self._lines(self.width, self.height)):
+            if index:
+                fragments.append(('', '\n'))
+            fragments.extend(line)
+        return fragments
 
     def _message_lines(self, message, width):
-        yield from _wrap(f"[{label_text(message.get('time', ''))}] "
-                         f"{label_text(message.get('sender', '?'))}:", width)
-        yield from _wrap(message.get('text', ''), width)
+        width = max(1, width)
+        raw_sender = message.get('sender', '?')
+        sender = label_text(raw_sender)
+        system = raw_sender == 'system' or message.get('type') in ('system', 'join', 'leave', 'status')
+        own = raw_sender == (self.view.client.username or 'user') and not system
+        style = 'class:muted' if system else 'class:chat.you' if own else 'class:chat.agent'
+        marker = '·' if system else '●' if own else '◆'
+        name = 'You' if own else sender
+        clock = clip_cells(label_text(message.get('time', '')), max(0, min(12, width - 6)))
+        clock = '  ' + clock if clock else ''
+        header = clip_cells(marker + ' ' + name, max(1, width - get_cwidth(clock)))
+        yield [(style, header), ('class:muted', clock)]
+        gutter = clip_cells('│ ', max(0, width - 1))
+        content_width = max(1, width - get_cwidth(gutter))
+
+        def body_lines(text, text_style=''):
+            for line in _wrap(text, content_width):
+                yield [('class:muted', gutter), (text_style, line)]
+
+        yield from body_lines(message.get('text', ''), 'class:muted' if system else '')
         for attachment in message.get('attachments', []):
             name = label_text(attachment.get('name', ''))
             url = label_text(attachment.get('url', ''))
-            yield from _wrap('Attachment: ' + ' '.join(value for value in (name, url) if value), width)
+            yield from body_lines('Attachment: ' + ' '.join(value for value in (name, url) if value),
+                                  'class:chat.attachment')
         choices = message.get('metadata', {}).get('choices', [])
         if choices:
-            yield from _wrap('Choices: ' + ' | '.join(label_text(choice) for choice in choices), width)
+            yield from body_lines('Choices: ' + ' | '.join(label_text(choice) for choice in choices),
+                                  'class:chat.choices')
+        yield [('', '')]
 
     def _lines(self, width, height):
         height = max(1, height)
@@ -203,7 +244,7 @@ class _ConversationControl(UIControl):
                     self._visible_start = (ident, line_index)
                     viewport.line_offset = line_index
                     lines.append(line)
-        return list(lines) or ['No messages yet. Write in Message below.']
+        return list(lines) or [[('class:muted', 'No messages yet. Write in Message below.')]]
 
 
 class _ActivityControl(UIControl):
@@ -520,11 +561,13 @@ class ComposerActions:
                 self.view._cancel_overlay()
 
         @bindings.add('escape', filter=focused,
-                      eager=Condition(lambda: self.buffer.complete_state is not None and
+                      eager=Condition(lambda: (self.buffer.complete_state is not None or self.view.activity_visible) and
                                       not self.view._app().key_processor.input_queue))
         def escape(event):
             if self.buffer.complete_state is not None:
                 self.buffer.complete_state = None
+            elif self.view.activity_visible:
+                self.view.hide_activity()
 
         @bindings.add('c-d', filter=focused)
         def delete_or_quit(event):
@@ -542,8 +585,18 @@ class TuiView:
         'focused frame.border': 'ansicyan', 'selected': 'ansicyan bold',
         'status.running': 'ansigreen', 'status.starting': 'ansiyellow',
         'status.failed': 'ansired', 'muted': 'ansibrightblack',
+        'chat.you': 'ansicyan bold', 'chat.agent': 'ansigreen bold',
+        'chat.attachment': 'ansicyan underline', 'chat.choices': 'ansiyellow',
+        'agent.ready': 'ansigreen', 'agent.working': 'ansicyan',
+        'agent.input': 'ansiyellow bold', 'agent.starting': 'ansiyellow',
+        'agent.stopped': 'ansibrightblack', 'agent.error': 'ansired bold',
+        'agent.unread': 'ansicyan bold',
         'dialog.choice.selected': 'ansicyan bold',
+        'session.current': 'ansicyan bold',
+        'session.selected': 'bg:ansicyan fg:ansiblack bold',
         'button': 'bg:default fg:default', 'button.focused': 'bg:default ansicyan bold',
+        'agent.review button': 'bg:ansiyellow fg:ansiblack bold',
+        'agent.review button.focused': 'bg:ansibrightyellow fg:ansiblack bold underline',
     })
 
     def __init__(self, client, controller, state, dialogs, callbacks):
@@ -555,6 +608,7 @@ class TuiView:
         self._transcript_key = None
         self._ordered_ids = ()
         self.inspecting = False
+        self.selecting_text = False
         self._inspector_line = 0
         self.activity_visible = False
         self.help_visible = False
@@ -570,8 +624,9 @@ class TuiView:
                                  input_processors=[_SafeComposer()])
         self.conversation = _ConversationControl(self)
         self.activity = _ActivityControl(self)
-        self.navigation = FormattedTextControl(self._navigation_fragments,
+        self.navigation = _SidebarControl(self._navigation_fragments,
                                                focusable=True, show_cursor=False)
+        self.pending_inputs = FormattedTextControl(self._pending_fragments, focusable=True, show_cursor=False)
         self.agents = FormattedTextControl(self._agent_fragments,
                                            focusable=True, show_cursor=False)
         self.conversation_window = Window(self.conversation, wrap_lines=False)
@@ -582,9 +637,17 @@ class TuiView:
         self.agent_actions = Button('Actions', width=12, handler=lambda:
             self._app().create_background_task(self.callbacks['run_action'](
                 'agents', target_id=self.state.selected_agent_id)))
-        agent_contents = VSplit([self.agents_window, self.agent_actions], padding=1)
-        framed_agents = self._frame(agent_contents, lambda: 'Agent details · Esc Back' if self.inspecting
-                                    else 'Agents · Enter Actions · F3 Actions', 'agents')
+        self.agent_review = Button('Review input', width=16, handler=self._review_input)
+        review = ConditionalContainer(HSplit([self.agent_review], style='class:agent.review'),
+                                      filter=Condition(lambda: self._input_agent() is not None))
+        self.agent_attach = Button('Attach', width=16, handler=self._direct_attach)
+        attach = ConditionalContainer(self.agent_attach, filter=Condition(self._show_attach))
+        self.agent_add = Button('Add agent', width=12, handler=self._add_agent)
+        action_buttons = HSplit([self.agent_actions, ConditionalContainer(
+            self.agent_add, filter=Condition(self._show_add_agent))])
+        agent_contents = VSplit([self.agents_window, review, attach, action_buttons], padding=1)
+        framed_agents = self._frame(agent_contents, lambda: 'Agent details · Esc Message' if self.inspecting
+                                    else 'Agents · Enter Actions · F3 Choose · Esc Message', 'agents')
         agent_area = ConditionalContainer(DynamicContainer(lambda: agent_contents
             if self.screen_mode == 'compact' and not self.inspecting else framed_agents),
             filter=Condition(lambda: not self.controller.plain_channel))
@@ -606,6 +669,17 @@ class TuiView:
                               self.controller.plain_channel else 'Sessions · Stale' if self._sessions_stale
                               else 'Sessions', 'navigation',
                               width=Dimension.exact(22))
+        pending_window = Window(self.pending_inputs, wrap_lines=False,
+                                height=lambda: max(2, min(5, len(self.pending_input_rows()))),
+                                dont_extend_height=True)
+        pending_hint = Window(FormattedTextControl(lambda: [('class:muted',
+            'Enter: review input' if self.pending_input_rows() else '')]), height=1)
+        pending_area = self._frame(HSplit([pending_window, pending_hint]),
+            lambda: f'Input pending {min(99, len(self.pending_input_rows()))}'
+                    f'{"+" if len(self.pending_input_rows()) > 99 else ""}', 'pending_inputs',
+            width=Dimension.exact(22))
+        sidebar = HSplit([sidebar, ConditionalContainer(pending_area,
+            filter=Condition(lambda: not self.controller.plain_channel))], width=Dimension.exact(22))
         wide = VSplit([sidebar, main])
         resize_notice = HSplit([Window(FormattedTextControl(
             'Resize terminal to at least 80 × 18.\nDraft and focus are preserved.'))])
@@ -658,7 +732,7 @@ class TuiView:
         content = Frame(Window(self.help,
             height=lambda: max(3, min(20, self._app().output.get_size().rows - 4)),
             width=lambda: max(10, min(90, self._app().output.get_size().columns - 4))),
-            title='Help · F1/Esc Back · PgUp/PgDn Scroll')
+            title='gigagent Help · F1/Esc Back · PgUp/PgDn Scroll')
         return FloatContainer(content=content, floats=[], modal=True, key_bindings=bindings)
 
     def show_help(self, text):
@@ -677,6 +751,12 @@ class TuiView:
         if not self.help_visible:
             return False
         saved, self._help_focus = self._help_focus, None
+        if (saved is not None and (saved.content is self.agent_review.control
+                and self._input_agent() is None or saved.content is self.agent_attach.control
+                and not self._show_attach() or saved.content is self.agent_add.control
+                and not self._show_add_agent())):
+            saved = self.composer.window
+            self.state.focus_name = 'composer'
         self.help_visible = False
         visible = [node.content for node in walk(self.root, skip_hidden=True) if isinstance(node, Window)]
         if self.dialogs.future is not None:
@@ -732,7 +812,7 @@ class TuiView:
         return style
 
     def focus_named(self, name):
-        if name not in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'clear_draft'):
+        if name not in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'agent_review', 'agent_attach', 'agent_add', 'pending_inputs', 'clear_draft'):
             raise ValueError('Unknown focus target: ' + name)
         target = getattr(self, name)
         control = getattr(target, 'control', target)
@@ -766,6 +846,15 @@ class TuiView:
                 yield message
 
     def refresh(self, event=None):
+        if (self._app().layout.current_control is self.agent_review.control
+                and self._input_agent() is None or
+                self._app().layout.current_control is self.agent_attach.control and not self._show_attach() or
+                self._app().layout.current_control is self.agent_add.control and not self._show_add_agent()):
+            if not self.focus_named('composer'):
+                # Preserve a valid editing target even while the small-screen
+                # overlay hides the composer; resizing back must restore typing.
+                self._app().layout.current_window = self.composer.window
+                self.state.focus_name = 'composer'
         rows = {message['id']: message for message in self._transcript()}
         changed = event.message_ids if event is not None and event.source == 'client' else ()
         self.state.viewport.sync(rows, changed_ids=changed,
@@ -849,7 +938,7 @@ class TuiView:
         rows = [dict(row, name=workspace.get('name'), archived=workspace.get('archived'))
                 if row['id'] == current else row for row in self._sessions]
         counts = Counter(label_text(row.get('name') or row['id']) for row in rows)
-        fragments = [('class:muted', 'Loading sessions…\n')] if self._sessions_loading else []
+        fragments = [('class:muted', ' Loading sessions…\n')] if self._sessions_loading else [('', '\n')] if rows else []
         for row in rows:
             ident = row['id']
             name = label_text(row.get('name') or ident)
@@ -857,16 +946,26 @@ class TuiView:
             selected = ident == self.state.selected_session_id
             if selected:
                 fragments.append(('[SetCursorPosition]', ''))
-            prefix = '*' if ident == current else '>' if selected else ' '
-            # Reserve cells for disambiguation/archive suffixes before clipping names.
-            label = prefix + ' ' + clip_cells(name, max(0, 18 - get_cwidth(suffix))) + suffix
+            prefix = ' ● ' if ident == current else ' › ' if selected else '   '
+            # Leave one cell at either edge, including when suffixes disambiguate names.
+            label = prefix + clip_cells(name, max(0, 16 - get_cwidth(suffix))) + suffix
+            label += ' ' * max(0, 20 - get_cwidth(label))
             def activate(event, ident=ident):
-                if event.event_type == MouseEventType.MOUSE_UP and self.dialogs.future is None:
+                if (event.event_type == MouseEventType.MOUSE_UP and self.dialogs.future is None
+                        and self.screen_mode == 'wide' and not self.controller.plain_channel
+                        and any(row['id'] == ident for row in self._sessions)):
+                    self.state.selected_session_id = ident
+                    self.focus_named('navigation')
                     self._app().create_background_task(self.callbacks['run_action'](
                         'select_session', target_id=ident))
-            fragments.append(('class:selected' if selected else '', clip_cells(label, 20) + '\n', activate))
+                    return None
+                return NotImplemented
+            style = 'class:session.selected' if selected else 'class:session.current' if ident == current else ''
+            fragments.append((style, clip_cells(label, 20), activate))
+            fragments.append(('', '\n'))
             if row.get('archived'):
-                fragments.append(('class:muted', '  (archived)\n'))
+                fragments.append(('class:muted', '   archived\n'))
+            fragments.append(('', '\n'))
         if not fragments:
             fragments.append(('', 'No sessions yet\n'))
         return fragments
@@ -904,6 +1003,7 @@ class TuiView:
         workspace = self.controller.workspace
         agent = self._selected_agent()
         choices = [('help', 'Help', 'Keyboard and command help'),
+                   ('loop_guard', 'Loop guard', 'Set the agent-to-agent hop limit for all sessions'),
                    ('activity', 'Activity', 'Read diagnostics; F5 opens Activity, Esc returns'),
                    ('clear_draft', 'Clear draft', 'Clear the current unsent message')]
         if self.controller.plain_channel:
@@ -920,12 +1020,13 @@ class TuiView:
                         ('attach', 'Attach', 'Open the selected agent terminal'),
                         ('resume', 'Resume agent', 'Resume the selected stopped agent'),
                         ('stop', 'Stop agent', 'Stop the selected agent'),
+                        ('remove', 'Remove agent', 'Stop its terminal and remove the saved agent entry'),
                         ('unread', 'Unread', 'Inspect unread messages'),
                         ('retry', 'Retry unread', 'Retry delivery of unread messages'),
                         ('history', 'History settings', 'Inspect and change selected agent history mode'),
                         ('inspect_agent', 'Inspect agent', 'Show full status and recovery details')]
         choices.append(('quit', 'Quit', 'Disconnect' if self.controller.plain_channel else 'Checkpoint and disconnect'))
-        agent_actions = {'attach', 'resume', 'stop', 'unread', 'retry', 'inspect_agent'}
+        agent_actions = {'attach', 'resume', 'stop', 'remove', 'unread', 'retry', 'inspect_agent'}
         session_actions = agent_actions | {'rename_session', 'archive_session', 'new_agent', 'history'}
         result = []
         for ident, label, description in choices:
@@ -943,53 +1044,173 @@ class TuiView:
                     reason = 'Agent is already running'
                 if ident == 'new_agent' and workspace is not None and not self.controller.providers:
                     reason = 'No providers configured'
-                if ident in {'new_agent', 'attach', 'resume', 'stop'} and sys.platform == 'win32':
+                if ident in {'new_agent', 'attach', 'resume', 'stop', 'remove'} and sys.platform == 'win32':
                     reason = WINDOWS_TMUX_ERROR
             if self.controller.selection_pending and ident not in {'help', 'activity', 'quit'}:
                 reason = 'Session selection in progress'
             result.append(dict(id=ident, label=label, description=description, disabled_reason=reason))
         return result
 
+    def _agent_live(self, agent):
+        live = self.client.status.get(agent.get('registry_name'), {})
+        return live if self.client.websocket is not None and isinstance(live, dict) else {}
+
+    def _agent_waiting(self, agent):
+        return (agent.get('last_state') in ('running', 'starting') and
+                self._agent_live(agent).get('waiting_for_input', agent.get('waiting_for_input')) is True)
+
+    def pending_input_rows(self):
+        """Waiting agents from the open session, never other sidebar sessions."""
+        if self.controller.plain_channel:
+            return []
+        return [agent for agent in self.agent_rows() if self._agent_waiting(agent)]
+
+    def _pending_fragments(self):
+        rows = self.pending_input_rows()
+        if not rows:
+            return [('class:muted', 'No pending input' if self.controller.workspace else 'Select a session')]
+        fragments = []
+        for agent in rows:
+            ident = agent['agent_id']
+            selected = ident == self.state.selected_agent_id
+            if selected:
+                fragments.append(('[SetCursorPosition]', ''))
+            def click(event, ident=ident):
+                if event.event_type == MouseEventType.MOUSE_UP:
+                    self._review_pending(ident)
+            text = ('› ' if selected else '  ') + '! ' + label_text(agent.get('registry_name') or ident)
+            fragments.append(('class:agent.input' + (' underline' if selected else ''),
+                              clip_cells(text, 20) + '\n', click))
+        return fragments
+
+    def _review_pending(self, ident=None):
+        if (self.screen_mode != 'wide' or self.controller.plain_channel
+                or self.dialogs.future is not None or self.help_visible):
+            return
+        ids = [agent['agent_id'] for agent in self.pending_input_rows()]
+        if ident is None:
+            ident = self.state.selected_agent_id if self.state.selected_agent_id in ids else next(iter(ids), None)
+        if ident not in ids:
+            return
+        self.state.selected_agent_id = ident
+        self.focus_named('pending_inputs')
+        self._app().create_background_task(self.callbacks['run_action']('attach', target_id=ident))
+
+    def _show_add_agent(self):
+        return not self.controller.plain_channel and self.controller.workspace is not None
+
+    def _add_agent(self):
+        if (not self._show_add_agent() or self.screen_mode == 'small'
+                or self.dialogs.future is not None or self.help_visible
+                or self.controller.selection_pending):
+            return
+        self._app().create_background_task(self.callbacks['run_action']('new_agent'))
+
+    def _show_attach(self):
+        selected = self._selected_agent()
+        candidates = [selected] if selected is not None else self.agent_rows()
+        return (not self.controller.plain_channel and self._input_agent() is None
+                and any(agent.get('tmux_session') for agent in candidates))
+
+    def _direct_attach(self, *, choose=False):
+        if (self.screen_mode == 'small' or self.controller.plain_channel
+                or self.dialogs.future is not None or self.help_visible
+                or self.controller.selection_pending or not self.agent_rows()):
+            return
+        self._app().create_background_task(self.callbacks['run_action'](
+            'choose_attach' if choose else 'attach',
+            target_id=None if choose else self.state.selected_agent_id))
+
+    def _input_agent(self):
+        selected = self._selected_agent()
+        if selected is not None:
+            return selected if self._agent_waiting(selected) else None
+        return next((agent for agent in self.agent_rows() if self._agent_waiting(agent)), None)
+
+    def _review_input(self):
+        agent = self._input_agent()
+        if agent is not None and self.dialogs.future is None:
+            self.state.selected_agent_id = agent['agent_id']
+            self._app().create_background_task(self.callbacks['run_action'](
+                'attach', target_id=agent['agent_id']))
+
+    def _agent_badge(self, agent):
+        state = agent.get('last_state')
+        if self._agent_waiting(agent):
+            return 'input', '! Input · Attach'
+        if state == 'starting':
+            return 'starting', '◌ Starting'
+        if state == 'running':
+            return ('working', '◆ Working') if self._agent_live(agent).get('busy') else ('ready', '● Ready')
+        if state == 'failed' or agent.get('last_error') or agent['agent_id'] in self.controller._failed_launches:
+            return 'error', '× Error'
+        return 'stopped', '○ Stopped'
+
+    def _agent_content_width(self):
+        return max(1, self._app().output.get_size().columns -
+                   (22 if self.screen_mode == 'wide' else 0) - 15 -
+                   (17 if self._input_agent() is not None or self._show_attach() else 0))
+
     def _agent_fragments(self):
         if self.inspecting:
-            width = max(1, self._app().output.get_size().columns -
-                        (22 if self.screen_mode == 'wide' else 0) - 15)
+            width = self._agent_content_width()
             lines = list(_wrap(self.inspector_text(), width))
             self._inspector_line = min(self._inspector_line, max(0, len(lines) - 1))
             return [('', '\n'.join(lines[self._inspector_line:]))]
         agents = self.agent_rows()
         if not agents:
-            return [('', 'No agents. Actions → Add agent.')]
+            return [('', 'No agents. Click Add agent to start.')]
         fragments = []
-        width = max(1, self._app().output.get_size().columns - (22 if self.screen_mode == 'wide' else 0) - 15)
+        width = self._agent_content_width()
+        name_width = min(20, max(8, width - 30), max(get_cwidth(label_text(
+            a.get('registry_name') or a['agent_id'])) for a in agents))
         for agent in agents:
             selected = agent['agent_id'] == self.state.selected_agent_id
             if selected:
                 fragments.append(('[SetCursorPosition]', ''))
-            status = agent.get('last_state')
-            style = 'class:status.' + status if status in ('running', 'starting', 'failed') else ''
-            if selected:
-                style = 'class:selected'
             def select(event, ident=agent['agent_id']):
                 if event.event_type == MouseEventType.MOUSE_UP and self.dialogs.future is None:
                     self.state.selected_agent_id = ident
                     self.focus_named('agents')
-            fragments.append((style, clip_cells(label_text(self.controller._agent_status(agent)), width) + '\n', select))
+            kind, badge = self._agent_badge(agent)
+            count = agent.get('unread_count')
+            unread = '  ✉ ' + ('99+' if count > 99 else str(count)) if isinstance(count, int) and count > 0 else ''
+            name = clip_cells(label_text(agent.get('registry_name') or agent['agent_id']), name_width)
+            parts = [('class:selected' if selected else '', ('› ' if selected else '  ') +
+                      name + ' ' * max(0, name_width - get_cwidth(name)) + '  '),
+                     ('class:agent.' + kind, badge), ('class:agent.unread', unread)]
+            cwd = agent.get('cwd')
+            if isinstance(cwd, str) and cwd.strip():
+                parts.append(('class:muted', '  ' + label_text(cwd)))
+            remaining = width
+            for style, text in parts:
+                visible = clip_cells(text, remaining) if remaining > 0 else ''
+                fragments.append((style, visible, select))
+                remaining -= get_cwidth(visible)
+            fragments.append(('', '\n', select))
         return fragments
 
     def _conversation_title(self):
         workspace = self.controller.workspace
         name = (workspace.get('name') or workspace['id']) if workspace else '#' + self.client.channel
-        title = label_text(name) + ' · ' + label_text(self.client.connection_state).capitalize()
+        title = 'gigagent · ' + label_text(name) + ' · ' + label_text(self.client.connection_state).capitalize()
         if self.state.viewport.new_ids:
             title += f' · {len(self.state.viewport.new_ids)} new'
         return clip_cells(title, max(1, self._app().output.get_size().columns - 30))
 
     def _footer(self):
+        if self.selecting_text:
+            return [('class:status.starting', 'Select text: drag · Ctrl+Shift+C copy · F7 return')]
         if self.screen_mode == 'small':
             return [('class:muted', 'F1 Help · Ctrl+Q Quit')]
+        if self.screen_mode == 'compact':
+            return [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
+                     ' · F3 Agents · F4 Menu · F5 ' +
+                     ('Chat' if self.activity_visible else 'Log') +
+                     ' · F7 Copy · F1 Help · Ctrl+Q Quit')]
         return [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
-                 ' · F3 Agents · F4 Commands · F5 Activity · F1 Help · Ctrl+Q Quit')]
+                 ' · F3 Agents · F4 Commands · F5 ' + ('Back to chat' if self.activity_visible else 'Activity') +
+                 ' · F7 Select text · F1 Help · Ctrl+Q Quit')]
 
     def _cancel_overlay(self):
         if self.screen_mode == 'small':
@@ -1015,8 +1236,13 @@ class TuiView:
         @self.global_key_bindings.add('f3', filter=Condition(lambda:
             self.screen_mode != 'small' and self.dialogs.future is None and not self.help_visible))
         def agent_actions(event):
+            # Always start at the list, including a single previously selected agent.
             event.app.create_background_task(self.callbacks['run_action'](
-                'agents', target_id=self.state.selected_agent_id))
+                'agents', target_id=None))
+        @self.global_key_bindings.add('f6')
+        def attach_agent(event):
+            self._direct_attach(choose=True)
+
         dispatch('f4', 'run_action', 'commands')
         dispatch('c-q', 'quit')
 
@@ -1024,6 +1250,15 @@ class TuiView:
             self.screen_mode != 'small' and self.dialogs.future is None and not self.help_visible))
         def activity(event):
             self.hide_activity() if self.activity_visible else self.show_activity()
+
+        @self.global_key_bindings.add('f7', filter=Condition(lambda:
+            self.selecting_text or self.screen_mode != 'small'
+            and self.dialogs.future is None and not self.help_visible))
+        def select_text(event):
+            # Let the terminal own drag selection and its native clipboard shortcut.
+            # Do not move focus or modify the composer buffer/selection.
+            self.selecting_text = not self.selecting_text
+            event.app.invalidate()
 
         @bindings.add('c-c')
         def preserve(event):
@@ -1036,6 +1271,14 @@ class TuiView:
                 return
             names = ['navigation', 'new_session', 'conversation', 'agents', 'agent_actions', 'composer', 'clear_draft'] if self.screen_mode == 'wide' else [
                 'conversation', 'agents', 'agent_actions', 'composer', 'clear_draft']
+            if self.screen_mode == 'wide' and not self.controller.plain_channel:
+                names.insert(names.index('conversation'), 'pending_inputs')
+            if self._input_agent() is not None:
+                names.insert(names.index('agent_actions'), 'agent_review')
+            elif self._show_attach():
+                names.insert(names.index('agent_actions'), 'agent_attach')
+            if self._show_add_agent():
+                names.insert(names.index('agent_actions') + 1, 'agent_add')
             if self.activity_visible:
                 names[names.index('conversation')] = 'activity'
             if self.controller.plain_channel:
@@ -1048,6 +1291,23 @@ class TuiView:
                            self.state.focus_name)
             offset = -1 if event.key_sequence[-1].key == 's-tab' else 1
             self.focus_named(names[(names.index(current) + offset) % len(names)] if current in names else 'composer')
+
+        @bindings.add('up', filter=has_focus(self.pending_inputs))
+        @bindings.add('down', filter=has_focus(self.pending_inputs))
+        def move_pending(event):
+            if self.screen_mode != 'wide' or self.controller.plain_channel:
+                return
+            ids = [agent['agent_id'] for agent in self.pending_input_rows()]
+            if not ids:
+                return
+            offset = -1 if event.key_sequence[-1].key == 'up' else 1
+            selected = self.state.selected_agent_id
+            index = ids.index(selected) if selected in ids else (-1 if offset > 0 else len(ids))
+            self.state.selected_agent_id = ids[max(0, min(len(ids) - 1, index + offset))]
+
+        @bindings.add('enter', filter=has_focus(self.pending_inputs))
+        def review_pending(event):
+            self._review_pending()
 
         @bindings.add('up', filter=has_focus(self.navigation) | has_focus(self.agents))
         @bindings.add('down', filter=has_focus(self.navigation) | has_focus(self.agents))
@@ -1089,10 +1349,12 @@ class TuiView:
                 event.app.create_background_task(self.callbacks['run_action'](
                     'agents', target_id=self.state.selected_agent_id))
 
-        @bindings.add('escape', filter=has_focus(self.agents),
+        @bindings.add('escape', filter=has_focus(self.agents) | has_focus(self.agent_actions) | has_focus(self.agent_review) | has_focus(self.agent_attach) | has_focus(self.agent_add) | has_focus(self.pending_inputs),
                       eager=Condition(lambda: not self._app().key_processor.input_queue))
         def close_inspector(event):
             self.inspecting = False
+            self.hide_activity()
+            self.focus_named('composer')
 
         @bindings.add('pageup', filter=has_focus(self.conversation))
         @bindings.add('pagedown', filter=has_focus(self.conversation))
@@ -1124,12 +1386,12 @@ class TuiView:
                     offset = -offset
                 self._activity_line = max(0, min(self._activity_max_line, self._activity_line + offset))
 
-        @bindings.add('escape', filter=has_focus(self.activity),
+        @bindings.add('escape', filter=Condition(lambda: self.activity_visible),
                       eager=Condition(lambda: not self._app().key_processor.input_queue))
         def close_activity(event):
             self.hide_activity()
 
-        @bindings.add('escape', Keys.Any, filter=has_focus(self.agents) | has_focus(self.activity))
+        @bindings.add('escape', Keys.Any, filter=has_focus(self.agents) | has_focus(self.agent_actions) | has_focus(self.agent_review) | has_focus(self.agent_attach) | has_focus(self.agent_add) | has_focus(self.pending_inputs) | has_focus(self.activity))
         def consume_alt(event):
             pass
 

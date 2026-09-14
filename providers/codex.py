@@ -9,6 +9,7 @@ value there is the correlation key. cwd and timestamp are never used to match.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -26,6 +27,36 @@ class CodexAdapter(ProviderAdapter):
     supports_resume = True
     can_locate_transcripts = True
     POLL_INTERVAL = 2.0
+
+    def waiting_for_input(self, output: bytes) -> bool:
+        from prompt_signals import terminal_lines
+        if super().waiting_for_input(output):
+            return True
+        lines = terminal_lines(output)
+        if not lines or not re.search(r'enter to submit\s*[|·]\s*esc to cancel', lines[-1], re.I):
+            return False
+        # Codex MCP permission form, as distinct from a general text form.
+        tail = '\n'.join(lines[-30:]).lower()
+        return bool(re.search(r'(?:^|\n)[^\w\n]*\d+\.\s+allow\b', tail)
+                    and re.search(r'(?:^|\n)[^\w\n]*\d+\.\s+cancel\b', tail))
+
+    def prompt_event(self, payload: dict):
+        from prompt_signals import PromptEvent
+        if not isinstance(payload, dict) or not isinstance(payload.get('hook_event_name'), str):
+            return None
+        kinds = {'PermissionRequest': 'requested', 'PostToolUse': 'resolved',
+                 'Stop': 'turn_end', 'Interrupt': 'turn_end', 'SessionEnd': 'session_end'}
+        kind = kinds.get(payload.get('hook_event_name'))
+        if kind is None:
+            return None
+        event = PromptEvent(kind, payload.get('session_id', ''),
+                            payload.get('turn_id', ''), payload.get('tool_name', ''))
+        return event if event.valid() else None
+
+    def prompt_hook_config(self, command: str) -> dict:
+        return {event: [{'matcher': '.*', 'hooks': [
+            {'type': 'command', 'command': command, 'timeout': 2}]}]
+            for event in ('PermissionRequest', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd')}
 
     def __init__(self, agent_cfg: dict | None = None, home: Path | None = None,
                  sleep=time.sleep, clock=time.monotonic):

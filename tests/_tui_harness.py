@@ -6,6 +6,7 @@ import io
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.data_structures import Size
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.layout import walk
@@ -81,7 +82,8 @@ class TuiHarness:
             layout=Layout(self.view.root, focused_element=self.view.composer),
             input=pipe, output=Vt100_Output(self.stream, get_size=lambda: self.size,
                                            enable_cpr=False),
-            full_screen=True, mouse_support=True, key_bindings=self.view.global_key_bindings,
+            full_screen=True, mouse_support=Condition(lambda: not self.view.selecting_text),
+            key_bindings=self.view.global_key_bindings,
             style=self.view.style, after_render=self._capture)
         self.key_count = 0
         self.input_processed = asyncio.Event()

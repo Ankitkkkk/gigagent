@@ -10,13 +10,19 @@ Agents and humans talk in a shared chat room with multiple channels — when any
 
 ![screenshot](screenshot.png)
 
-## Terminal Chat and Shell Commands
+## gigagent — Terminal Chat and Shell Commands
+
+**gigagent** is Agentchattr's full-screen terminal UI and shell client.
+See [INSTALLATION.md](INSTALLATION.md) for installation steps, a `gigagent`
+command, and a checklist an AI agent can follow on a new system.
+The Agentchattr server, API, and stored sessions retain their existing names.
 
 Agentchattr also works from a terminal without opening a browser. After setting
 up the Python environment, run these commands from the source repository:
 
 ```sh
 python -m pip install -r requirements-cli.txt
+python gigagent.py
 python cli.py
 python cli.py --plain
 python cli.py chat --plain
@@ -27,7 +33,10 @@ Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
 `python run.py` in a separate terminal. `python cli.py chat` explicitly starts
 interactive mode.
 
-From this source checkout, `python cli.py` opens the full-screen terminal UI and
+`python gigagent.py` is the branded entry point; `python cli.py` remains supported
+with the same arguments and behavior.
+
+From this source checkout, `python gigagent.py` opens the full-screen terminal UI and
 its session picker. Create a session or select an existing one; the picker can
 also show archived sessions and asks before restoring one. Terminal sessions
 group a channel, working directories, and persistent agent identities.
@@ -66,6 +75,10 @@ Shell `send` and `read` default to `general` without either flag and accept
 sessions; `sessions --archived` includes archived ones. Archiving from a script
 requires `--yes` and checkpoints and stops that session's agents on the server.
 
+Use `@all` (or `@both`) to address every running agent in the current session.
+`@everyone` is not an alias. Explicitly mention a stopped agent by name to
+leave it a message for later.
+
 Interactive chat supports live messages, `@mentions`, channel switching, recent
 history, agent status, and reconnection after server restarts. Incoming replies
 do not overwrite the input prompt. Messages entered while disconnected are
@@ -76,9 +89,11 @@ The full-screen controls are:
 | Key | Action |
 | --- | --- |
 | F2 | Open Sessions, or Channels in channel-only chat |
-| F3 | Open agent selection and available actions |
+| F3 | Open the agent list; from agent actions, return to that list |
 | F4 | Open the command palette |
 | F5 | Open Activity diagnostics |
+| F6 | Choose an agent to attach; always opens the agent list |
+| F7 | Toggle terminal text selection: drag to select, use your terminal's Copy shortcut, then F7 to restore app mouse controls |
 | F1 | Open Help |
 | Tab / Shift+Tab | Move between visible controls |
 | Enter | Select the highlighted choice or send the composer text |
@@ -86,23 +101,148 @@ The full-screen controls are:
 | PageUp / PageDown | Scroll a page in the focused conversation or Activity pane |
 | End | Follow the latest messages in the focused conversation and clear its new-message count; jump to the bottom in Activity |
 | Mouse wheel | Scroll three wrapped lines in conversation or Activity; conversation wheel-up leaves follow, and reaching the bottom resumes follow and clears its new-message count |
-| Escape | Cancel the current dialog or close Help/Activity |
+| Escape | Cancel the current dialog, close Help/Activity (including after Retry unread, from any pane), or return from Agents to the message box |
 | Ctrl+C | Cancel the current dialog while preserving the message draft |
 | Ctrl+D | Delete at the cursor, or Quit when the composer is empty |
 | Ctrl+Q | Confirm unsent drafts when needed, checkpoint, and quit |
 
+Session names have inset rows, a blank separator, and a full-row highlight.
+A dot marks the open session. Click a row to open it; blank sidebar space does
+not change sessions. Up/Down and mouse-wheel scrolling remain available.
+
+To copy a string from a response, press **F7**, drag over the text, then use
+your terminal's Copy shortcut (**Ctrl+Shift+C** in GNOME Terminal). Press **F7**
+again to restore clicking and mouse-wheel scrolling in the app. Message focus,
+draft text, and cursor position are preserved. On terminals that support it,
+holding **Shift** while dragging also bypasses app mouse capture. Inside tmux,
+its mouse mode can still intercept dragging: use Shift-drag or tmux copy mode.
+Copying uses your terminal's clipboard; physical selection depends on the terminal.
+
+In the wide layout, **Input pending** sits below Sessions and lists waiting
+agents from the open session only. It updates when you switch sessions or
+resolve prompts. Click a name, or Tab into the list and use Up/Down then Enter,
+to open that agent's terminal. Escape returns to Message. The section hides
+with the sidebar in compact layouts; **Review input** and **F3 → Attach** remain
+available there.
+
+Chat messages have colored sender headers, muted timestamps, and a slim gutter.
+Your messages use cyan, agents use green, and system notices stay subdued.
+Spacing separates messages; attachments and choices have distinct accents.
+Scrolling, unread markers, and drafts keep their existing behavior.
+
 The command palette exposes Help, Activity, draft clearing, session or channel
 navigation, and actions applicable to the selected session and agent. Those
-include create, rename, archive, add, attach, resume, stop, unread, retry,
+include create, rename, archive, add, attach, resume, stop, remove, unread, retry,
 history settings, inspection, refresh, and Quit. Narrow terminals use a compact
 layout. Below 80 columns or 18 rows, the UI keeps the current model, draft, and
 focus while showing resize, Help, and Quit controls.
 
-Choose **New session**, enter its name, and press Enter. F3 opens agent actions:
-choose **Add agent**, select a provider, enter an existing absolute working
-directory, and review the history mode before starting. To attach, press F3,
-choose the agent, and select **Attach**. The command palette also offers Attach
-after an agent is selected. Detaching returns to the current draft.
+To change the loop limit from the CLI, press **F4**, choose **Loop guard**, enter
+a whole number from **1 to 50**, and select **Save**. The field starts with the
+current server value. Changes are saved and apply immediately to all sessions;
+each channel counts its own agent-to-agent hops. Use `/continue` afterward if
+a conversation is already paused. Escape cancels without saving.
+
+Choose **New session**, enter its name, and press Enter. Click **Add agent**
+beneath Actions to open the form directly, even with an empty agent list.
+Select a provider, enter an existing absolute working directory, and review
+the history mode before starting. Each launch receives its assigned session
+name and channel explicitly; `none` history mode still delivers this identity
+prompt without requesting old chat. Subsequent triggers reinforce the current
+name, including after a rename. Click the directory or name input to edit it,
+or use Tab/Shift+Tab to move between fields. **F3 → Add agent** also remains available. Click an agent row and
+then **Attach** to open its terminal directly. **F6** always opens the agent
+chooser, including after a previous selection or attach. Waiting agents show **Review input**
+in the same button position. **F3 → Attach** and the command palette also work.
+Detaching returns to the current draft.
+
+**Provider flags** in Add/Resume passes optional arguments to the agent CLI,
+for example `--model MODEL_NAME`. Quote values containing spaces. Flags are saved
+per agent and prefilled on Resume; edit them to replace the saved flags or clear
+the field to remove them. Existing running agents pick up changes on their next
+launch. The shell and slash commands support the same option:
+
+```sh
+python cli.py spawn codex --session billing --cwd /absolute/project --provider-flags='--model MODEL_NAME'
+python cli.py resume reviewer --session billing --provider-flags='--model MODEL_NAME'
+python cli.py resume reviewer --session billing --provider-flags=''
+```
+
+In chat, use `/spawn codex --provider-flags='--model MODEL_NAME'` or
+`/resume reviewer --provider-flags='--model MODEL_NAME'`. Omitting the option on
+Resume keeps the saved flags. Arguments pass directly to the selected provider;
+shell substitutions and pipelines are not evaluated.
+
+Resume shows the saved working directory as read-only and reuses it automatically;
+you do not need to enter it again. Add agent still lets you choose a directory.
+
+F3 always opens the agent chooser, including empty sessions. Its **Add agent**
+button opens the form directly and stays visible when search finds no matches.
+Use **Down** past the last result to reach the buttons, **Left/Right** to choose
+a button, **Enter** to activate it, and **Up** to return to the list. Inside
+agent actions, press **F3**, **Escape**, or **Back** to return to the chooser.
+Escape from the chooser returns to Message. Enter on an agent row or the
+Actions button opens actions for the highlighted agent directly.
+
+To remove an agent from the list, select it and choose **F3 → Remove agent**
+(or use the command palette). Confirm **Yes** to stop its wrapper and exact tmux
+session, discard its pending deliveries, and delete its saved entry. This works
+for running and terminated agents. Session chat, provider conversation files, and
+logs are kept. Successful removal returns focus to Message and keeps your draft.
+If cleanup fails, the entry stays available for retry. Restart the server and
+CLI to load this action. On macOS, a wrapper left over from a previous server
+process must be stopped in its original terminal before removal can proceed;
+Linux can verify and stop that orphan safely.
+
+Agent rows show the name, a colored status badge, an unread count, and the directory path:
+`● Ready` (green), `◆ Working` (cyan), `◌ Starting` (amber), `○ Stopped` (gray),
+and `× Error` (red). `! Input` is amber and takes priority while a prompt waits.
+The selected name has a cyan marker without hiding the status color. Open
+**Inspect agent** for the full path, history, session status, and recovery details.
+Long paths shorten to fit the row; status and Review input stay visible.
+
+On macOS/Linux, common terminal approval and confirmation prompts show
+**! Input · Attach** beside the agent and an amber **Review input** button for
+the selected waiting agent. Click that button (or Tab to it and press Enter) to
+open its tmux terminal and answer the prompt. **F3 → Attach** also works.
+Detach with **Ctrl+B, then D** to return to chat and your draft. This is best-effort detection of visible
+confirmation footers and yes/no prompts; custom dialogs may not be recognized.
+The hint clears when the prompt disappears. If terminal reports stop, the signal
+expires after 20 seconds and clears on the next status refresh. It does not
+approve anything or change the agent's running state.
+Existing server, CLI and wrapper processes need restarting to load this feature;
+Windows wrappers do not currently report this hint.
+
+Codex also recognizes MCP permission forms such as **Allow / Allow for this
+session / Always allow / Cancel** with an `enter to submit | esc to cancel`
+footer. For earlier notification through Codex lifecycle hooks, install the
+project hooks using the Python environment you intend to keep using:
+
+```sh
+python waiting_hooks.py install --provider codex --project /absolute/project/path
+```
+
+This adds notification commands to the project's `.codex/hooks.json`, preserving
+existing entries. In Codex, use **`/hooks`** to inspect and trust the added
+commands. New or changed hook definitions require native trust; the installer
+does not bypass it. Start/resume the agent through an updated agentchattr
+wrapper to enable its private event stream. Terminal detection works even when
+hooks are not installed or trusted. Existing running wrappers need relaunching.
+
+`PermissionRequest` signals waiting, including for MCP tools. `PostToolUse`,
+`Stop`, `Interrupt`, and `SessionEnd` clear matching tool, turn, or session hints.
+A visible prompt disappearing also clears the hint before a long tool finishes.
+Hook-only hints without matching terminal evidence expire after 60 seconds;
+this is advisory status, not an exact approval state machine. Each wrapper launch
+uses a separate private directory, so agent signals cannot mix across launches.
+Commands record only event/session/turn/tool identifiers, return no decision,
+and remain silent outside managed wrappers. Tool inputs and arguments are not
+stored. See the [Codex hook reference](https://learn.chatgpt.com/docs/hooks).
+
+Provider adapters can override `waiting_for_input(output)` for terminal forms,
+`prompt_event(payload)` to return a normalized `PromptEvent`, and
+`prompt_hook_config(command)` to describe native hooks. Codex is the first
+supported hook installer; other adapters retain generic terminal detection.
 
 | Interactive command | Action |
 | --- | --- |
@@ -302,6 +442,13 @@ Agents wake each other up, coordinate, and report back.
 
 ### Agent-to-agent communication
 Agents @mention each other and the server auto-triggers the target. Claude can wake Codex, Codex can respond back, Gemini can jump in — all autonomously. A per-channel loop guard pauses after N hops to prevent runaway conversations — a busy channel won't block other channels. Human @mentions always pass through, even when the loop guard is active. Type `/continue` to resume.
+
+`/continue` resets the guard and wakes the blocked recipients in that channel,
+once per agent. It respects current session membership and stopped agents.
+Only humans can resume; repeated `/continue` does not repeat successful wakes.
+If a wake cannot be queued, the chat reports it and `/continue` retries it.
+Guard state and pending wakes reset on server restart; use a fresh `@mention`
+to restart a conversation paused before the restart.
 
 ### Channels
 Conversations are organized into channels (like Slack). The default channel is `#general`. Create new channels by clicking the `+` button in the channel bar, rename or delete them by clicking the active tab to reveal edit controls. Channels persist across server restarts.

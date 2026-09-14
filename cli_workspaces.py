@@ -157,12 +157,20 @@ def run_workspace_command(api, args):
     workspace = _selected_workspace(api, selector)
     ws_id = workspace["id"]
 
+    provider_options = {}
+    if command in ('spawn', 'resume') and getattr(args, 'provider_flags', None) is not None:
+        from provider_args import parse_provider_flags
+        try:
+            provider_options['provider_args'] = parse_provider_flags(args.provider_flags)
+        except ValueError as error:
+            raise CLIError(str(error)) from None
     if command == "spawn":
         data = api.action(ws_id, "spawn", body={
             "provider": args.provider,
             "cwd": args.cwd,
             "history_mode": args.history_mode,
             "name": args.agent_name,
+            **provider_options,
         })
     elif command == "archive":
         data = api.action(ws_id, "archive")
@@ -179,6 +187,7 @@ def run_workspace_command(api, args):
                 "fresh": bool(args.fresh),
                 "name": args.agent_name,
                 "cwd": args.cwd,
+                **provider_options,
             })
         elif command == "history":
             data = api.action(ws_id, "history", agent_id,
@@ -283,6 +292,12 @@ class WorkspaceAPI:
     def get(self, ws_id):
         return self.request("GET", "/api/workspaces/" + quote(ws_id, safe=""))
 
+    def settings(self):
+        return self.request('GET', '/api/settings')
+
+    def set_loop_guard(self, hops):
+        return self.request('PATCH', '/api/settings/loop-guard', {'max_agent_hops': hops})
+
     def resolve(self, selector, include_archived=True):
         return resolve_session(self.list(include_archived)["workspaces"], selector)
 
@@ -303,7 +318,7 @@ class WorkspaceAPI:
             path = root + "/agents/" + quote(agent_id, safe="") + "/" + action
         if action in ("resume", "history") and body is None:
             body = {}
-        elif action in ("stop", "retry"):
+        elif action in ("stop", "retry", "remove"):
             body = None
         return self.request("POST", path, body)
 

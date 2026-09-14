@@ -57,14 +57,16 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             ui.state.viewport.anchor(10, ui.client.messages)
             await ui.wait_render()
             await ui._send('\x1b[<64;26;4M')
-            self.assertEqual(ui.view.conversation._visible_start, (8, 1))
+            # Header, body, and spacing make each short message three lines.
+            self.assertEqual(ui.view.conversation._visible_start, (9, 0))
             await ui._send('\x1b[<65;26;4M')
             self.assertEqual(ui.view.conversation._visible_start, (10, 0))
             ui.client.handle_event({'type': 'delete', 'ids': [10]})
             await ui.wait_render()
             self.assertEqual(ui.view.conversation._visible_start, (11, 0))
             await ui._send('\x1b[<64;26;4M')
-            self.assertEqual(ui.view.conversation._visible_start, (8, 1))
+            # Header, body, and spacing make each short message three lines.
+            self.assertEqual(ui.view.conversation._visible_start, (9, 0))
             await ui._send('\x1b[<65;26;4M')
             self.assertEqual(ui.view.conversation._visible_start, (11, 0))
             ui.view.focus_named('conversation')

@@ -33,7 +33,9 @@ _presence: dict[str, float] = {}
 _activity: dict[str, bool] = {}   # True = screen changed on last poll
 _activity_ts: dict[str, float] = {}  # timestamp of last active=True heartbeat
 ACTIVITY_TIMEOUT = 8  # auto-expire activity after 8s without a fresh active=True
-_presence_lock = threading.Lock()   # guards both _presence and _activity
+_input_waiting: dict[str, float] = {}  # last terminal confirmation observation
+INPUT_WAIT_TIMEOUT = 20  # longer than the wrapper's 8s idle refresh
+_presence_lock = threading.Lock()   # guards presence, activity and input hints
 _renamed_from: set[str] = set()    # old names from renames — suppress leave messages
 _cursors: dict[str, dict[str, int]] = {}  # agent_name → {channel_name → last_id}
 _cursors_lock = threading.Lock()
@@ -550,6 +552,8 @@ def migrate_identity(old_name: str, new_name: str):
             _activity[new_name] = _activity.pop(old_name)
         if old_name in _activity_ts:
             _activity_ts[new_name] = _activity_ts.pop(old_name)
+        if old_name in _input_waiting:
+            _input_waiting[new_name] = _input_waiting.pop(old_name)
         _renamed_from.add(old_name)  # suppress leave message for old name
     with _cursors_lock:
         if old_name in _cursors:
@@ -571,6 +575,7 @@ def purge_identity(name: str):
         _presence.pop(name, None)
         _activity.pop(name, None)
         _activity_ts.pop(name, None)
+        _input_waiting.pop(name, None)
     with _cursors_lock:
         _cursors.pop(name, None)
     with _last_read_lock:
@@ -832,6 +837,23 @@ def set_active(name: str, active: bool):
             _activity_ts[name] = __import__("time").time()
 
 
+def set_waiting_for_input(name: str, waiting: bool):
+    with _presence_lock:
+        if waiting:
+            _input_waiting[name] = time.time()
+        else:
+            _input_waiting.pop(name, None)
+
+
+def is_waiting_for_input(name: str) -> bool:
+    with _presence_lock:
+        observed = _input_waiting.get(name)
+        if observed is not None and time.time() - observed < INPUT_WAIT_TIMEOUT:
+            return True
+        _input_waiting.pop(name, None)
+        return False
+
+
 def is_active(name: str) -> bool:
     import time as _time
     with _presence_lock:
@@ -1048,4 +1070,3 @@ def run_http_server():
 def run_sse_server():
     """Block — run SSE MCP in a background thread."""
     mcp_sse.run(transport="sse")
-

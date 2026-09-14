@@ -50,6 +50,23 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
             ctl.bind_view(self.presenter, self.events.append)
         return ctl
 
+    async def test_remove_on_old_server_explains_restart_and_keeps_entry(self):
+        ctl = self.controller_with_workspace()
+        self.api.action.side_effect = CLIError('Not Found', 404)
+        outcome = await ctl.execute_action('remove', {'agent_id': 'ag_a'})
+        self.assertEqual(outcome.status, 'failed')
+        self.assertIn('Restart the agentchattr server', outcome.message)
+        self.assertIn('not removed', outcome.message)
+        self.assertEqual(ctl.workspace['agents'][0]['agent_id'], 'ag_a')
+        self.presenter.notice.assert_called_with(outcome.message)
+
+    async def test_remove_missing_agent_keeps_specific_server_error(self):
+        ctl = self.controller_with_workspace()
+        self.api.action.side_effect = CLIError('agent not found', 404)
+        outcome = await ctl.execute_action('remove', {'agent_id': 'ag_a'})
+        self.assertEqual(outcome.status, 'failed')
+        self.assertEqual(outcome.message, 'agent not found')
+
     async def test_resume_uses_one_mutation_and_returns_stable_ids(self):
         ctl = self.controller_with_workspace()
         self.assertTrue(callable(getattr(ctl, 'execute_action', None)), 'execute_action missing')

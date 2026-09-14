@@ -58,6 +58,17 @@ class RoutingRecipientsTests(unittest.TestCase):
         mid = self.post("@claude thoughts?")
         self.assertEqual(self.routed(mid), [self.stopped["agent_id"]])
 
+    def test_at_all_triggers_only_members_of_current_workspace(self):
+        other = self.ws_store.create('another project')
+        outside = self.ws_store.add_agent(other['id'], provider='claude', cwd='/p',
+            history_mode='none', registry_name='outside-reviewer', floor_id=0,
+            native_session_id=None, history_state='done', last_launch={'kind': 'spawn', 'nonce': 'other'})
+        self.ws_store.update_agent(other['id'], outside['agent_id'], last_state='running')
+        app_module.registry.register('claude', preferred_name='outside-reviewer')
+        self.post('@all status?')
+        self.assertTrue((Path(self.tmp) / 'codex-1_queue.jsonl').exists())
+        self.assertFalse((Path(self.tmp) / 'outside-reviewer_queue.jsonl').exists())
+
     def test_at_all_reaches_running_only(self):
         mid = self.post("@all status?")
         self.assertEqual(self.routed(mid), [self.running["agent_id"]])

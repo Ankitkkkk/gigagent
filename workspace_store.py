@@ -176,7 +176,7 @@ class WorkspaceStore:
 
     def add_agent(self, ws_id: str, *, provider: str, cwd: str, history_mode: str,
                   registry_name: str, floor_id: int, native_session_id: str | None,
-                  history_state: str, last_launch: dict) -> dict:
+                  history_state: str, last_launch: dict, provider_args: list[str] | None = None) -> dict:
         if history_mode not in HISTORY_MODES:
             raise ValueError(f"history_mode must be one of {HISTORY_MODES}")
         if history_state not in HISTORY_STATES:
@@ -191,6 +191,7 @@ class WorkspaceStore:
                 "registry_name": registry_name,
                 "cwd": str(cwd),
                 "previous_cwds": [],
+                "provider_args": list(provider_args or []),
                 "native_session_id": native_session_id,
                 "previous_native_ids": [],
                 "native_verified": False,
@@ -254,17 +255,21 @@ class WorkspaceStore:
             return json.loads(json.dumps(a))
 
     def remove_agent(self, ws_id: str, agent_id: str) -> bool:
-        """Only remove a spawn that failed before it ever ran."""
+        """Remove a failed spawn or an agent whose launcher cleanup completed."""
         with self._lock:
             ws = self._find(ws_id)
             if not ws:
                 return False
-            before = len(ws["agents"])
-            ws["agents"] = [a for a in ws["agents"] if a["agent_id"] != agent_id]
-            if len(ws["agents"]) == before:
+            previous_agents, previous_updated = ws["agents"], ws["updated_at"]
+            ws["agents"] = [a for a in previous_agents if a["agent_id"] != agent_id]
+            if len(ws["agents"]) == len(previous_agents):
                 return False
             self._touch(ws)
-            self._commit(ws_id)
+            try:
+                self._commit(ws_id)
+            except OSError:
+                ws["agents"], ws["updated_at"] = previous_agents, previous_updated
+                raise
             return True
 
     def update_agent_if_launch(self, ws_id: str, agent_id: str, nonce: str, **fields) -> bool:
@@ -335,6 +340,10 @@ class WorkspaceStore:
                 self._commit()
 
     # ---------- membership + recipients ----------
+
+    def is_workspace_channel(self, channel: str) -> bool:
+        with self._lock:
+            return any(ws["channel"] == channel for ws in self._workspaces)
 
     def members_in_channel(self, channel: str) -> list[dict]:
         with self._lock:

@@ -1,6 +1,7 @@
 """Server-owned process control for workspace agents (spec §2, §4, §6, §7)."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -14,9 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from providers import AmbiguousSessionId, LaunchContext, get_adapter
+from provider_args import validate_provider_args
 from registry import NameInUse
 from workspace_store import HISTORY_MODES
 from workspace_unread import bundle_prompt, unread
+from workspace_processes import stop_wrapper_process
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +41,25 @@ class LaunchError(Exception):
 
 
 class TmuxOps:
+    def remove_session(self, name: str) -> None:
+        """Removal requires verified absence, not best-effort kill success."""
+        target = '=' + name
+        def present():
+            result = subprocess.run(['tmux', 'has-session', '-t', target],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return True
+            error = (result.stderr or '').lower()
+            if any(text in error for text in ("can't find session", 'no server running', 'no such file or directory')):
+                return False
+            raise RuntimeError('Could not verify the agent tmux session; agent was kept for retry')
+        if not present():
+            return
+        result = subprocess.run(['tmux', 'kill-session', '-t', target],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode or present():
+            raise RuntimeError('Could not stop the agent tmux session; agent was kept for retry')
+
     def available(self) -> bool:
         return shutil.which("tmux") is not None
 
@@ -86,6 +108,8 @@ class WorkspaceLauncher:
         self._background = background or _daemon_background
         self._pending: dict[str, dict] = {}
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
+        self._processes: dict[str, subprocess.Popen] = {}
 
     def tmux_name(self, agent: dict) -> str:
         return f"agentchattr-{agent['agent_id']}"
@@ -162,7 +186,7 @@ class WorkspaceLauncher:
         ]
         for key, value in env.items():
             cmd += ["--provider-env", f"{key}={value}"]
-        return cmd + list(provider_args)
+        return cmd + ['--'] + list(provider_args) + agent.get('provider_args', [])
 
     def _launch(self, ws: dict, agent: dict, provider_args: list[str], env: dict[str, str]) -> int:
         logs = self.data_dir / "logs"
@@ -178,6 +202,7 @@ class WorkspaceLauncher:
             log_file.close()
         with self._lock:
             self._pending[agent["agent_id"]] = {"ws_id": ws["id"], "started": self._clock()}
+            self._processes[agent['agent_id']] = proc
         return proc.pid
 
     def _log_tail(self, agent_id: str) -> str:
@@ -203,7 +228,16 @@ class WorkspaceLauncher:
             ) from exc
 
     def spawn(self, ws_id: str, provider: str, cwd: str, history_mode: str,
-              name: str | None = None) -> dict:
+              name: str | None = None, provider_args: list[str] | None = None) -> dict:
+        with self._lifecycle_lock:
+            return self._spawn(ws_id, provider, cwd, history_mode, name, provider_args)
+
+    def _spawn(self, ws_id: str, provider: str, cwd: str, history_mode: str,
+               name: str | None = None, provider_args: list[str] | None = None) -> dict:
+        try:
+            provider_args = validate_provider_args([] if provider_args is None else provider_args)
+        except ValueError as error:
+            raise LaunchError(400, str(error)) from None
         ws = self.store.get(ws_id)
         adapter = self._validate(ws, provider, cwd)
         if history_mode not in HISTORY_MODES:
@@ -221,13 +255,14 @@ class WorkspaceLauncher:
             session_id = adapter.allocate_session_id()
             last_launch = {
                 "kind": "spawn", "nonce": uuid.uuid4().hex, "at": _now_iso(), "pid": None,
+                "identity_prompt_sent": False, "startup_delivery_done": False,
             }
             agent = self.store.add_agent(
                 ws_id, provider=provider, cwd=str(Path(cwd).resolve()), history_mode=history_mode,
                 registry_name=reg["name"], floor_id=self._floor_for(history_mode, ws["channel"]),
                 native_session_id=session_id,
                 history_state="done" if history_mode == "none" else "pending",
-                last_launch=last_launch,
+                last_launch=last_launch, provider_args=provider_args,
             )
             self.store.write_identity(ws, agent, reg["token"])
             launch = self.launch_context_for(agent)
@@ -247,11 +282,23 @@ class WorkspaceLauncher:
         return self.store.update_agent(ws_id, agent["agent_id"], last_launch=last_launch)
 
     def resume(self, ws_id: str, agent_id: str, fresh: bool = False,
-               name: str | None = None, cwd: str | None = None) -> dict:
+               name: str | None = None, cwd: str | None = None,
+               provider_args: list[str] | None = None) -> dict:
+        with self._lifecycle_lock:
+            return self._resume(ws_id, agent_id, fresh, name, cwd, provider_args)
+
+    def _resume(self, ws_id: str, agent_id: str, fresh: bool = False,
+                name: str | None = None, cwd: str | None = None,
+                provider_args: list[str] | None = None) -> dict:
         ws = self.store.get(ws_id)
         agent = self.store.get_agent(ws_id, agent_id) if ws else None
         if agent is None:
             raise LaunchError(404, "agent not found")
+        try:
+            provider_args = validate_provider_args(agent.get('provider_args', [])
+                                                   if provider_args is None else provider_args)
+        except ValueError as error:
+            raise LaunchError(400, str(error)) from None
         requested_cwd = cwd if cwd is not None else agent["cwd"]
         adapter = self._validate(ws, agent["provider"], requested_cwd)
         effective_cwd = str(Path(requested_cwd).resolve())
@@ -284,6 +331,7 @@ class WorkspaceLauncher:
             )
         }
         original_identity = self.store.read_identity(agent_id)
+        restore['provider_args'] = agent.get('provider_args', [])
         preferred = name or agent["registry_name"]
         if name and name != agent["registry_name"] and name in set(self.store.member_names()):
             raise LaunchError(400, f"name in use by a saved agent: {name}")
@@ -293,7 +341,8 @@ class WorkspaceLauncher:
                 ws, agent["provider"], preferred, custom=False,
                 allow_reserved=(preferred == agent["registry_name"]),
             )
-            fields = {"registry_name": reg["name"], "last_state": "starting", "last_error": None}
+            fields = {"registry_name": reg["name"], "last_state": "starting", "last_error": None,
+                      "provider_args": provider_args}
             if effective_cwd != agent["cwd"]:
                 fields["cwd"] = effective_cwd
                 fields["previous_cwds"] = agent.get("previous_cwds", []) + [agent["cwd"]]
@@ -310,6 +359,7 @@ class WorkspaceLauncher:
                 session_id = new_session_id
             fields["last_launch"] = {
                 "kind": kind, "nonce": uuid.uuid4().hex, "at": _now_iso(), "pid": None,
+                "identity_prompt_sent": False, "startup_delivery_done": False,
             }
             agent = self.store.update_agent(ws_id, agent_id, **fields)
             self.store.write_identity(ws, agent, reg["token"])
@@ -335,11 +385,21 @@ class WorkspaceLauncher:
         return self.store.update_agent(ws_id, agent_id, last_launch=last_launch)
 
     def on_heartbeat(self, registry_name: str, ready: bool, pid: int | None) -> None:
+        with self._lifecycle_lock:
+            self._on_heartbeat(registry_name, ready, pid)
+
+    def _on_heartbeat(self, registry_name: str, ready: bool, pid: int | None) -> None:
         found = self.store.find_agent_by_registry_name(registry_name)
         if not found:
             return
         ws, agent = found
-        if agent["last_state"] != "starting" or not ready:
+        if not ready:
+            return
+        if (agent["last_state"] == "running"
+                and (agent.get("last_launch") or {}).get("startup_delivery_done") is False):
+            self._background(self._after_ready, ws["id"], agent["agent_id"], agent["last_launch"].get("nonce"))
+            return
+        if agent["last_state"] != "starting":
             return
         last_launch = dict(agent["last_launch"])
         last_launch["pid"] = pid
@@ -357,27 +417,52 @@ class WorkspaceLauncher:
         return ok
 
     def _after_ready(self, ws_id: str, agent_id: str, nonce: str) -> None:
-        ws = self.store.get(ws_id)
-        agent = self.store.get_agent(ws_id, agent_id)
-        if not ws or not agent or (agent.get("last_launch") or {}).get("nonce") != nonce:
-            return
-        kind = agent["last_launch"].get("kind", "spawn")
-        if agent["history_mode"] == "literal" and agent["history_state"] == "pending":
-            if not self._update_if_launch(ws_id, agent_id, nonce, history_state="done"):
+        with self._lifecycle_lock:
+            ws = self.store.get(ws_id)
+            agent = self.store.get_agent(ws_id, agent_id)
+            if not ws or not agent or (agent.get("last_launch") or {}).get("nonce") != nonce:
                 return
-            try:
-                self.agents.trigger_sync(
-                    agent["registry_name"], message="catch up", channel=ws["channel"],
-                    prompt=LITERAL_PROMPT.format(channel=ws["channel"]),
+            if agent['last_launch'].get('startup_delivery_done'):
+                return
+            kind = agent["last_launch"].get("kind", "spawn")
+            catch_up = agent["history_mode"] == "literal" and agent["history_state"] == "pending"
+            identity_pending = not agent["last_launch"].get("identity_prompt_sent", False)
+            if catch_up or identity_pending:
+                if catch_up and not self._update_if_launch(ws_id, agent_id, nonce, history_state="done"):
+                    return
+                prompt = (
+                    f"Your assigned agent name for this session is {json.dumps(agent['registry_name'])}. "
+                    f"Your session channel is #{ws['channel']}. This assigned name is authoritative; "
+                    "do not infer your identity from chat history or another agent's messages. "
+                    "Use this exact name as sender when calling chat_send. "
                 )
-            except Exception:
-                self._update_if_launch(ws_id, agent_id, nonce, history_state="pending")
-                log.exception("failed to enqueue literal catch-up for %s", agent_id)
+                prompt += (LITERAL_PROMPT.format(channel=ws['channel']) if catch_up else
+                           "Wait for requests addressed to you in this session; no history catch-up is requested.")
+                try:
+                    self.agents.trigger_sync(
+                        agent["registry_name"], message="catch up" if catch_up else "session identity",
+                        channel=ws["channel"], prompt=prompt,
+                    )
+                except Exception:
+                    if catch_up:
+                        self._update_if_launch(ws_id, agent_id, nonce, history_state="pending")
+                    log.exception("failed to enqueue startup prompt for %s", agent_id)
+                    return
+                launch = dict(agent["last_launch"], identity_prompt_sent=True)
+                if not self._update_if_launch(ws_id, agent_id, nonce, last_launch=launch):
+                    return
+            if kind in ("resume", "fresh"):
+                try:
+                    self._send_bundle(ws, self.store.get_agent(ws_id, agent_id))
+                except Exception:
+                    log.exception("failed to enqueue startup unread bundle for %s", agent_id)
+                    return
+            agent = self.store.get_agent(ws_id, agent_id)
+            launch = dict(agent['last_launch'], startup_delivery_done=True)
+            if not self._update_if_launch(ws_id, agent_id, nonce, last_launch=launch):
                 return
-        if kind in ("resume", "fresh"):
-            self._send_bundle(ws, self.store.get_agent(ws_id, agent_id))
-        adapter = self._adapter(agent["provider"])
-        agent = self.store.get_agent(ws_id, agent_id)
+            adapter = self._adapter(agent["provider"])
+            agent = self.store.get_agent(ws_id, agent_id)
         if agent["native_session_id"] is None:
             try:
                 session_id = adapter.discover_session_id(
@@ -414,6 +499,10 @@ class WorkspaceLauncher:
             self._update_if_launch(ws_id, agent_id, nonce, native_verified=found)
 
     def tick(self) -> None:
+        with self._lifecycle_lock:
+            self._tick()
+
+    def _tick(self) -> None:
         with self._lock:
             pending = dict(self._pending)
         now = self._clock()
@@ -455,6 +544,10 @@ class WorkspaceLauncher:
             self._background(hard_kill)
 
     def stop(self, ws_id: str, agent_id: str) -> dict:
+        with self._lifecycle_lock:
+            return self._stop(ws_id, agent_id)
+
+    def _stop(self, ws_id: str, agent_id: str) -> dict:
         agent = self.store.get_agent(ws_id, agent_id)
         if agent is None:
             raise LaunchError(404, "agent not found")
@@ -463,6 +556,40 @@ class WorkspaceLauncher:
             self._terminate_launch(ws_id, agent, "stopped by user")
             self.store.update_agent(ws_id, agent_id, last_error=None)
         return self.store.get_agent(ws_id, agent_id)
+
+    def remove(self, ws_id: str, agent_id: str) -> dict:
+        with self._lifecycle_lock:
+            agent = self.store.get_agent(ws_id, agent_id)
+            if agent is None:
+                raise LaunchError(404, 'agent not found')
+            identity = self.store.read_identity(agent_id)
+            name = agent['registry_name']
+            try:
+                if agent['last_state'] == 'running':
+                    self.checkpoint(ws_id)
+                with self._lock:
+                    proc = self._processes.get(agent_id)
+                stop_wrapper_process(self._wrapper_pid(agent), self.root,
+                                     self.store.identity_path(agent_id), self.tmux_name(agent),
+                                     owned_process=proc)
+                self._tmux.remove_session(self.tmux_name(agent))
+                # A stopped saved name might now be used by an unrelated runtime
+                # agent. Its token and queue must not be revoked by this removal.
+                token = (identity or {}).get('token')
+                owned = self.registry.resolve_token(token) if token else None
+                if owned and owned['name'] == name:
+                    self.registry.deregister(name, expected_token=token, rename_remaining=False)
+                if self.registry.get_instance(name) is None:
+                    (self.data_dir / f'{name}_queue.jsonl').unlink(missing_ok=True)
+                    self.registry.clean_renames_for(name)
+                self.store.identity_path(agent_id).unlink(missing_ok=True)
+                with self._lock:
+                    self._pending.pop(agent_id, None)
+                    self._processes.pop(agent_id, None)
+                self.store.remove_agent(ws_id, agent_id)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                raise LaunchError(409, f'Could not remove agent: {exc}') from exc
+            return self.store.get(ws_id)
 
     def checkpoint(self, ws_id: str) -> dict:
         ws = self.store.get(ws_id)
@@ -548,6 +675,10 @@ class WorkspaceLauncher:
         return len(items)
 
     def retry(self, ws_id: str, agent_id: str) -> None:
+        with self._lifecycle_lock:
+            self._retry(ws_id, agent_id)
+
+    def _retry(self, ws_id: str, agent_id: str) -> None:
         ws = self.store.get(ws_id)
         agent = self.store.get_agent(ws_id, agent_id) if ws else None
         if agent is None:

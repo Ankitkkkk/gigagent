@@ -47,6 +47,9 @@ async def workflow_harness(*, rows=(), selected=None, plain=False, no_resume=Tru
     api.rename.side_effect = rename
     def action(ident, action, agent_id=None, body=None):
         ws = records[ident]
+        if action == 'remove':
+            ws['agents'] = [a for a in ws['agents'] if a['agent_id'] != agent_id]
+            return copy.deepcopy(ws)
         if action in ('archive', 'unarchive'):
             ws['archived'] = action == 'archive'
             return copy.deepcopy(ws)
@@ -95,6 +98,61 @@ async def workflow_harness(*, rows=(), selected=None, plain=False, no_resume=Tru
 
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remove_stopped_agent_confirmation_and_return_to_message(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            ui.view.composer.text = 'keep my draft'
+            await ui.key('F3')
+            await self.modal(ui, 'Choose agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'Agent actions: ag_one')
+            await ui.type_text('Remove agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'Remove')
+            self.assertIn('tmux', ui.screen_text())
+            await ui.key('Escape')
+            ui.api.action.assert_not_called()
+            self.assertEqual(len(ui.controller.workspace['agents']), 1)
+            task = ui.start(ui.workflows.run_action('remove', target_id='ag_one'))
+            await self.modal(ui, 'Remove')
+            await ui.key('Left')
+            await ui.key('Enter')
+            await task
+            ui.api.action.assert_called_once_with('ws_one', 'remove', 'ag_one')
+            self.assertEqual(ui.controller.workspace['agents'], [])
+            self.assertEqual(ui.view.composer.text, 'keep my draft')
+            self.assertEqual(ui.focused_control, 'composer')
+
+    async def test_escape_from_agent_menu_and_details_returns_to_typing(self):
+        async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
+            ui.state.selected_agent_id = 'ag_one'
+            ui.view.composer.text = 'draft stays'
+            ui.view.composer.buffer.cursor_position = 5
+            await ui.key('F3')
+            await self.modal(ui, 'Choose agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'Agent actions: ag_one')
+            await ui.type_text('Inspect agent')
+            await ui.key('Enter')
+            await ui.wait_until(lambda: ui.view.inspecting)
+            await ui.key('Escape')
+            self.assertEqual(ui.focused_control, 'composer')
+            self.assertFalse(ui.view.inspecting)
+            await ui.type_text('!')
+            self.assertEqual(ui.view.composer.text, 'draft! stays')
+            # Cancel a menu opened from the agent pane, then leave that pane.
+            ui.view.focus_named('agents')
+            await ui.key('F3')
+            await self.modal(ui, 'Choose agent')
+            await ui.key('Enter')
+            await self.modal(ui, 'Agent actions: ag_one')
+            await ui.key('Escape')
+            await ui.key('Escape')
+            self.assertEqual(ui.focused_control, 'composer')
+            ui.view.focus_named('agent_actions')
+            await ui.key('Escape')
+            self.assertEqual(ui.focused_control, 'composer')
+
     async def modal(self, ui, text):
         await ui.wait_until(lambda: ui.dialogs.future is not None and text in ui.screen_text())
 
@@ -196,12 +254,46 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             await ui.key('Escape')
             await task
 
+    async def test_f3_can_choose_another_agent_after_previous_selection(self):
+        for size in ((120, 35), (90, 24)):
+            with self.subTest(size=size):
+                async with workflow_harness(selected=workspace(agents=[agent(), agent('ag_two')]),
+                                            size=size) as ui:
+                    ui.view.composer.text = 'draft stays'
+                    ui.state.selected_agent_id = 'ag_one'
+                    for ident in ('ag_two', 'ag_one'):
+                        await ui.key('F3')
+                        await self.modal(ui, 'Choose agent')
+                        await ui.type_text(ident)
+                        await ui.key('Enter')
+                        await self.modal(ui, 'Agent actions: ' + ident)
+                        self.assertEqual(ui.state.selected_agent_id, ident)
+                        await ui.type_text('Inspect agent')
+                        await ui.key('Enter')
+                        await ui.wait_until(lambda: ui.view.inspecting)
+                        await ui.key('Escape')
+                        self.assertEqual(ui.focused_control, 'composer')
+                    # Cancelling the picker preserves the current selection.
+                    await ui.key('F3')
+                    await self.modal(ui, 'Choose agent')
+                    await ui.key('Escape')
+                    self.assertEqual(ui.state.selected_agent_id, 'ag_one')
+                    self.assertEqual(ui.view.composer.text, 'draft stays')
+                    ui.api.action.assert_not_called()
+                    # Explicit row actions continue targeting the highlighted agent.
+                    ui.view.focus_named('agents')
+                    await ui.key('Enter')
+                    await self.modal(ui, 'Agent actions: ag_one')
+                    await ui.key('Escape')
+
     async def test_agent_actions_menu_real_f3_enter_and_mouse(self):
         async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
             ui.state.selected_agent_id = 'ag_one'
             for open_menu in ('F3', 'Enter', 'mouse'):
                 if open_menu == 'F3':
                     await ui.key('F3')
+                    await self.modal(ui, 'Choose agent')
+                    await ui.key('Enter')
                 elif open_menu == 'Enter':
                     ui.view.focus_named('agents')
                     await ui.key('Enter')
@@ -218,7 +310,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                               'History settings', 'Inspect agent'):
                     self.assertIn(label, ui.screen_text())
                 await ui.key('Escape')
+                await self.modal(ui, 'Choose agent')
+                await ui.key('Escape')
             await ui.key('F3')
+            await self.modal(ui, 'Choose agent')
+            await ui.key('Enter')
             await self.modal(ui, 'Agent actions: ag_one')
             await ui.paste('History settings')
             await ui.key('Enter')
@@ -329,13 +425,15 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             choice = next(c for c in ui.view.action_choices() if c['id'] == 'quit')
             self.assertEqual(choice['description'], 'Disconnect')
 
-    async def test_empty_agent_actions_can_add_and_composer_clear_is_visible(self):
+    async def test_empty_agent_chooser_can_add_and_composer_clear_is_visible(self):
         async with workflow_harness(selected=workspace()) as ui:
             await ui.key('F3')
-            await self.modal(ui, 'Agent actions')
+            await self.modal(ui, 'Choose agent')
             self.assertIn('Add agent', ui.screen_text())
-            await ui.paste('Add agent')
-            await ui.key('Enter')
+            title_y = next(y for y, row in enumerate(ui.rows) if 'Choose agent' in row)
+            y, row = next((y, row) for y, row in enumerate(ui.rows)
+                          if y > title_y and '<Add agent >' in row)
+            await ui.click(row.index('Add agent'), y)
             await self.modal(ui, 'New agent')
             await ui.key('Escape')
             await ui.paste('clear me')
@@ -415,13 +513,12 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_form_labels_and_archived_context(self):
         async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
-            for action, expected in [('resume', 'Working directory:'),
+            for action, expected in [('resume', 'Working directory (read-only):'),
                                      ('history', 'History mode [none/literal]:')]:
                 task = ui.start(ui.workflows.agent_form(action, 'ag_one'))
                 await self.modal(ui, expected)
-                self.assertNotIn('Working directory (', ui.screen_text())
                 if action == 'resume':
-                    self.assertIn('Blank working directory keeps', ui.screen_text())
+                    self.assertIn('Resume automatically uses the saved working directory.', ui.screen_text())
                 await ui.key('Escape')
                 await task
             task = ui.start(ui.workflows.confirm_selection('Unarchive it? [y/N]',
@@ -758,7 +855,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(remaining=len(agents)):
                 async with workflow_harness(selected=workspace(agents=agents)) as ui:
                     ui.state.selected_agent_id = 'ag_gone'
-                    await ui.key('F3')
+                    ui.view.focus_named('agent_actions')
+                    await ui.key('Enter')
                     await self.modal(ui, 'Agent actions')
                     self.assertIsNone(ui.state.selected_agent_id)
                     self.assertEqual(ui.state.notices.lines.count('Selected agent is no longer available.'), 1)
@@ -1112,12 +1210,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await selecting
 
-    async def test_resume_changed_directory_and_explicit_fresh_payload(self):
+    async def test_resume_saved_directory_and_explicit_fresh_payload(self):
         with tempfile.TemporaryDirectory() as cwd:
-            async with workflow_harness(selected=workspace(agents=[agent(cwd='/missing/old')])) as ui:
+            async with workflow_harness(selected=workspace(agents=[agent(cwd=cwd)])) as ui:
                 task = ui.start(ui.workflows.agent_form('resume', 'ag_one'))
                 await self.modal(ui, 'Resume agent')
-                await ui.paste(cwd)
                 await ui.focus_field('launch_mode')
                 await ui.key('Down')
                 await ui.key('Enter')
@@ -1125,7 +1222,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await ui._send('y')
                 self.assertEqual((await task).status, 'completed')
                 ui.api.action.assert_called_once_with('ws_one', 'resume', 'ag_one',
-                    body={'fresh': True, 'cwd': cwd, 'name': None})
+                    body={'fresh': True, 'cwd': None, 'name': None, 'provider_args': []})
 
     async def test_small_help_and_modal_help_preserve_focus_values_on_resize(self):
         async with workflow_harness(selected=workspace(), size=(70, 16)) as ui:

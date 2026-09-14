@@ -8,6 +8,7 @@ import threading
 
 from prompt_toolkit.application import Application, in_terminal
 from prompt_toolkit.application.current import set_app
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
@@ -116,7 +117,8 @@ class TuiApplication:
             self._schedule_signal()
 
         self.application = Application(layout=Layout(self.view.root, focused_element=self.view.composer),
-            input=input, output=output, full_screen=True, mouse_support=True,
+            input=input, output=output, full_screen=True,
+            mouse_support=Condition(lambda: not self.view.selecting_text),
             key_bindings=merge_key_bindings([self.view.global_key_bindings, bindings]), style=self.view.style)
 
     def _dialog_owner(self, task):

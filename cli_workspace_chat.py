@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 
 import cli_api
+from provider_args import parse_provider_flags, validate_provider_args
 from cli_api import CLIError
 from cli_workspaces import (WINDOWS_TMUX_ERROR, WorkspaceCommandResult,
                             attach_agent, format_workspace_result, require_tmux_platform,
@@ -163,6 +164,8 @@ def _agent_line(agent):
     if state == 'starting' and (agent.get('last_launch') or {}).get('kind') == 'fresh':
         state = 'fresh'
     line = f'{_agent_label(agent)} {state}'
+    if agent.get('waiting_for_input') and agent.get('last_state') in ('running', 'starting'):
+        line += ' · Waiting for input — Attach'
     if agent.get('unread_count'):
         line += f' (unread {agent["unread_count"]})'
     if not agent.get('native_session_id'):
@@ -305,8 +308,8 @@ async def choose_workspace(api, prompt, output, *, selector=None, no_resume=Fals
 SESSION_COMMANDS = {'/spawn', '/resume', '/stop', '/retry', '/unread', '/history',
                     '/rename', '/archive', '/sessions', '/attach'}
 SUMMARY_ERROR = 'summary history mode is not available in this version; use literal or none'
-SESSION_HELP = """/spawn PROVIDER [--agent-name NAME] [--cwd PATH] [--history-mode none|literal]
-/resume AGENT [--fresh] [--agent-name NAME] [--cwd PATH]
+SESSION_HELP = """/spawn PROVIDER [--agent-name NAME] [--cwd PATH] [--history-mode none|literal] [--provider-flags='FLAGS']
+/resume AGENT [--fresh] [--agent-name NAME] [--cwd PATH] [--provider-flags='FLAGS']
 /attach AGENT        Attach to an agent terminal
 /stop AGENT          Stop a session agent
 /agents              Show session agents and other live agents
@@ -331,6 +334,8 @@ class _ChatParser(argparse.ArgumentParser):
 
 def _parse_command(command, words):
     parser = _ChatParser(prog=command, add_help=False, allow_abbrev=False)
+    if command in ('/spawn', '/resume'):
+        parser.add_argument('--provider-flags')
     if command == '/spawn':
         parser.add_argument('provider')
         parser.add_argument('--cwd')
@@ -630,6 +635,9 @@ class WorkspaceChatController:
         return sorted(words)
 
     def _agent_status(self, agent):
+        live = self.client.status.get(agent.get('registry_name'))
+        if self.client.websocket is not None and isinstance(live, dict) and 'waiting_for_input' in live:
+            agent = dict(agent, waiting_for_input=live['waiting_for_input'])
         line = _agent_line(agent) + f' · {agent.get("provider", "unknown")}'
         if _agent_cwd(agent) is not None:
             line += f' · cwd {agent["cwd"]}'
@@ -771,12 +779,13 @@ class WorkspaceChatController:
 
     def _validate_action(self, action, payload):
         fields = {
+            'set_loop_guard': {'max_agent_hops'},
             'create_session': {'name'}, 'rename_session': {'name'},
             'select_session': {'session_id'},
             'archive_session': {'confirmed'},
-            'spawn': {'provider', 'cwd', 'name', 'history_mode'},
-            'resume': {'agent_id', 'fresh', 'cwd', 'name'},
-            'stop': {'agent_id'}, 'attach': {'agent_id'}, 'unread': {'agent_id'},
+            'spawn': {'provider', 'cwd', 'name', 'history_mode', 'provider_args'},
+            'resume': {'agent_id', 'fresh', 'cwd', 'name', 'provider_args'},
+            'stop': {'agent_id'}, 'remove': {'agent_id'}, 'attach': {'agent_id'}, 'unread': {'agent_id'},
             'retry': {'agent_id'}, 'history': {'agent_id', 'mode'},
         }
         if not isinstance(action, str) or action not in fields:
@@ -784,13 +793,21 @@ class WorkspaceChatController:
         if not isinstance(payload, dict):
             raise CLIError('action payload must be an object')
         allowed = fields[action]
-        required = set() if action == 'unread' else allowed
+        required = set() if action == 'unread' else allowed - {'provider_args'}
         if set(payload) - allowed:
             raise CLIError('unexpected action fields: ' + ', '.join(sorted(map(str, set(payload) - allowed))))
         if required - set(payload):
             raise CLIError('missing action fields: ' + ', '.join(sorted(required - set(payload))))
         for key, value in payload.items():
-            if key in ('fresh', 'confirmed'):
+            if key == 'max_agent_hops':
+                if type(value) is not int or not 1 <= value <= 50:
+                    raise CLIError('Enter a whole number from 1 to 50')
+            elif key == 'provider_args':
+                try:
+                    validate_provider_args(value)
+                except ValueError as error:
+                    raise CLIError(str(error)) from None
+            elif key in ('fresh', 'confirmed'):
                 if not isinstance(value, bool):
                     raise CLIError(f'{key} must be a boolean')
             elif value is None and (key == 'cwd' and action == 'resume'
@@ -806,7 +823,8 @@ class WorkspaceChatController:
             _validate_history(mode)
         if action in ('spawn', 'resume', 'attach'):
             require_tmux_platform()
-        if self.plain_channel or (self.workspace is None and action not in ('create_session', 'select_session')):
+        if action != 'set_loop_guard' and (self.plain_channel or
+                self.workspace is None and action not in ('create_session', 'select_session')):
             raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
         agent_id = payload.get('agent_id')
         if agent_id is not None:
@@ -831,7 +849,9 @@ class WorkspaceChatController:
         if action == 'select_session':
             return await self.select_session(payload['session_id'])
         generation = self._selection_version
-        key = (ws_id, generation, action, tuple(sorted(payload.items())))
+        key = (ws_id, generation, action,
+               tuple(sorted((field, tuple(value) if isinstance(value, list) else value)
+                            for field, value in payload.items())))
         if key in self._active_actions:
             message = 'Session action already in progress.'
             self._notice(message)
@@ -840,7 +860,7 @@ class WorkspaceChatController:
         try:
             # Admission precedes the first await. Dialogs are gathered by callers.
             async with self._action_lock:
-                if generation != self._selection_version or (self._closed and action != 'create_session'):
+                if generation != self._selection_version or (self._closed and action not in ('create_session', 'set_loop_guard')):
                     return ActionOutcome('cancelled', workspace_id=ws_id, agent_id=agent_id)
                 try:
                     self._validate_action(action, payload)
@@ -859,7 +879,13 @@ class WorkspaceChatController:
     async def _execute_locked(self, action, payload, ws_id, workspace, version):
         agent_id = payload.get('agent_id')
         try:
-            if action == 'create_session':
+            if action == 'set_loop_guard':
+                result = await self._run_mutation(self.api.set_loop_guard, payload['max_agent_hops'])
+                if (not isinstance(result, dict) or result.get('max_agent_hops') != payload['max_agent_hops']):
+                    raise CLIError('Server did not confirm the loop guard value; reopen Loop guard to check.')
+                self._notice(f"Loop guard set to {result['max_agent_hops']} hops for all sessions.")
+                return ActionOutcome('completed', workspace_id=ws_id)
+            elif action == 'create_session':
                 result = await self._run_mutation(self.api.create, payload['name'])
                 return ActionOutcome('completed', workspace_id=result['id'])
             if action == 'archive_session':
@@ -883,7 +909,8 @@ class WorkspaceChatController:
             elif action == 'spawn':
                 agent = await self._run_mutation(self.api.action, ws_id, 'spawn', body={
                     'provider': payload['provider'], 'cwd': payload['cwd'],
-                    'history_mode': payload['history_mode'], 'name': payload['name']})
+                    'history_mode': payload['history_mode'], 'name': payload['name'],
+                    **({'provider_args': payload['provider_args']} if 'provider_args' in payload else {})})
                 agent_id = agent['agent_id']
                 if self._accept_snapshot(version):
                     self._store_agent(agent)
@@ -907,15 +934,26 @@ class WorkspaceChatController:
                 kwargs = {}
                 if action == 'resume':
                     kwargs['body'] = {'fresh': payload['fresh'], 'name': payload['name'], 'cwd': payload['cwd']}
+                    if 'provider_args' in payload:
+                        kwargs['body']['provider_args'] = payload['provider_args']
                 elif action == 'history':
                     kwargs['body'] = {'mode': payload['mode']}
                 result = await self._run_mutation(self.api.action, ws_id, action, agent_id, **kwargs)
                 if action == 'retry':
                     self._notice('Retry requested.')
+                elif action == 'remove':
+                    if self._accept_snapshot(version):
+                        self.on_workspace(result)
+                    self._notice('Agent removed. Session chat and provider conversation files were kept.')
                 elif self._accept_snapshot(version):
                     self._store_agent(result)
             return ActionOutcome('completed', workspace_id=ws_id, agent_id=agent_id)
         except (CLIError, OSError, TimeoutError) as error:
+            if (action == 'remove' and isinstance(error, CLIError)
+                    and error.status == 404 and error.message == 'Not Found'):
+                error = CLIError('This server does not support Remove agent. '
+                                 'Restart the agentchattr server, then retry. '
+                                 'The agent was not removed.', 404)
             resume = ((_RESUME_COMMAND.get() or argparse.Namespace(agent=agent_id, fresh=payload['fresh'],
                       agent_name=payload['name'], cwd=payload['cwd'])) if action == 'resume' else None)
             return self._failed_action(error, ws_id, agent_id, resume=resume)
@@ -966,6 +1004,11 @@ class WorkspaceChatController:
                     payload.update(fresh=args.fresh, name=args.agent_name, cwd=args.cwd)
                 elif command == '/history':
                     payload['mode'] = mode
+            if command in ('/spawn', '/resume') and args.provider_flags is not None:
+                try:
+                    payload['provider_args'] = parse_provider_flags(args.provider_flags)
+                except ValueError as error:
+                    raise CLIError(str(error)) from None
             if generation != self._selection_version:
                 return ActionOutcome('cancelled', workspace_id=ws_id)
             # Task-local diagnostics retain the user's selector without extending payloads.

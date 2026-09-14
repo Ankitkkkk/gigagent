@@ -8,6 +8,158 @@ from tests._tui_harness import tui_harness
 
 
 class ViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_rows_use_compact_symbols_and_preserve_selected_status_color(self):
+        async with tui_harness(size=(120, 35)) as ui:
+            rows = [dict(agent_id='ag_' + state, registry_name=name, provider='codex',
+                         cwd='/private/verbose/project/path', native_session_id='native-secret',
+                         history_state='done', last_state=state, **extra)
+                    for state, name, extra in (
+                        ('running', 'codex-2', {'waiting_for_input': True, 'unread_count': 2}),
+                        ('starting', 'claude-1', {}), ('exited', 'gemini-1', {}))]
+            ui.controller._select(dict(id='ws_one', name='One', channel='general', agents=rows))
+            ui.state.selected_agent_id = 'ag_running'
+            await ui.wait_render()
+            fragments = ui.view._agent_fragments()
+            text = ''.join(f[1] for f in fragments)
+            self.assertIn('! Input', text)
+            self.assertIn('Attach', text)
+            self.assertIn('✉ 2', text)
+            self.assertIn('◌ Starting', text)
+            self.assertIn('○ Stopped', text)
+            self.assertIn('/private/verbose/project/path', text)
+            for hidden in ('native-secret', 'history done', 'id present', 'cwd'):
+                self.assertNotIn(hidden, text)
+            waiting = next(f for f in fragments if '! Input' in f[1])
+            attrs = ui.view.style.get_attrs_for_style_str(waiting[0])
+            self.assertEqual(attrs.color, 'ansiyellow')
+            self.assertTrue(attrs.bold)
+            self.assertIn('/private/verbose/project/path', ui.view.inspector_text())
+            ui.client.websocket = object()
+            ui.client.handle_event({'type': 'status', 'data': {'codex-2': {
+                'waiting_for_input': False, 'busy': True}}})
+            await ui.wait_render()
+            self.assertIn('◆ Working', ''.join(f[1] for f in ui.view._agent_fragments()))
+            ui.client.handle_event({'type': 'status', 'data': {'codex-2': {
+                'waiting_for_input': False, 'busy': False}}})
+            await ui.wait_render()
+            self.assertIn('● Ready', ''.join(f[1] for f in ui.view._agent_fragments()))
+            ui.client.websocket = None
+
+    async def test_compact_agent_badge_keeps_input_action_with_long_name(self):
+        from prompt_toolkit.utils import get_cwidth
+        async with tui_harness(size=(80, 18)) as ui:
+            row = dict(agent_id='ag_one', registry_name='界' * 100, provider='codex',
+                       last_state='running', waiting_for_input=True, unread_count=5)
+            ui.controller._select(dict(id='ws_one', name='One', channel='general', agents=[row]))
+            await ui.wait_render()
+            text = ''.join(f[1] for f in ui.view._agent_fragments()).rstrip('\n')
+            self.assertIn('! Input', text)
+            self.assertIn('Attach', text)
+            self.assertIn('✉ 5', text)
+            self.assertLessEqual(get_cwidth(text), 65)
+
+    async def test_waiting_hint_visible_before_long_cwd_and_clears_without_losing_draft(self):
+        async with tui_harness(size=(140, 35)) as ui:
+            agent = {'agent_id': 'ag_hint', 'registry_name': 'codex-1', 'provider': 'codex',
+                     'last_state': 'running', 'waiting_for_input': True, 'cwd': '/' + 'long/' * 40}
+            ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': [agent]})
+            ui.view.composer.text = 'unfinished message'
+            ui.view.composer.buffer.cursor_position = 4
+            await ui.wait_render()
+            self.assertIn('! Input', ui.screen_text())
+            self.assertIn('Attach', ui.screen_text())
+            ui.view.state.selected_agent_id = 'ag_hint'
+            self.assertIn('Waiting for input', ui.view.inspector_text())
+            ui.controller.on_workspace({**ui.controller.workspace, 'agents': [{**agent, 'waiting_for_input': False}]})
+            await ui.wait_render()
+            self.assertNotIn('! Input', ui.screen_text())
+            self.assertEqual(ui.view.composer.text, 'unfinished message')
+            self.assertEqual(ui.view.composer.buffer.cursor_position, 4)
+            # A connected client receives status pushes without workspace polling.
+            ui.client.websocket = object()
+            ui.client.handle_event({'type': 'status', 'data': {'codex-1': {'waiting_for_input': True}}})
+            await ui.wait_render()
+            self.assertIn('! Input', ui.screen_text())
+            ui.client.handle_event({'type': 'status', 'data': {'codex-1': {'waiting_for_input': False}}})
+            await ui.wait_render()
+            self.assertNotIn('! Input', ui.screen_text())
+            ui.client.websocket = None
+
+    async def test_review_input_button_targets_waiting_agent_and_handles_clear(self):
+        for size in ((120, 35), (80, 18)):
+            with self.subTest(size=size):
+                async with tui_harness(size=size) as ui:
+                    rows = [dict(agent_id='ag_ready', registry_name='ready', last_state='running'),
+                            dict(agent_id='ag_wait', registry_name='waiting', last_state='running',
+                                 waiting_for_input=True)]
+                    ui.controller._select(dict(id='ws_one', name='One', channel='general', agents=rows))
+                    ui.state.selected_agent_id = 'ag_wait'
+                    ui.view.composer.text = 'keep this draft'
+                    await ui.wait_render()
+                    self.assertIn('Review input', ui.screen_text())
+                    y, row = next((y, row) for y, row in enumerate(ui.rows) if 'Review input' in row)
+                    cell = ui.application.renderer.last_rendered_screen.data_buffer[y][row.index('Review input')]
+                    attrs = ui.application._merged_style.get_attrs_for_style_str(cell.style)
+                    self.assertEqual(attrs.bgcolor, 'ansiyellow')
+                    ui.view.focus_named('agents')
+                    await ui.key('Tab')
+                    self.assertIs(ui.application.layout.current_control, ui.view.agent_review.control)
+                    await ui.key('Enter')
+                    await ui.wait_until(lambda: ('run_action', 'attach', 'ag_wait') in ui.calls)
+                    self.assertEqual(ui.view.composer.text, 'keep this draft')
+                    await ui.key('Escape')
+                    self.assertEqual(ui.focused_control, 'composer')
+                    await ui.wait_render()
+                    y, row = next((y, row) for y, row in enumerate(ui.rows) if 'Review input' in row)
+                    await ui.click(row.index('Review input') + 2, y)
+                    await ui.wait_until(lambda: ui.calls.count(('run_action', 'attach', 'ag_wait')) == 2)
+                    ui.view.focus_named('agent_review')
+                    ui.controller.on_workspace(dict(ui.controller.workspace, agents=[rows[0]]))
+                    await ui.wait_render()
+                    self.assertNotIn('Review input', ui.screen_text())
+                    self.assertEqual(ui.focused_control, 'composer')
+                    self.assertEqual(ui.view.composer.text, 'keep this draft')
+
+    async def test_waiting_inspector_wraps_details_beside_review_button(self):
+        async with tui_harness(size=(80, 30)) as ui:
+            path = '/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-END'
+            agent = dict(agent_id='ag_one', registry_name='codex', last_state='running',
+                         waiting_for_input=True, cwd=path)
+            ui.controller._select(dict(id='w', channel='general', agents=[agent]))
+            ui.state.selected_agent_id = 'ag_one'
+            ui.view.show_inspector()
+            await ui.wait_render()
+            visible = ''.join(ui.rows).replace('│', '').replace(' ', '')
+            self.assertIn('mnopqrstuvwxyz-END', visible)
+
+    async def test_help_does_not_restore_vanished_review_button_after_resize(self):
+        async with tui_harness(size=(80, 24)) as ui:
+            agent = dict(agent_id='a', registry_name='codex', last_state='running', waiting_for_input=True)
+            ui.controller._select(dict(id='w', channel='general', agents=[agent]))
+            await ui.wait_render()
+            ui.view.focus_named('agent_review')
+            ui.view.show_help('Help')
+            await ui.resize(70, 15)
+            ui.controller.on_workspace(dict(ui.controller.workspace,
+                                            agents=[dict(agent, waiting_for_input=False)]))
+            await ui.key('Escape')
+            await ui.resize(80, 24)
+            await ui.type_text('hello')
+            self.assertEqual(ui.view.composer.text, 'hello')
+
+    async def test_review_clear_while_small_restores_typing_on_grow(self):
+        async with tui_harness(size=(80, 24)) as ui:
+            agent = dict(agent_id='a', registry_name='codex', last_state='running', waiting_for_input=True)
+            ui.controller._select(dict(id='w', channel='general', agents=[agent]))
+            await ui.wait_render()
+            ui.view.focus_named('agent_review')
+            await ui.resize(70, 15)
+            ui.controller.on_workspace(dict(ui.controller.workspace,
+                                            agents=[dict(agent, waiting_for_input=False)]))
+            await ui.resize(80, 24)
+            await ui.type_text('hello')
+            self.assertEqual(ui.view.composer.text, 'hello')
+
     async def test_empty_providers_disable_add_agent_with_visible_reason(self):
         async with tui_harness() as ui:
             ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': []})
@@ -82,6 +234,29 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             await ui.resize(120, 30)
             self.assertEqual(ui.cell(21, 2), '│')
             self.assertIn('New session', ui.screen_text())
+
+    async def test_chat_has_styled_headers_quiet_times_and_message_spacing(self):
+        async with tui_harness(size=(100, 35)) as ui:
+            ui.client.username = 'user'
+            ui.client.handle_event({'type': 'history', 'messages': [
+                dict(id=1, timestamp=1, sender='user', time='21:51', text='Hello Codex'),
+                dict(id=2, timestamp=2, sender='codex-2', time='21:52', text='Ready to help.'),
+                dict(id=3, timestamp=3, sender='system', type='system', time='21:53', text='Agent connected'),
+                dict(id=4, timestamp=4, sender='user\u202e', text='Untrusted display name')
+            ]})
+            await ui.wait_render()
+            control = ui.view.conversation
+            lines = control._lines(control.width, control.height)
+            fragments = list(control.text())
+            self.assertTrue(any(style == 'class:chat.you' and 'You' in text for style, text in fragments))
+            self.assertEqual(sum(style == 'class:chat.you' for style, text in fragments), 1)
+            self.assertTrue(any(style == 'class:chat.agent' and 'codex-2' in text for style, text in fragments))
+            self.assertTrue(any(style == 'class:muted' and '21:52' in text for style, text in fragments))
+            screen = ui.screen_text()
+            self.assertIn('│ Hello Codex', screen)
+            self.assertIn('│ Ready to help.', screen)
+            self.assertIn('Agent connected', screen)
+            self.assertTrue(any(not ''.join(f[1] for f in line).strip() for line in lines))
 
     async def test_real_events_replace_delete_and_order_messages_once(self):
         async with tui_harness() as ui:
@@ -185,8 +360,9 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
                                    'agents': [agent]})
             ui.state.selected_agent_id = 'ag_full'
             await ui.wait_render()
-            self.assertIn('fresh', ui.screen_text())
-            self.assertIn('id unknown', ui.screen_text())
+            self.assertIn('◌ Starting', ui.screen_text())
+            self.assertIn('fresh', ui.view.inspector_text())
+            self.assertIn('id unknown', ui.view.inspector_text())
             self.assertIn('catching up…', ui.view.inspector_text())
             self.assertIn("⚠ cwd missing — /resume 'worker' --cwd PATH", ui.view.inspector_text())
             ui.view.show_inspector()

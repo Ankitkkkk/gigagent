@@ -3,7 +3,42 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from wrapper_unix import get_activity_checker
+from wrapper_unix import get_activity_checker, waiting_for_input
+
+
+class InputPromptTests(unittest.TestCase):
+    def test_common_confirmation_prompts(self):
+        for pane in (
+            'Would you like to run this command?\n› 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel',
+            'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel',
+            'Trust this folder?\nEnter to select · Esc to cancel',
+            'Continue? [y/N]',
+            '\x1b[32mAllow access? (y/n)\x1b[0m',
+        ):
+            with self.subTest(pane=pane):
+                self.assertTrue(waiting_for_input(pane.encode()))
+
+    def test_idle_work_and_old_prompt_are_not_waiting(self):
+        for pane in (
+            screen(), b'Working (esc to interrupt)',
+            b'We should add approval detection.',
+            b'Press enter to confirm or esc to cancel\nDone.\n\n> Ask anything',
+            b'Continue? [y/N]\nYes\nProcessing files...',
+            b'Example: Continue? [y/N]\n' + b'ordinary output\n' * 20,
+        ):
+            with self.subTest(pane=pane):
+                self.assertFalse(waiting_for_input(pane))
+
+    def test_capture_tracks_prompt_and_clears_on_resolution_or_failure(self):
+        checker = get_activity_checker('test')
+        prompt = b'Press enter to confirm or esc to cancel'
+        frames = [subprocess.CompletedProcess([], 0, stdout=value)
+                  for value in (prompt, prompt, screen(), prompt)]
+        frames += [subprocess.CompletedProcess([], 1, stdout=prompt), OSError('gone')]
+        with patch('wrapper_unix.subprocess.run', side_effect=frames):
+            for expected in (True, True, False, True, False, False):
+                self.assertIsInstance(checker(), bool)
+                self.assertEqual(checker.waiting_for_input, expected)
 
 
 def screen(body="Finished.", frame=0, prompt="Ask Codex to do anything"):

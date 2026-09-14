@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
 from fastapi import WebSocketDisconnect
 from store import MessageStore
+from router import Router
 
 
 class HistoryDeliveryTests(unittest.TestCase):
@@ -24,14 +25,14 @@ class HistoryDeliveryTests(unittest.TestCase):
         empty.list_all.return_value = []
         agents = Mock()
         agents.get_status.return_value = {}
-        router = Mock()
-        router.is_paused.return_value = False
+        router = Router([], default_mention='none')
         self.settings = {'channels': ['general', 'work'], 'history_limit': 'all'}
         for name, value in {'store': self.messages, 'rules': empty, 'jobs': empty,
                             'schedules': empty, 'registry': None, 'config': {},
                             'agent_hats': {}, 'agents': agents, 'router': router,
                             'room_settings': self.settings, 'session_token': 'test',
-                            'ws_clients': set()}.items():
+                            'ws_clients': set(), '_loop_guard_pending': {},
+                            'workspace_store': None, 'session_engine': None}.items():
             self.stack.enter_context(patch.object(app, name, value))
 
     def read_connection(self, interrupt=False):
@@ -74,6 +75,8 @@ class HistoryDeliveryTests(unittest.TestCase):
         self.assertEqual(sum(f['type'] == 'history_complete' for f in frames), 1)
 
     def test_continue_resumes_selected_channel_and_acknowledges_request(self):
+        app.router._get_ch('work')['paused'] = True
+        app.router._get_ch('general')['paused'] = True
         frames = []
         class Socket:
             query_params = {'token': 'test'}
@@ -87,7 +90,8 @@ class HistoryDeliveryTests(unittest.TestCase):
                 return json.dumps({'type': 'message', 'text': '/continue',
                                    'channel': 'work', 'request_id': 'cli-request'})
         asyncio.run(app.websocket_endpoint(Socket()))
-        app.router.continue_routing.assert_called_once_with(channel='work')
+        self.assertFalse(app.router.is_paused('work'))
+        self.assertTrue(app.router.is_paused('general'))
         acknowledgments = [f for f in frames if f['type'] == 'message_sent']
         self.assertEqual(acknowledgments, [{'type': 'message_sent',
             'request_id': 'cli-request', 'data': {'command': '/continue', 'channel': 'work', 'ok': True}}])

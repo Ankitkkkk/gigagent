@@ -35,6 +35,19 @@ class ProviderAdapter:
     supports_resume: bool = False
     can_locate_transcripts: bool = False
 
+    def waiting_for_input(self, output: bytes) -> bool:
+        """Advisory terminal detector; providers may recognize their own modals."""
+        from prompt_signals import generic_waiting_for_input
+        return generic_waiting_for_input(output)
+
+    def prompt_event(self, payload: dict):
+        """Normalize a native hook into PromptEvent, or None if unsupported."""
+        return None
+
+    def prompt_hook_config(self, command: str) -> dict:
+        """Native hook definitions for the stable notification-only command."""
+        return {}
+
     def __init__(self, agent_cfg: dict | None = None):
         self.agent_cfg = dict(agent_cfg or {})
 

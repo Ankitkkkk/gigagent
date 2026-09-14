@@ -407,7 +407,9 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         self.ws_store.update_agent(ws["id"], agent["agent_id"], last_state="starting", last_launch=second_launch)
         launcher.on_heartbeat("fake-1", ready=True, pid=456)
         entries = [json.loads(line) for line in queue.read_text().splitlines()]
-        self.assertEqual(len(entries), 1)
+        self.assertEqual(len(entries), 2)
+        self.assertIn('fake-1', entries[-1]['prompt'])
+        self.assertNotIn('since_id=-1', entries[-1]['prompt'])
 
     def test_workspace_view_populates_agent_and_hides_routing_bookkeeping(self):
         ws = self.ws_store.create("view")

@@ -419,14 +419,6 @@ def _notify_recovery(data_dir: Path, agent_name: str):
         pass
 
 
-_IDENTITY_HINT = (
-    " (If this is a multi-instance session, reclaim your previous identity from "
-    "your context window, NOT from the chat history before responding. If you "
-    "didn't have one, tell the user to give you a name by clicking your status "
-    "pill at the top.)"
-)
-
-
 def _fetch_role(server_port: int, agent_name: str) -> str:
     """Fetch this agent's role from the server status endpoint."""
     try:
@@ -474,7 +466,6 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
                    refresh_interval: int = 10):
     """Poll queue file and inject an MCP read task when triggered."""
-    first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
     trigger_count = 0
     while True:
@@ -508,6 +499,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                     # Check if this is a job/activity-scoped trigger
                     job_id = None
                     custom_prompt = ""
+                    queued_requests = []
                     for line in lines:
                         line = line.strip()
                         if not line:
@@ -520,11 +512,19 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                                 raw_prompt = data.get("prompt", "")
                                 if isinstance(raw_prompt, str) and raw_prompt.strip():
                                     custom_prompt = raw_prompt.strip()
+                                else:
+                                    scope = (f"job_id={data['job_id']}" if data.get('job_id') else
+                                             f"#{data.get('channel', channel)}")
+                                    request = f"use mcp to read {scope} - you're mentioned, take appropriate action and respond"
+                                    if request not in queued_requests:
+                                        queued_requests.append(request)
                         except json.JSONDecodeError:
                             pass
 
                     if custom_prompt:
                         prompt = custom_prompt
+                        if queued_requests:
+                            prompt += " New requests also arrived: " + "; ".join(queued_requests)
                     elif job_id:
                         prompt = f"use mcp to read job_id={job_id} - you're mentioned in a job thread, take appropriate action and respond"
                     else:
@@ -558,9 +558,11 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                             last_rules_epoch = rules_data["epoch"]
                             _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
 
-                    if first_mention and is_multi_instance:
-                        prompt += _IDENTITY_HINT
-                        first_mention = False
+                    prompt = (
+                        f"Your assigned agent name for this session is {json.dumps(current_name)} "
+                        f"in #{channel}. Use this exact name as sender when calling chat_send; "
+                        "do not infer your identity from chat history. " + prompt
+                    )
                     # Flatten to single line — multi-line text triggers paste
                     # detection in CLIs (Claude Code shows "[Pasted text +N]")
                     # which can break injection of long session prompts
@@ -596,6 +598,10 @@ def parse_wrapper_args(argv: list[str], agent_names: list[str]):
     parser.add_argument("--mcp-http-port", default=None, help="Override mcp.http_port (int)")
     parser.add_argument("--mcp-sse-port",  default=None, help="Override mcp.sse_port (int)")
     parser.add_argument("--upload-dir",    default=None, help="Override images.upload_dir (path)")
+    if '--' in argv:
+        boundary = argv.index('--')
+        args, extra = parser.parse_known_args(argv[:boundary])
+        return args, extra + argv[boundary + 1:]
     return parser.parse_known_args(argv)
 
 
@@ -803,6 +809,19 @@ def main():
     )
     inject_env = dict(inject_env or {})
     inject_env.update(provider_env)
+    from providers import get_adapter
+    from waiting_hooks import EVENTS_ENV, configure_stream
+    prompt_provider = _provider_from_command(command) or agent
+    prompt_adapter = get_adapter(prompt_provider, agent_cfg)
+    prompt_directory = None
+    inject_env[EVENTS_ENV] = ''
+    if sys.platform != 'win32' and prompt_adapter.prompt_hook_config(''):
+        import tempfile
+        prompt_root = data_dir / 'prompt-events'
+        prompt_root.mkdir(mode=0o700, exist_ok=True)
+        prompt_directory = tempfile.TemporaryDirectory(prefix='launch-', dir=prompt_root)
+        configure_stream(Path(prompt_directory.name), prompt_provider, agent_cfg)
+        inject_env[EVENTS_ENV] = prompt_directory.name
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
     if not needs_proxy:
@@ -911,6 +930,7 @@ def main():
 
     def _activity_monitor():
         last_active = None
+        last_waiting = None
         last_report_time = 0
         REPORT_INTERVAL = 3  # re-send state every 3s while active (keeps server lease fresh)
         while True:
@@ -919,12 +939,14 @@ def main():
                 continue
             try:
                 active = _activity_checker()
+                waiting = bool(getattr(_activity_checker, 'waiting_for_input', False))
                 now = time.time()
                 # Send on state change, periodically while active (refresh lease),
                 # or periodically while idle (keep presence alive)
                 IDLE_REPORT_INTERVAL = 8  # keep-alive while idle
                 should_send = (
                     active != last_active
+                    or waiting != last_waiting
                     or (active and now - last_report_time >= REPORT_INTERVAL)
                     or (not active and now - last_report_time >= IDLE_REPORT_INTERVAL)
                 )
@@ -932,7 +954,7 @@ def main():
                     current_name, _ = get_identity()
                     current_token = get_token()
                     url = f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}"
-                    body = json.dumps({"active": active}).encode()
+                    body = json.dumps({"active": active, "waiting_for_input": waiting}).encode()
                     req = urllib.request.Request(
                         url,
                         method="POST",
@@ -942,6 +964,7 @@ def main():
                     resp = urllib.request.urlopen(req, timeout=5)
                     resp_code = resp.getcode()
                     last_active = active
+                    last_waiting = waiting
                     last_report_time = now
             except Exception:
                 pass
@@ -960,6 +983,8 @@ def main():
         _set_activity_checker(get_activity_checker(
             unix_session_name, trigger_flag=_trigger_flag,
             provider=_provider_from_command(command),
+            adapter=prompt_adapter,
+            events_dir=Path(prompt_directory.name) if prompt_directory else None,
         ))
 
     run_kwargs = dict(
@@ -986,6 +1011,8 @@ def main():
     try:
         run_agent(**run_kwargs)
     finally:
+        if prompt_directory is not None:
+            prompt_directory.cleanup()
         try:
             current_name, _ = get_identity()
             current_token = get_token()

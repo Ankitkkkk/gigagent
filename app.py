@@ -171,10 +171,15 @@ def _load_settings():
         room_settings["channels"].insert(0, "general")
 
 
-def _save_settings():
+def _save_settings(settings=None):
     p = _settings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(room_settings, indent=2), "utf-8")
+    temporary = p.with_suffix('.tmp')
+    try:
+        temporary.write_text(json.dumps(room_settings if settings is None else settings, indent=2), 'utf-8')
+        temporary.replace(p)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _extract_agent_token(request: Request) -> str:
@@ -262,6 +267,8 @@ def _install_security_middleware(token: str, cfg: dict):
 
 def configure(cfg: dict, session_token: str = ""):
     global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, config, workspace_store
+    global _loop_guard_pending
+    _loop_guard_pending = {}
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -364,6 +371,7 @@ def configure(cfg: dict, session_token: str = ""):
     _posted_leave: set[str] = set()  # agents we've already posted a leave for — debounce
 
     _known_active = set()
+    _known_waiting = set()
 
     def _background_checks():
         import time as _time
@@ -405,6 +413,12 @@ def configure(cfg: dict, session_token: str = ""):
                                 currently_active.add(name)
                             else:
                                 mcp_bridge._activity[name] = False  # auto-expire
+                    currently_waiting = {
+                        name for name, ts in mcp_bridge._input_waiting.items()
+                        if name in currently_online and now - ts < mcp_bridge.INPUT_WAIT_TIMEOUT
+                    }
+                    for name in set(mcp_bridge._input_waiting) - currently_waiting:
+                        mcp_bridge._input_waiting.pop(name, None)
 
                 # Crash timeout: if a wrapper hasn't heartbeated for 60s,
                 # it's dead — deregister it to free the slot.
@@ -490,9 +504,12 @@ def configure(cfg: dict, session_token: str = ""):
                         currently_active -= set(stale_active)
 
                 # Broadcast status on any change (online set or activity set)
-                if currently_active != _known_active or _known_online != currently_online:
+                if (currently_active != _known_active or _known_online != currently_online
+                        or currently_waiting != _known_waiting):
                     _known_active.clear()
                     _known_active.update(currently_active)
+                    _known_waiting.clear()
+                    _known_waiting.update(currently_waiting)
                     if _event_loop:
                         asyncio.run_coroutine_threadsafe(broadcast_status(), _event_loop)
                 _known_online.clear()
@@ -775,6 +792,53 @@ async def _handle_new_message(msg: dict):
         mark([])            # any early return or exception: processed, nobody addressed
 
 
+_loop_guard_pending: dict[str, dict[str, dict]] = {}
+
+
+async def _continue_agent_routing(channel: str, sender: str) -> bool:
+    """Resume queued guard wakes, retaining only failed deliveries for retry."""
+    known = set(registry.get_all_names()) if registry else set()
+    known.update(config.get('agents', {}))
+    known.update(router.agent_names)
+    if sender.lower() in {name.lower() for name in known}:
+        store.add('system', f'Loop guard: only humans can /continue. {sender} tried to self-resume.',
+                  msg_type='system', channel=channel)
+        return False
+    router.continue_routing(channel=channel)
+    pending = _loop_guard_pending.get(channel, {})
+    members = {member['agent_id']: member for member in
+               workspace_store.members_in_channel(channel)} if workspace_store else {}
+    allowed = session_engine.get_allowed_agent(channel) if session_engine else None
+    failed = False
+    for key, entry in list(pending.items()):
+        target = entry['name']
+        if entry.get('agent_id'):
+            member = members.get(entry['agent_id'])
+            if not member or member['last_state'] != 'running':
+                pending.pop(key, None)
+                continue
+            target = member['registry_name']
+        inst = registry.get_instance(target) if registry else None
+        if ((inst and inst.get('state') == 'pending') or (allowed and target != allowed)
+                or not agents.is_available(target)):
+            pending.pop(key, None)
+            continue
+        try:
+            await agents.trigger(target, message=f'{sender}: continue the paused conversation', channel=channel)
+        except Exception:
+            log.exception('failed to resume loop-guard recipient %s', target)
+            failed = True
+        else:
+            pending.pop(key, None)
+    if not pending:
+        _loop_guard_pending.pop(channel, None)
+    notice = (f'Routing resumed by {sender}. Some agents could not be notified; retry /continue.'
+              if failed else f'Routing resumed by {sender}.')
+    store.add('system', notice, msg_type='system', channel=channel)
+    await broadcast_status()
+    return not failed
+
+
 async def _handle_new_message_inner(msg: dict, mark):
     """Broadcast message to web clients + check for @mention triggers."""
     # For broadcast slash commands, suppress the raw message — only the expanded
@@ -827,12 +891,7 @@ async def _handle_new_message_inner(msg: dict, mark):
 
     # Check for slash commands — use stripped text (sans @mentions)
     if stripped == "/continue":
-        if sender in known_agents:
-            store.add("system", f"Loop guard: only humans can /continue. {sender} tried to self-resume.", channel=channel)
-            return
-        router.continue_routing(channel)
-        store.add("system", f"Routing resumed by {sender}.", channel=channel)
-        await broadcast_status()
+        await _continue_agent_routing(channel, sender)
         return
 
     if stripped == "/roastreview":
@@ -936,6 +995,12 @@ async def _handle_new_message_inner(msg: dict, mark):
             )
 
     raw_targets = router.get_targets(sender, text, channel)
+    if router.is_paused(channel):
+        # The guard suppresses get_targets(); preserve the blocked mentions
+        # so a human /continue can wake their recipients after resetting it.
+        raw_targets = router.parse_mentions(text)
+    elif sender.lower() not in router.agent_names:
+        _loop_guard_pending.pop(channel, None)
     # Resolve base family names to actual registered instances
     # e.g. 'claude' → 'claude-prime' when slot-1 was renamed
     targets = []
@@ -945,13 +1010,32 @@ async def _handle_new_message_inner(msg: dict, mark):
         else:
             targets.append(t)
     targets = list(dict.fromkeys(targets))  # dedupe, preserve order
+    if sender.lower() in router.agent_names:
+        targets = [target for target in targets if target.lower() != sender.lower()]
 
     # Spec §4: record stable recipients for unread tracking (side table, not the message).
     if msg_type in ("chat", "summary"):
         tokens = router.mention_tokens(text)
-        mark(workspace_store.resolve_recipients(channel, tokens, targets) if workspace_store else [])
+        recipient_ids = workspace_store.resolve_recipients(channel, tokens, targets) if workspace_store else []
+        mark(recipient_ids)
+        if workspace_store and workspace_store.is_workspace_channel(channel):
+            allowed_names = {member["registry_name"] for member in workspace_store.members_in_channel(channel)
+                             if member["agent_id"] in recipient_ids}
+            targets = [target for target in targets if target in allowed_names]
 
     if router.is_paused(channel):
+        members = {member['registry_name']: member for member in
+                   workspace_store.members_in_channel(channel)} if workspace_store else {}
+        allowed = session_engine.get_allowed_agent(channel) if session_engine else None
+        for target in targets:
+            inst = registry.get_instance(target) if registry else None
+            if (inst and inst.get('state') == 'pending') or (allowed and target != allowed):
+                continue
+            member = members.get(target)
+            key = member['agent_id'] if member else target
+            _loop_guard_pending.setdefault(channel, {})[key] = {
+                'name': target, 'agent_id': member['agent_id'] if member else None,
+            }
         # Only emit the loop guard notice once per pause
         if not router.is_guard_emitted(channel):
             router.set_guard_emitted(channel)
@@ -1063,7 +1147,7 @@ async def broadcast_todo_update(msg_id: int, status: str | None):
 
 
 async def broadcast_settings():
-    data = json.dumps({"type": "settings", "data": room_settings})
+    data = json.dumps({"type": "settings", "data": _settings_view()})
     dead = set()
     for client in list(ws_clients):
         try:
@@ -1321,10 +1405,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         await acknowledge({"command": cmd, "channel": channel, "ok": True})
                         continue
                     if cmd == "/continue":
-                        router.continue_routing(channel=channel)
-                        store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
-                        await broadcast_status()
-                        await acknowledge({"command": cmd, "channel": channel, "ok": True})
+                        ok = await _continue_agent_routing(channel, sender)
+                        await acknowledge({"command": cmd, "channel": channel, "ok": ok})
                         continue
                     # Broadcast slash commands — expand without storing the raw command.
                     # _handle_new_message will store the expanded version.
@@ -1775,7 +1857,29 @@ async def get_status():
 
 @app.get("/api/settings")
 async def get_settings():
-    return room_settings
+    return _settings_view()
+
+
+def _settings_view():
+    return dict(room_settings, max_agent_hops=router.max_hops)
+
+
+@app.patch('/api/settings/loop-guard')
+async def update_loop_guard(request: Request):
+    body = await _json_body(request)
+    hops = body.get('max_agent_hops')
+    if set(body) != {'max_agent_hops'} or type(hops) is not int or not 1 <= hops <= 50:
+        return JSONResponse({'error': 'Enter a whole number from 1 to 50'}, status_code=400)
+    updated = dict(room_settings, max_agent_hops=hops)
+    try:
+        _save_settings(updated)
+    except OSError:
+        log.exception('failed to save loop guard settings')
+        return JSONResponse({'error': 'Could not save loop guard settings; retry.'}, status_code=500)
+    room_settings['max_agent_hops'] = hops
+    router.max_hops = hops
+    await broadcast_settings()
+    return {'max_agent_hops': hops}
 
 
 @app.delete("/api/hat/{agent_name}")
@@ -2482,9 +2586,16 @@ async def heartbeat(agent_name: str, request: Request):
             _activity_changed = was_active != active_val
     except Exception:
         pass  # No body = plain heartbeat
+    if (auth_inst and isinstance(body, dict)
+            and isinstance(body.get('waiting_for_input'), bool)):
+        waiting = body['waiting_for_input']
+        was_waiting = mcp_bridge.is_waiting_for_input(current_name)
+        mcp_bridge.set_waiting_for_input(current_name, waiting)
+        _activity_changed = _activity_changed or was_waiting != waiting
     if isinstance(body, dict) and "ready" in body and workspace_launcher is not None:
         try:
-            workspace_launcher.on_heartbeat(current_name, ready=bool(body["ready"]), pid=body.get("pid"))
+            await asyncio.to_thread(workspace_launcher.on_heartbeat, current_name,
+                                    ready=bool(body["ready"]), pid=body.get("pid"))
         except Exception:
             log.exception("workspace launcher on_heartbeat failed for %s", current_name)
     # Immediately broadcast on activity state change (don't wait for background checker)
@@ -2773,12 +2884,15 @@ def _launcher_or_503():
 
 def _ws_view(ws: dict) -> dict:
     """Record plus live state and unread_count per agent."""
+    from mcp_bridge import is_waiting_for_input
     out = ws
     routing = workspace_store.routing_for(ws["id"]) if workspace_launcher else {}
     for a in out["agents"]:
         a["unread_count"] = len(workspace_launcher.unread_for(
             ws["id"], a["agent_id"], routing=routing)) if workspace_launcher else 0
         a["tmux_session"] = f"agentchattr-{a['agent_id']}"
+        a['waiting_for_input'] = (a.get('last_state') in ('running', 'starting')
+                                  and is_waiting_for_input(a.get('registry_name', '')))
     for key in ("routing", "routing_done", "routing_high_water"):
         out.pop(key, None)
     return out
@@ -2873,7 +2987,8 @@ async def spawn_agent(ws_id: str, request: Request):
     try:
         agent = await asyncio.to_thread(
             workspace_launcher.spawn, ws_id, str(body.get("provider", "")), str(body.get("cwd", "")),
-            str(body.get("history_mode", "literal")), body.get("name") or None)
+            str(body.get("history_mode", "literal")), body.get("name") or None,
+            **({'provider_args': body['provider_args']} if 'provider_args' in body else {}))
     except LaunchError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
     return agent
@@ -2888,7 +3003,8 @@ async def resume_agent(ws_id: str, agent_id: str, request: Request):
     body = await _json_body(request)
     try:
         return await asyncio.to_thread(workspace_launcher.resume, ws_id, agent_id,
-                                       bool(body.get("fresh")), body.get("name") or None, body.get("cwd") or None)
+                                       bool(body.get("fresh")), body.get("name") or None, body.get("cwd") or None,
+                                       **({'provider_args': body['provider_args']} if 'provider_args' in body else {}))
     except LaunchError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
 
@@ -2916,6 +3032,26 @@ async def retry_agent(ws_id: str, agent_id: str):
     except LaunchError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
     return {"ok": True}
+
+
+@app.post('/api/workspaces/{ws_id}/agents/{agent_id}/remove')
+async def remove_workspace_agent(ws_id: str, agent_id: str):
+    err = _launcher_or_503()
+    if err:
+        return err
+    from workspace_launcher import LaunchError
+    agent = workspace_store.get_agent(ws_id, agent_id)
+    if agent is None:
+        return JSONResponse({'error': 'agent not found'}, status_code=404)
+    try:
+        ws = await asyncio.to_thread(workspace_launcher.remove, ws_id, agent_id)
+    except LaunchError as exc:
+        return JSONResponse({'error': exc.message}, status_code=exc.status)
+    if registry.get_instance(agent['registry_name']) is None:
+        import mcp_bridge
+        mcp_bridge.purge_identity(agent['registry_name'])
+    await broadcast_status()
+    return _ws_view(ws)
 
 
 @app.post("/api/workspaces/{ws_id}/agents/{agent_id}/history")

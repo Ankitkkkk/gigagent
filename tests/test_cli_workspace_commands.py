@@ -378,6 +378,17 @@ class ParserTests(unittest.TestCase):
 
 
 class DispatchTests(unittest.TestCase):
+    def test_provider_flags_reach_spawn_and_resume_with_quotes_and_clear(self):
+        for command, target, flags, expected in (
+                ('spawn', 'codex', '--model "custom model" --verbose', ['--model', 'custom model', '--verbose']),
+                ('resume', 'claude', '', [])):
+            api = RecordingAPI()
+            words = [command, target, '--session', 'billing', '--provider-flags=' + flags]
+            if command == 'spawn':
+                words += ['--cwd', '/tmp', '--history-mode', 'none']
+            self.runner()(api, self.parse(words))
+            self.assertEqual(api.calls[-1][-1]['provider_args'], expected)
+
     def runner(self):
         value = getattr(cli_workspaces, "run_workspace_command", None)
         if value is None:
