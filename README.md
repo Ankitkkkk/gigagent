@@ -1,16 +1,61 @@
-# <img src="static/logo.png" alt="" width="32"> agentchattr
+# gigagent
 
-![Windows](https://img.shields.io/badge/platform-Windows-blue) ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey) ![Linux](https://img.shields.io/badge/platform-Linux-orange) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-green) [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/qzfn5YTT9a)
+![Linux](https://img.shields.io/badge/platform-Linux-orange) ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey) ![WSL2](https://img.shields.io/badge/Windows-WSL2-blue) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-green)
 
-A local chat server for real-time coordination between AI coding agents and humans. Ships with built-in support for **Claude Code**, **Codex**, **Gemini CLI**, **[GitHub Copilot CLI](https://github.com/github/copilot-cli)**, **Kimi**, **Qwen**, **Kilo CLI**, **[CodeBuddy](https://www.codebuddy.ai/cli)**, and **[MiniMax](https://platform.minimax.io)** — and any MCP-compatible agent can join.
+**A full-screen terminal workspace for your AI coding agents.** Chat with multiple
+agents, organize them into sessions, see who needs input, and attach to their
+terminals without losing your message draft.
 
-Agents and humans talk in a shared chat room with multiple channels — when anyone @mentions an agent, the server auto-injects a prompt into that agent's terminal, the agent reads the conversation and responds, and the loop continues hands-free. No copy-pasting between ugly terminals. No manual prompting.
+gigagent builds on [Agentchattr](https://github.com/bcurts/agentchattr), retaining
+its local server, MCP communication, and optional browser interface. This
+repository adds the terminal workflow described below. Existing Agentchattr
+configuration, API names, and stored sessions remain compatible.
 
-*This is an example of what a conversation might look like if you really messed up.*
+[Install gigagent](INSTALLATION.md) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
 
-![screenshot](screenshot.png)
+## What the TUI provides
 
-## gigagent — Terminal Chat and Shell Commands
+| Feature | What you can do |
+| --- | --- |
+| Searchable sessions | Create, switch, rename, and archive sessions with their own chat and agents. |
+| Chat and drafts | Read styled messages, scroll history, mention agents, and keep drafts while navigating or attaching. |
+| Agent status | See colored status indicators, unread counts, and working directories. |
+| Pending input | See waiting agents from the selected session and open their terminals to resolve prompts. |
+| Direct attachment | Press F6 to choose an agent, or use Attach / Review input for the selected agent. |
+| Agent lifecycle | Add named agents, stop or resume them, and remove entries with their tmux sessions. |
+| Saved launch settings | Keep working directories and provider flags across resumes; agents receive their assigned session identity. |
+| Loop guard controls | Set the hop limit through F4 → Loop guard and use `/continue` to resume a paused conversation. |
+| Text copying | Press F7 to release mouse capture, select text, and copy with your terminal. |
+| Shell commands | Script session management and chat with JSON output, alongside the interactive TUI. |
+
+Provider support includes **Claude Code**, **Codex**, **Gemini CLI**,
+**GitHub Copilot CLI**, **Kimi**, **Qwen**, **Kilo CLI**, **CodeBuddy**, and
+**MiniMax** through the underlying adapters. Install and authenticate the
+providers you use separately. Waiting indicators are advisory; approvals are
+resolved in the provider's own terminal.
+
+## Quick start
+
+Use Python 3.11+ and tmux on Linux, macOS, or WSL2. From a new checkout:
+
+```sh
+git clone https://github.com/Ankitkkkk/gigagent.git
+cd gigagent
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-cli.txt
+.venv/bin/python gigagent.py
+```
+
+Interactive startup can start the local server automatically when tmux is
+available. Select or create a session, choose **Add agent**, and enter the
+provider, name, and project directory. Use **F1** for Help.
+
+See [INSTALLATION.md](INSTALLATION.md) for system dependencies, a `gigagent`
+shell command, manual server startup, Windows limitations, and instructions an
+AI agent can follow to install and verify the application. Installation uses
+this source checkout; older Agentchattr release ZIPs do not include the TUI.
+
+## TUI guide
 
 **gigagent** is Agentchattr's full-screen terminal UI and shell client.
 See [INSTALLATION.md](INSTALLATION.md) for installation steps, a `gigagent`
@@ -23,14 +68,13 @@ up the Python environment, run these commands from the source repository:
 ```sh
 python -m pip install -r requirements-cli.txt
 python gigagent.py
-python cli.py
-python cli.py --plain
-python cli.py chat --plain
+python gigagent.py --plain
+python gigagent.py chat --plain
 ```
 
 Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
 `.venv\Scripts\python.exe` on Windows). To start only the server, run
-`python run.py` in a separate terminal. `python cli.py chat` explicitly starts
+`python run.py` in a separate terminal. `python gigagent.py chat` explicitly starts
 interactive mode.
 
 `python gigagent.py` is the branded entry point; `python cli.py` remains supported
@@ -41,7 +85,7 @@ its session picker. Create a session or select an existing one; the picker can
 also show archived sessions and asks before restoring one. Terminal sessions
 group a channel, working directories, and persistent agent identities.
 
-Use `python cli.py --plain` or `python cli.py chat --plain` for the legacy
+Use `python gigagent.py --plain` or `python gigagent.py chat --plain` for the legacy
 scrolling prompt. When stdout is not a terminal, or on macOS/Linux when `TERM`
 is unset, empty, or `dumb`, interactive chat automatically uses that renderer
 and prints `Full-screen unavailable; using plain mode.` once to stderr. Input
@@ -50,15 +94,15 @@ failure after full-screen startup exits with one line naming only the exception
 type and recommends rerunning with `--plain`.
 
 ```sh
-python cli.py
-python cli.py --channel general
-python cli.py --session billing --no-resume
-python cli.py new billing --json
-python cli.py spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal
-python cli.py resume reviewer --session billing --fresh
-python cli.py attach reviewer --session billing
-python cli.py unread --session billing
-python cli.py archive billing --yes
+python gigagent.py
+python gigagent.py --channel general
+python gigagent.py --session billing --no-resume
+python gigagent.py new billing --json
+python gigagent.py spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal
+python gigagent.py resume reviewer --session billing --fresh
+python gigagent.py attach reviewer --session billing
+python gigagent.py unread --session billing
+python gigagent.py archive billing --yes
 ```
 
 `--session` accepts an exact session ID, exact name, or unique name prefix.
@@ -84,7 +128,7 @@ history, agent status, and reconnection after server restarts. Incoming replies
 do not overwrite the input prompt. Messages entered while disconnected are
 rejected rather than queued for later delivery.
 
-The full-screen controls are:
+### Keyboard controls
 
 | Key | Action |
 | --- | --- |
@@ -163,9 +207,9 @@ the field to remove them. Existing running agents pick up changes on their next
 launch. The shell and slash commands support the same option:
 
 ```sh
-python cli.py spawn codex --session billing --cwd /absolute/project --provider-flags='--model MODEL_NAME'
-python cli.py resume reviewer --session billing --provider-flags='--model MODEL_NAME'
-python cli.py resume reviewer --session billing --provider-flags=''
+python gigagent.py spawn codex --session billing --cwd /absolute/project --provider-flags='--model MODEL_NAME'
+python gigagent.py resume reviewer --session billing --provider-flags='--model MODEL_NAME'
+python gigagent.py resume reviewer --session billing --provider-flags=''
 ```
 
 In chat, use `/spawn codex --provider-flags='--model MODEL_NAME'` or
@@ -295,12 +339,12 @@ keeps running. Attaching inside tmux switches clients; switch back with
 For scripts and one-shot commands:
 
 ```sh
-python cli.py send --channel general --name Pat "@claude review the latest changes"
-python cli.py read --channel general --limit 20
-python cli.py status
-python cli.py channels
-python cli.py read --json
-python cli.py send --json - < task.txt
+python gigagent.py send --channel general --name Pat "@claude review the latest changes"
+python gigagent.py read --channel general --limit 20
+python gigagent.py status
+python gigagent.py channels
+python gigagent.py read --json
+python gigagent.py send --json - < task.txt
 ```
 
 `send` waits for a server acknowledgment after persistence (or command handling).
@@ -338,7 +382,10 @@ terminal-session core modules (`workspace_store.py`, `workspace_unread.py`,
 `workspace_launcher.py`, and `providers/`). Release archives do not provide
 this workflow yet.
 
-## Quickstart (Windows)
+## Browser and wrapper quickstart (Windows)
+
+These launchers open the inherited browser/server workflow. For gigagent's
+terminal-agent lifecycle on Windows, use WSL2 and the [installation guide](INSTALLATION.md).
 
 **1. Open the `windows` folder and double-click a launcher** to start your agent — e.g. `start_claude.bat`, `start_codex.bat`, `start_gemini.bat`, etc.
 
@@ -374,7 +421,7 @@ On first launch, the script auto-creates a virtual environment, installs Python 
 
 > **Tip:** To manually prompt an agent to check chat, type `mcp read #general` in their terminal.
 
-## Quickstart (Mac / Linux)
+## Browser and wrapper quickstart (Mac / Linux)
 
 **1. Make sure tmux is installed:**
 
@@ -438,7 +485,11 @@ Agents wake each other up, coordinate, and report back.
   <sub>the gang after <code>/hatmaking</code></sub>
 </p>
 
-## Features
+## Browser and server features
+
+The following capabilities come from the underlying Agentchattr server and
+browser interface. Graphical features such as image uploads and decision cards
+remain available in the browser; they are separate from the TUI controls above.
 
 ### Agent-to-agent communication
 Agents @mention each other and the server auto-triggers the target. Claude can wake Codex, Codex can respond back, Gemini can jump in — all autonomously. A per-channel loop guard pauses after N hops to prevent runaway conversations — a busy channel won't block other channels. Human @mentions always pass through, even when the loop guard is active. Type `/continue` to resume.
@@ -582,6 +633,11 @@ Slash commands for when you want to see what your agents are made of:
 Hats are SVG overlays (viewBox `0 0 32 16`, max 5KB) that sit above agent avatars in chat. They persist across page reloads. Drag a hat to the trash icon to remove it.
 
 ### Web chat UI
+
+The optional browser interface retains the Agentchattr appearance:
+
+![Agentchattr browser interface](screenshot.png)
+
 Dark-themed chat at `localhost:8300` with real-time updates:
 
 - @mention autocomplete with live agent list — type `@` to search online agents, "all agents", and the human user. Arrow keys to navigate, Enter/Tab to insert
@@ -876,6 +932,11 @@ Available models: `MiniMax-M3` (default), `MiniMax-M2.7`, `MiniMax-M2.7-highspee
 
 ## Architecture
 
+`gigagent.py` launches the terminal client. Its UI, forms, and terminal handoff
+live in `cli_tui.py`, `cli_tui_view.py`, and `cli_tui_dialogs.py`. The client uses
+authenticated HTTP and WebSocket connections to the same local server shown
+below; `cli.py` remains a compatible entry point.
+
 ```
 ┌──────────────┐     WebSocket      ┌──────────────┐
 │  Browser UI  │◄──────────────────►│   FastAPI     │
@@ -925,15 +986,19 @@ Available models: `MiniMax-M3` (default), `MiniMax-M2.7`, `MiniMax-M2.7-highspee
 ## Requirements
 
 - **Python 3.11+** (uses `tomllib`)
-- At least one CLI agent installed (Claude Code, Codex, etc.)
-- **Windows**: no extra dependencies
-- **Mac/Linux**: `tmux` (for auto-trigger — `brew install tmux` or `apt install tmux`)
+- Provider CLIs installed and authenticated separately to start agents
+- **Linux/macOS/WSL2**: `tmux` for TUI agent lifecycle and server auto-start
+- An interactive terminal at least **80 × 18** for the full-screen TUI
 
-Python package dependencies (`fastapi`, `uvicorn`, `mcp`) are listed in `requirements.txt`. The quickstart scripts automatically create a virtual environment and install these on first launch — no manual `pip install` needed.
+Install **`requirements-cli.txt`** for gigagent; it includes the server packages
+from `requirements.txt`, plus the terminal dependencies. The browser/wrapper
+quickstart scripts install their own server dependencies on first launch.
+Native Windows chat can connect to a manually running server, but the TUI's
+tmux lifecycle actions require Linux/macOS or WSL2.
 
 ## Platform notes
 
-Auto-trigger works on all platforms:
+The inherited provider wrappers support auto-trigger on these platforms:
 
 - **Windows** — `wrapper_windows.py` injects keystrokes into the agent's console via Win32 `WriteConsoleInput`. The agent runs as a direct subprocess.
 - **Mac/Linux** — `wrapper_unix.py` runs the agent inside a `tmux` session and delivers each prompt as a single bracketed paste (`tmux paste-buffer -p`), so a CLI that supports bracketed paste reassembles a long prompt even when the pty splits it across reads. Detach with `Ctrl+B, D` to leave the agent running in the background; reattach with `tmux attach -t agentchattr-claude`.
@@ -954,9 +1019,12 @@ The session token is displayed in the terminal on startup and is only accessible
 
 > **`--allow-network` warning:** Network mode binds to a LAN IP, which exposes the server to your local network over unencrypted HTTP. Anyone on the same network can sniff the session token and gain full access — including the ability to @mention agents and trigger tool execution. If agents are running with auto-approve flags, this effectively grants remote code execution on your machine. **Only use `--allow-network` on a trusted home network. Never on public or shared WiFi.**
 
-## Community
+## Project and upstream
 
-Join the [Discord](https://discord.gg/qzfn5YTT9a) for help, feature ideas, and to see what people are building with agentchattr.
+Report gigagent issues and feature requests in
+[Ankitkkkk/gigagent](https://github.com/Ankitkkkk/gigagent/issues).
+The server and browser foundation is [Agentchattr](https://github.com/bcurts/agentchattr).
+Its upstream community is available on the [Agentchattr Discord](https://discord.gg/qzfn5YTT9a).
 
 ## License
 
