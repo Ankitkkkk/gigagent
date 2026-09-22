@@ -8,6 +8,25 @@ from tests._tui_harness import tui_harness
 
 
 class ViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_f7_selection_rows_exclude_ui_borders_and_sidebar(self):
+        for width in (120, 80):
+            with self.subTest(width=width):
+                async with tui_harness(size=(width, 35)) as ui:
+                    ui.view.set_sessions([{'id': 'ws_copy', 'name': 'sidebar-only'}])
+                    text = 'copy first line\n    indented content\n│ actual message separator\ncopy last line'
+                    ui.client.handle_event({'type': 'message', 'data': {
+                        'id': 1, 'sender': 'agent', 'text': text}})
+                    await ui.wait_render()
+                    self.assertIn('│ copy first line', ui.screen_text())
+                    await ui._send('\x1b[18~')
+                    start = next(i for i, row in enumerate(ui.rows) if 'copy first line' in row)
+                    self.assertEqual('\n'.join(ui.rows[start:start + 4]), text)
+                    self.assertNotIn('sidebar-only', ui.screen_text())
+                    await ui._send('\x1b[18~')
+                    self.assertIn('│ copy first line', ui.screen_text())
+                    if width == 120:
+                        self.assertIn('sidebar-only', ui.screen_text())
+
     async def test_agent_rows_use_compact_symbols_and_preserve_selected_status_color(self):
         async with tui_harness(size=(120, 35)) as ui:
             rows = [dict(agent_id='ag_' + state, registry_name=name, provider='codex',
@@ -26,7 +45,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('✉ 2', text)
             self.assertIn('◌ Starting', text)
             self.assertIn('○ Stopped', text)
-            self.assertIn('/private/verbose/project/path', text)
+            self.assertNotIn('/private/verbose/project/path', text)
             for hidden in ('native-secret', 'history done', 'id present', 'cwd'):
                 self.assertNotIn(hidden, text)
             waiting = next(f for f in fragments if '! Input' in f[1])

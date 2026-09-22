@@ -53,6 +53,9 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
                 yield ui
 
     async def create_session(self, ui, name):
+        # F2 schedules navigation; a render can precede the modal opening.
+        await ui.wait_until(lambda: ui.dialogs.future is not None
+                            and 'Show archived' in ui.screen_text(), timeout=15)
         await ui.activate_named('new_session')
         await ui.wait_until(lambda: 'Session name:' in ui.screen_text(), timeout=15)
         await ui.type_text(name)
@@ -86,7 +89,7 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ui.view.composer.buffer.cursor_position, cursor)
             self.assertNotIn('NATIVE-SECRET-QA', ui.screen_text())
             self.assertEqual(ui.client.messages, {})
-            await ui.key('Enter')
+            await ui.send_message()
             await ui.wait_until(lambda: any(m.get('text') == text
                                            for m in ui.client.messages.values()), timeout=15)
             await ui.wait_until(lambda: text in ui.screen_text(), timeout=15)
@@ -317,7 +320,8 @@ class TuiPtyIntegrationTests(_PtyCase):
                             and ('Resize terminal' in s['text'] if columns == 70
                                  else 'Message' in s['text'] and 'New session' not in s['text']))
                 self.save(terminal, label)
-            self.press(terminal, 'F1', lambda s: 'F1/Esc Back' in s['text'] and '/channels' in s['text'])
+            self.press(terminal, 'F1', lambda s: 'F1/Esc Back' in s['text']
+                       and 'Message starts NORMAL' in s['text'])
             self.save(terminal, 'pty-small-help')
             self.press(terminal, 'Escape')
             before = self.screen(terminal)['count']
@@ -378,7 +382,7 @@ class TuiTmuxIntegrationTests(_PtyCase):
         self.addCleanup(self.archive_session, self.session['id'])
         self.agent = self.api.action(self.session['id'], 'spawn', body={
             'provider': 'kilo', 'cwd': self.temp.name,
-            'name': 'qa-inert-' + ('nested' if 'nested' in self._testMethodName else 'outside'),
+            'name': 'qa-inert-' + self._testMethodName.split('_', 2)[1],
             'history_mode': 'none'})
         def running():
             row = self.api.get(self.session['id'])['agents'][0]
@@ -412,6 +416,44 @@ class TuiTmuxIntegrationTests(_PtyCase):
     def finish_with_draft(self, terminal):
         self.press(terminal, 'CtrlQ', lambda s: 'Quit with unsent' in s['text'])
         terminal.send('y')
+
+    def test_resume_refusal_then_explicit_fresh_launch(self):
+        self.api.action(self.session['id'], 'stop', self.agent['agent_id'])
+        self.assertEqual(self.api.get(self.session['id'])['agents'][0]['last_state'], 'exited')
+        launches_before = self.shim_log.read_text().splitlines()
+        with PtyTerminal(self.cli_command('--session', self.session['id']),
+                         env=self.terminal_env, cwd=ROOT) as terminal:
+            self.addCleanup(self.assert_terminal_closed, terminal)
+            self.screen(terminal, lambda s: 'Connected' in s['text'] and 'qa-inert' in s['text'])
+            before = self.screen(terminal)['count']
+            terminal.resize(80, 18)
+            self.screen(terminal, lambda s: (s['columns'], s['rows']) == (80, 18)
+                        and s['count'] > before)
+            self.press(terminal, 'F3', lambda s: 'Choose agent' in s['text'])
+            self.press(terminal, 'Enter', lambda s: 'Agent actions' in s['text'])
+            self.paste(terminal, 'Resume agent')
+            self.press(terminal, 'Enter', lambda s: 'Launch mode:' in s['text'])
+            self.press(terminal, 'Enter', lambda s: 'resume not supported for kilo' in s['text'])
+            refused = self.save(terminal, 'resume-refusal-80x18')
+            self.assertIn('< Resume agent >', refused['text'])
+            self.assertEqual(self.api.get(self.session['id'])['agents'][0]['last_state'], 'exited')
+            self.assertEqual(self.shim_log.read_text().splitlines(), launches_before)
+            self.press(terminal, 'Tab')
+            self.press(terminal, 'Down', lambda s: '(*) fresh' in s['text'])
+            self.press(terminal, 'Enter', lambda s: 'Fresh launch for' in s['text'])
+            self.assertEqual(self.shim_log.read_text().splitlines(), launches_before)
+            terminal.send('y')
+            self.screen(terminal, lambda s: 'Launch mode:' not in s['text']
+                        and 'Fresh launch for' not in s['text'] and s['buffer'] == '')
+            def running():
+                row = self.api.get(self.session['id'])['agents'][0]
+                return row if row['last_state'] == 'running' else None
+            resumed = self.poll(running)
+            self.assertEqual(resumed['last_launch']['kind'], 'fresh')
+            self.assertEqual(resumed['agent_id'], self.agent['agent_id'])
+            self.assertEqual(len(self.shim_log.read_text().splitlines()), len(launches_before) + 1)
+            terminal.key('CtrlQ')
+            self.assert_restored(terminal)
 
     def test_outside_attach_detach_preserves_draft_and_repaints_delivery(self):
         with PtyTerminal(self.cli_command('--session', self.session['id']),
@@ -459,7 +501,8 @@ class TuiTmuxIntegrationTests(_PtyCase):
             self.save(terminal, 'tmux-nested-before')
             self.open_attach(terminal)
             terminal.wait(lambda: self.clients().get(client) == self.target)
-            self.json_command('send', '--session', self.session['id'], 'copied terminal message')
+            message = 'copied terminal message\n    indented copy line\n│ actual message separator'
+            self.json_command('send', '--session', self.session['id'], message)
             self.tmux('switch-client', '-c', client, '-l')
             terminal.wait(lambda: self.clients().get(client) == tui_session)
             self.screen(terminal, lambda s: s['buffer'] == 'survives attachment'
@@ -469,20 +512,34 @@ class TuiTmuxIntegrationTests(_PtyCase):
             self.press(terminal, 'F5', lambda s: 'Switch back: tmux switch-client -l' in self.activity_body(s))
             self.save(terminal, 'tmux-nested-guidance')
             self.press(terminal, 'Escape', lambda s: s['buffer'] == 'survives attachment')
+            before_selection = self.screen(terminal)['count']
+            terminal.send('\x1b[18~')
+            self.screen(terminal, lambda s: s['count'] > before_selection and 'F7 return' in s['text'])
             pane = self.tmux('list-panes', '-t', tui_session + ':', '-F', '#{pane_id}').stdout.strip()
             captured = self.tmux('capture-pane', '-p', '-t', pane).stdout
-            self.assertIn('copied terminal message', captured)
+            self.assertIn(message, captured)
             self.write_artifact('tmux-nested-capture-pane.txt', captured)
             self.tmux('copy-mode', '-t', pane)
             self.tmux('send-keys', '-t', pane, '-X', 'history-top')
+            for _ in range(captured.splitlines().index('copied terminal message')):
+                self.tmux('send-keys', '-t', pane, '-X', 'cursor-down')
             self.tmux('send-keys', '-t', pane, '-X', 'start-of-line')
             self.tmux('send-keys', '-t', pane, '-X', 'begin-selection')
-            self.tmux('send-keys', '-t', pane, '-X', 'history-bottom')
+            for _ in range(2):
+                self.tmux('send-keys', '-t', pane, '-X', 'cursor-down')
             self.tmux('send-keys', '-t', pane, '-X', 'end-of-line')
             self.tmux('send-keys', '-t', pane, '-X', 'copy-selection-and-cancel')
             copied = self.tmux('show-buffer').stdout
-            self.assertIn('copied terminal message', copied)
+            self.assertEqual(copied.rstrip('\n'), message)
             self.write_artifact('tmux-native-selection-copy.txt', copied)
+            before_restore = self.screen(terminal)['count']
+            terminal.send('\x1b[18~')
+            self.screen(terminal, lambda s: s['count'] > before_restore and 'F7 return' not in s['text'])
+            self.assertEqual(self.screen(terminal)['buffer'], 'survives attachment')
+            self.assertEqual(self.screen(terminal)['buffer_cursor'], cursor)
+            terminal.send('Z')
+            resumed = self.screen(terminal, lambda s: s['buffer'] == 'survives attachmenZt')
+            self.assertEqual(resumed['buffer_cursor'], cursor + 1)
             self.finish_with_draft(terminal)
             terminal.wait(lambda: tui_session not in self.clients().values())
             self.assertEqual(terminal.process.wait(timeout=15), 0)

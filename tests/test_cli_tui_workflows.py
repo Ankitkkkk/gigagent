@@ -890,15 +890,22 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_navigation_search_stable_ids_refresh_and_mouse(self):
         async with workflow_harness(rows=[workspace('ws_alpha', 'Same'), workspace('ws_beta', 'Same')]) as ui:
+            reads = ui.api.list.call_count
             task = ui.start(ui.workflows.navigate())
             await self.modal(ui, 'Show archived')
+            await ui.wait_until(lambda: ui.api.list.call_count > reads and not ui.view._sessions_loading)
             await ui.select_row('ws_beta')
-            self.assertEqual((await task).workspace_id, 'ws_beta')
+            self.assertEqual((await asyncio.wait_for(task, 2)).workspace_id, 'ws_beta')
+            reads = ui.api.list.call_count
             task = ui.start(ui.workflows.navigate())
             await self.modal(ui, 'Show archived')
+            await ui.wait_until(lambda: ui.api.list.call_count > reads and not ui.view._sessions_loading)
             await ui._send('\x01\x0b')
+            reads = ui.api.list.call_count
             await ui.activate_named('refresh')
-            await self.modal(ui, 'Show archived')
+            # The dialog remains open while Refresh runs; rows reject clicks
+            # until loading finishes. Wait for that request before clicking.
+            await ui.wait_until(lambda: ui.api.list.call_count > reads and not ui.view._sessions_loading)
             self.assertEqual(ui.state.selected_session_id, 'ws_beta')
             # Mouse handler belongs to actual rendered navigation rows.
             for y, row in enumerate(ui.rows):
@@ -907,7 +914,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     break
             else:
                 self.fail('full stable ID not visible')
-            self.assertEqual((await task).workspace_id, 'ws_alpha')
+            self.assertEqual((await asyncio.wait_for(task, 2)).workspace_id, 'ws_alpha')
 
     async def test_capacity_refuses_switch_and_create_before_mutation(self):
         async with workflow_harness(selected=workspace(), rows=[workspace('ws_other')]) as ui:
@@ -974,6 +981,18 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             await ui._send('n')
             await self.modal(ui, 'Resume agent')
             self.assertEqual(ui.api.action.call_count, 1)
+            await ui.key('Escape')
+            self.assertEqual((await task).status, 'cancelled')
+
+    async def test_resume_refusal_stays_visible_at_minimum_terminal_size(self):
+        async with workflow_harness(selected=workspace(agents=[agent()]), size=(80, 18)) as ui:
+            ui.api.action.side_effect = CLIError('Saved conversation missing; choose fresh.', status=409)
+            task = ui.start(ui.workflows.agent_form('resume', 'ag_one'))
+            await self.modal(ui, 'Resume agent')
+            await ui.key('Enter')
+            await ui.wait_until(lambda: ui.api.action.call_count == 1 and ui.dialogs.future is not None)
+            self.assertIn('Saved conversation missing; choose fresh.', ui.screen_text())
+            self.assertIn('< Resume agent >', ui.screen_text())
             await ui.key('Escape')
             self.assertEqual((await task).status, 'cancelled')
 
@@ -1175,11 +1194,12 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ui.view.composer.text, '')
                 self.assertEqual(len(ui.state.drafts), 50)
                 self.assertEqual(ui.state.notices.lines.count('50 unsent drafts; send or clear one'), 1)
-                self.assertIn('Message · 50 unsent drafts; send or clear one', ui.screen_text())
+                self.assertIn('Message · INSERT · 50 unsent drafts; send or clear one',
+                              ui.screen_text())
                 ui.state.drafts.clear(('session', '0'))
                 await ui.paste('now allowed')
                 self.assertEqual(ui.view.composer.text, 'now allowed')
-                self.assertNotIn('Message · 50 unsent', ui.screen_text())
+                self.assertNotIn('Message · INSERT · 50 unsent', ui.screen_text())
             finally:
                 release.set()
 
@@ -1227,7 +1247,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_small_help_and_modal_help_preserve_focus_values_on_resize(self):
         async with workflow_harness(selected=workspace(), size=(70, 16)) as ui:
             await ui.key('F1')
-            await ui.wait_until(lambda: 'Alt+Enter adds a line' in ui.screen_text())
+            await ui.wait_until(lambda: 'INSERT: Enter completes/adds a line' in ui.screen_text())
             await ui.key('F2')
             self.assertIsNone(ui.dialogs.future)
             await ui.key('Escape')
@@ -1237,7 +1257,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             await ui.paste('edited')
             focused, future = ui.application.layout.current_control, ui.dialogs.future
             await ui.key('F1')
-            await ui.wait_until(lambda: 'Alt+Enter adds a line' in ui.screen_text())
+            await ui.wait_until(lambda: 'INSERT: Enter completes/adds a line' in ui.screen_text())
             self.assertIs(ui.dialogs.future, future)
             await ui.resize(70, 16)
             await ui.resize(120, 35)

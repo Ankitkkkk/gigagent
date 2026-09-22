@@ -13,10 +13,11 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer, Float,
-                                   FloatContainer, HSplit, VSplit, Window)
+                                   FloatContainer, HSplit, ScrollOffsets, VSplit, Window)
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.layout import walk
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.styles import Style
@@ -58,6 +59,21 @@ def _wrap(text, width):
                     part += char
                     used += cells
         yield part
+
+
+class _MentionLexer(Lexer):
+    """Style mention-shaped handles without changing draft text or routing."""
+
+    def lex_document(self, document):
+        def line(index):
+            text = document.lines[index]
+            fragments, start = [], 0
+            for match in re.finditer(r'(?<![\w@])@[\w][\w-]*', text):
+                fragments.extend([('', text[start:match.start()]),
+                                  ('class:composer.mention', match.group())])
+                start = match.end()
+            return [*fragments, ('', text[start:])]
+        return line
 
 
 class _SafeComposer(Processor):
@@ -183,7 +199,7 @@ class _ConversationControl(UIControl):
         clock = '  ' + clock if clock else ''
         header = clip_cells(marker + ' ' + name, max(1, width - get_cwidth(clock)))
         yield [(style, header), ('class:muted', clock)]
-        gutter = clip_cells('│ ', max(0, width - 1))
+        gutter = '' if self.view.selecting_text else clip_cells('│ ', max(0, width - 1))
         content_width = max(1, width - get_cwidth(gutter))
 
         def body_lines(text, text_style=''):
@@ -386,7 +402,9 @@ class ComposerActions:
         previous_read_only = self.buffer.read_only
         self.buffer.read_only = Condition(lambda: self.key is None or previous_read_only())
         self.buffer.completer = ContextualCompleter(view)
-        self.buffer.complete_while_typing = Condition(lambda: self.key is not None)
+        self.buffer.complete_while_typing = Condition(lambda:
+            self.key is not None and self.view.composer_mode == 'INSERT'
+            and not self.view.selecting_text)
         self._bindings()
         self.switch_draft(self.destination_key(), mandatory=True)
 
@@ -469,7 +487,8 @@ class ComposerActions:
 
     def _claim_send(self):
         """Capture the Enter-time snapshot before queued typeahead can edit it."""
-        if self.sending or self.key is None or not self.buffer.text.strip():
+        if (self.view.composer_mode != 'NORMAL' or self.view.selecting_text
+                or self.sending or self.key is None or not self.buffer.text.strip()):
             return
         if self.key != self.destination_key():
             self.notice('Draft destination changed; select its destination before sending')
@@ -525,9 +544,14 @@ class ComposerActions:
 
         @bindings.add('enter', filter=focused)
         def send(event):
+            if self.view.selecting_text:
+                return
             completion = self.buffer.complete_state
-            if completion is not None and completion.complete_index is not None:
-                self.buffer.apply_completion(completion.current_completion)
+            if self.view.composer_mode == 'INSERT':
+                if completion is not None and completion.complete_index is not None:
+                    self.buffer.apply_completion(completion.current_completion)
+                elif self.key is not None:
+                    self.buffer.insert_text('\n')
                 return
             self.buffer.complete_state = None
             snapshot = self._claim_send()
@@ -544,9 +568,13 @@ class ComposerActions:
                         event.app.invalidate()
                 task.add_done_callback(release_unstarted)
 
-        @bindings.add('escape', 'enter', filter=editable)
-        def newline(event):
-            self.buffer.insert_text('\n')
+        @bindings.add('escape', 'enter', filter=focused)
+        def normal_then_send(event):
+            # A quick Esc, Enter can arrive together as a terminal key sequence.
+            if self.view.selecting_text:
+                return
+            self.view.normal_composer()
+            send(event)
 
         @bindings.add('tab', filter=editable & Condition(lambda: self.buffer.complete_state is not None))
         def complete(event):
@@ -564,16 +592,19 @@ class ComposerActions:
                       eager=Condition(lambda: (self.buffer.complete_state is not None or self.view.activity_visible) and
                                       not self.view._app().key_processor.input_queue))
         def escape(event):
-            if self.buffer.complete_state is not None:
-                self.buffer.complete_state = None
-            elif self.view.activity_visible:
+            if self.view.selecting_text:
+                return
+            self.view.normal_composer()
+            if self.view.activity_visible:
                 self.view.hide_activity()
 
         @bindings.add('c-d', filter=focused)
         def delete_or_quit(event):
+            if self.view.selecting_text:
+                return
             if not self.buffer.text:
                 event.app.create_background_task(self.view.callbacks['quit']())
-            elif self.key is not None:
+            elif self.key is not None and self.view.composer_mode == 'INSERT':
                 self.buffer.delete()
 
 
@@ -581,17 +612,23 @@ class TuiView:
     """Build controls once. Callbacks own application actions and all I/O."""
 
     style = Style.from_dict({
-        'frame.border': 'ansibrightblack', 'frame.label': '',
-        'focused frame.border': 'ansicyan', 'selected': 'ansicyan bold',
+        'frame.border': 'ansibrightblack', 'frame.label': 'ansibrightblack',
+        'focused frame.border': 'ansicyan', 'focused frame.label': 'ansicyan bold',
+        'selected': 'ansicyan bold',
+        'mode.normal': 'ansicyan reverse bold',
+        'mode.insert': 'ansigreen reverse bold',
+        'mode.copy': 'ansiyellow reverse bold',
         'status.running': 'ansigreen', 'status.starting': 'ansiyellow',
         'status.failed': 'ansired', 'muted': 'ansibrightblack',
         'chat.you': 'ansicyan bold', 'chat.agent': 'ansigreen bold',
         'chat.attachment': 'ansicyan underline', 'chat.choices': 'ansiyellow',
+        'composer.mention': 'ansibrightcyan bold',
         'agent.ready': 'ansigreen', 'agent.working': 'ansicyan',
         'agent.input': 'ansiyellow bold', 'agent.starting': 'ansiyellow',
         'agent.stopped': 'ansibrightblack', 'agent.error': 'ansired bold',
         'agent.unread': 'ansicyan bold',
         'dialog.choice.selected': 'ansicyan bold',
+        'dialog.error': 'ansibrightred bold',
         'session.current': 'ansicyan bold',
         'session.selected': 'bg:ansicyan fg:ansiblack bold',
         'button': 'bg:default fg:default', 'button.focused': 'bg:default ansicyan bold',
@@ -609,6 +646,7 @@ class TuiView:
         self._ordered_ids = ()
         self.inspecting = False
         self.selecting_text = False
+        self.composer_mode = 'NORMAL'
         self._inspector_line = 0
         self.activity_visible = False
         self.help_visible = False
@@ -620,7 +658,10 @@ class TuiView:
         self._activity_max_line = 0
         self._activity_focus = None
         self.composer = TextArea(multiline=True, height=self._composer_height, wrap_lines=True,
-                                 read_only=Condition(lambda: self.screen_mode == 'small'),
+                                 read_only=Condition(lambda: self.screen_mode == 'small'
+                                                     or self.selecting_text
+                                                     or self.composer_mode == 'NORMAL'),
+                                 lexer=_MentionLexer(),
                                  input_processors=[_SafeComposer()])
         self.conversation = _ConversationControl(self)
         self.activity = _ActivityControl(self)
@@ -631,9 +672,14 @@ class TuiView:
                                            focusable=True, show_cursor=False)
         self.conversation_window = Window(self.conversation, wrap_lines=False)
         self.navigation_window = Window(self.navigation, wrap_lines=False)
-        self.agents_window = Window(self.agents, height=lambda: 8 if self.inspecting else
-                                    1 if self.screen_mode == 'compact' else 3, wrap_lines=False)
-        conversation = self._frame(self.conversation_window, self._conversation_title, 'conversation')
+        self.agents_window = Window(self.agents, height=lambda: None if self.screen_mode == 'wide' and not self.inspecting else
+                                    8 if self.inspecting else
+                                    1 if self.screen_mode == 'compact' else 3, wrap_lines=False,
+                                    scroll_offsets=ScrollOffsets(bottom=lambda: int(
+                                        self.screen_mode == 'wide' and not self.inspecting)))
+        framed_conversation = self._frame(self.conversation_window, self._conversation_title, 'conversation')
+        conversation = DynamicContainer(lambda: self.conversation_window if self.selecting_text
+                                         else framed_conversation)
         self.agent_actions = Button('Actions', width=12, handler=lambda:
             self._app().create_background_task(self.callbacks['run_action'](
                 'agents', target_id=self.state.selected_agent_id)))
@@ -650,7 +696,14 @@ class TuiView:
                                     else 'Agents · Enter Actions · F3 Choose · Esc Message', 'agents')
         agent_area = ConditionalContainer(DynamicContainer(lambda: agent_contents
             if self.screen_mode == 'compact' and not self.inspecting else framed_agents),
-            filter=Condition(lambda: not self.controller.plain_channel))
+            filter=Condition(lambda: not self.controller.plain_channel
+                             and (self.screen_mode != 'wide' or self.inspecting)))
+        rail_agent_controls = HSplit([review, attach, action_buttons],
+            height=lambda: 1 + int(self._show_add_agent()) + int(
+                self._input_agent() is not None or self._show_attach()))
+        rail_agents = self._frame(HSplit([self.agents_window, rail_agent_controls],
+                                        width=Dimension.exact(20)),
+            lambda: 'Agent details' if self.inspecting else 'Agents', 'agents')
         self.clear_draft = Button('Clear draft', width=15, handler=lambda:
             self._app().create_background_task(self.callbacks['run_action']('clear_draft')))
         composer_area = FloatContainer(
@@ -670,15 +723,17 @@ class TuiView:
                               else 'Sessions', 'navigation',
                               width=Dimension.exact(22))
         pending_window = Window(self.pending_inputs, wrap_lines=False,
-                                height=lambda: max(2, min(5, len(self.pending_input_rows()))),
+                                height=lambda: max(1, min(3, len(self.pending_input_rows()))),
                                 dont_extend_height=True)
         pending_hint = Window(FormattedTextControl(lambda: [('class:muted',
             'Enter: review input' if self.pending_input_rows() else '')]), height=1)
-        pending_area = self._frame(HSplit([pending_window, pending_hint]),
+        pending_area = self._frame(HSplit([pending_window, ConditionalContainer(
+            pending_hint, filter=Condition(lambda: bool(self.pending_input_rows())))]),
             lambda: f'Input pending {min(99, len(self.pending_input_rows()))}'
                     f'{"+" if len(self.pending_input_rows()) > 99 else ""}', 'pending_inputs',
             width=Dimension.exact(22))
-        sidebar = HSplit([sidebar, ConditionalContainer(pending_area,
+        sidebar = HSplit([sidebar, ConditionalContainer(rail_agents,
+            filter=Condition(lambda: not self.controller.plain_channel and not self.inspecting)), ConditionalContainer(pending_area,
             filter=Condition(lambda: not self.controller.plain_channel))], width=Dimension.exact(22))
         wide = VSplit([sidebar, main])
         resize_notice = HSplit([Window(FormattedTextControl(
@@ -776,11 +831,21 @@ class TuiView:
         return True
 
     def _composer_title(self):
+        if self.selecting_text:
+            return 'Message · Copying · F7 Resume ' + self.composer_mode
         key = (('channel', self.client.channel) if self.controller.plain_channel else
                ('session', self.controller.workspace['id']) if self.controller.workspace else None)
+        title = 'Message · ' + self.composer_mode
         if key is not None and not self.state.drafts.can_open(key):
-            return 'Message · ' + self.state.drafts.capacity_notice
-        return 'Message'
+            return title + ' · ' + self.state.drafts.capacity_notice
+        return title + (' · i Edit · Enter Send' if self.composer_mode == 'NORMAL'
+                        else ' · Enter Newline · Esc Normal')
+
+    def normal_composer(self):
+        self.composer_mode = 'NORMAL'
+        self.composer.buffer.complete_state = None
+        self.composer.buffer.exit_selection()
+        self._app().invalidate()
 
     def _composer_height(self):
         width = max(1, self._app().output.get_size().columns -
@@ -802,13 +867,21 @@ class TuiView:
     @property
     def screen_mode(self):
         size = self._app().output.get_size()
-        return layout_mode(size.columns, size.rows)
+        mode = layout_mode(size.columns, size.rows)
+        # Native selection copies whole terminal rows, including adjacent panes.
+        return 'compact' if self.selecting_text and mode == 'wide' else mode
 
     def _focus_style(self, name):
         def style():
-            target = getattr(self, name)
-            control = getattr(target, 'control', target)
-            return 'class:focused' if self._app().layout.current_control is control else ''
+            groups = {'agents': ('agents', 'agent_actions', 'agent_add', 'agent_review', 'agent_attach'),
+                      'navigation': ('navigation', 'new_session'),
+                      'composer': ('composer', 'clear_draft')}
+            focused = self._app().layout.current_control
+            for member in groups.get(name, (name,)):
+                target = getattr(self, member)
+                if focused is getattr(target, 'control', target):
+                    return 'class:focused'
+            return ''
         return style
 
     def focus_named(self, name):
@@ -1147,6 +1220,8 @@ class TuiView:
         return 'stopped', '○ Stopped'
 
     def _agent_content_width(self):
+        if self.screen_mode == 'wide' and not self.inspecting:
+            return 20
         return max(1, self._app().output.get_size().columns -
                    (22 if self.screen_mode == 'wide' else 0) - 15 -
                    (17 if self._input_agent() is not None or self._show_attach() else 0))
@@ -1159,7 +1234,8 @@ class TuiView:
             return [('', '\n'.join(lines[self._inspector_line:]))]
         agents = self.agent_rows()
         if not agents:
-            return [('', 'No agents. Click Add agent to start.')]
+            return [('class:muted', 'No agents.\nClick Add agent\nto start.' if self.screen_mode == 'wide'
+                     else 'No agents. Click Add agent to start.')]
         fragments = []
         width = self._agent_content_width()
         name_width = min(20, max(8, width - 30), max(get_cwidth(label_text(
@@ -1175,6 +1251,16 @@ class TuiView:
             kind, badge = self._agent_badge(agent)
             count = agent.get('unread_count')
             unread = '  ✉ ' + ('99+' if count > 99 else str(count)) if isinstance(count, int) and count > 0 else ''
+            if self.screen_mode == 'wide':
+                name = clip_cells(label_text(agent.get('registry_name') or agent['agent_id']),
+                                  max(1, width - 2 - get_cwidth(unread)))
+                fragments.extend([
+                    ('class:selected' if selected else 'bold',
+                     ('› ' if selected else '  ') + name, select),
+                    ('class:agent.unread', unread, select), ('', '\n', select),
+                    ('class:agent.' + kind, '  ' + clip_cells(badge, width - 2), select),
+                    ('', '\n\n', select)])
+                continue
             name = clip_cells(label_text(agent.get('registry_name') or agent['agent_id']), name_width)
             parts = [('class:selected' if selected else '', ('› ' if selected else '  ') +
                       name + ' ' * max(0, name_width - get_cwidth(name)) + '  '),
@@ -1200,17 +1286,19 @@ class TuiView:
 
     def _footer(self):
         if self.selecting_text:
-            return [('class:status.starting', 'Select text: drag · Ctrl+Shift+C copy · F7 return')]
+            return [('class:mode.copy', ' COPY '),
+                    ('class:status.starting', '  Select text: drag · Ctrl+Shift+C copy · F7 return')]
         if self.screen_mode == 'small':
             return [('class:muted', 'F1 Help · Ctrl+Q Quit')]
+        mode = [('class:mode.' + self.composer_mode.lower(), ' ' + self.composer_mode + ' '), ('', '  ')]
         if self.screen_mode == 'compact':
-            return [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
-                     ' · F3 Agents · F4 Menu · F5 ' +
+            return mode + [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
+                     '  F3 Agents  F4 Menu  F5 ' +
                      ('Chat' if self.activity_visible else 'Log') +
-                     ' · F7 Copy · F1 Help · Ctrl+Q Quit')]
-        return [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
-                 ' · F3 Agents · F4 Commands · F5 ' + ('Back to chat' if self.activity_visible else 'Activity') +
-                 ' · F7 Select text · F1 Help · Ctrl+Q Quit')]
+                     '  F7 Copy  F1 Help  Ctrl+Q Quit')]
+        return mode + [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
+                 '  F3 Agents  F4 Commands  F5 ' + ('Back to chat' if self.activity_visible else 'Activity') +
+                 '  F7 Copy  F1 Help  Ctrl+Q Quit')]
 
     def _cancel_overlay(self):
         if self.screen_mode == 'small':
@@ -1223,9 +1311,63 @@ class TuiView:
 
     def _bindings(self):
         bindings = KeyBindings()
+        copying = Condition(lambda: self.selecting_text)
+
+        @bindings.add(Keys.Any, eager=True, filter=copying & Condition(lambda:
+            self.dialogs.future is None and not self.help_visible))
+        def preserve_copy_input(event):
+            # Read-only buffers still accept selection and cursor shortcuts.
+            # Native copying owns these keys until F7 restores editor input.
+            pass
+
+        composer_focused = has_focus(self.composer) & Condition(lambda:
+            self.screen_mode != 'small' and self.dialogs.future is None
+            and not self.help_visible and not self.selecting_text)
+        normal = composer_focused & Condition(lambda: self.composer_mode == 'NORMAL')
+
+        @bindings.add('i', filter=normal)
+        @bindings.add('I', filter=normal)
+        @bindings.add('a', filter=normal)
+        @bindings.add('A', filter=normal)
+        def insert(event):
+            buffer = self.composer.buffer
+            key = event.data
+            if key == 'I':
+                buffer.cursor_position += buffer.document.get_start_of_line_position(after_whitespace=True)
+            elif key == 'A':
+                buffer.cursor_position += buffer.document.get_end_of_line_position()
+            elif key == 'a':
+                buffer.cursor_right()
+            self.composer_mode = 'INSERT'
+
+        @bindings.add(Keys.Any, filter=normal)
+        def normal_key(event):
+            buffer = self.composer.buffer
+            motions = {'h': buffer.cursor_left, 'l': buffer.cursor_right,
+                       'j': buffer.cursor_down, 'k': buffer.cursor_up}
+            if event.data in motions:
+                motions[event.data]()
+            elif event.data == 'w':
+                buffer.cursor_position += buffer.document.find_next_word_beginning() or 0
+            elif event.data == 'b':
+                buffer.cursor_position += buffer.document.find_start_of_previous_word() or 0
+            elif event.data == '0':
+                buffer.cursor_position += buffer.document.get_start_of_line_position()
+            elif event.data == '$':
+                buffer.cursor_position += buffer.document.get_end_of_line_position()
+
+        @bindings.add(Keys.BracketedPaste, filter=composer_focused)
+        def paste(event):
+            self.composer_mode = 'INSERT'
+            self.composer.buffer.insert_text(event.data.replace('\r\n', '\n').replace('\r', '\n'))
+
+        @bindings.add('escape', filter=composer_focused,
+                      eager=Condition(lambda: not self._app().key_processor.input_queue))
+        def normal_mode(event):
+            self.normal_composer()
 
         def dispatch(key, callback, *args):
-            @self.global_key_bindings.add(key, filter=Condition(lambda:
+            @self.global_key_bindings.add(key, eager=copying, filter=Condition(lambda:
                 (key in ('f1', 'c-q') or self.screen_mode != 'small') and
                 (key in ('f1', 'c-q') or self.dialogs.future is None and not self.help_visible)))
             def invoke(event):
@@ -1233,31 +1375,37 @@ class TuiView:
 
         dispatch('f1', 'run_action', 'help')
         dispatch('f2', 'navigate', False)
-        @self.global_key_bindings.add('f3', filter=Condition(lambda:
+        @self.global_key_bindings.add('f3', eager=copying, filter=Condition(lambda:
             self.screen_mode != 'small' and self.dialogs.future is None and not self.help_visible))
         def agent_actions(event):
             # Always start at the list, including a single previously selected agent.
             event.app.create_background_task(self.callbacks['run_action'](
                 'agents', target_id=None))
-        @self.global_key_bindings.add('f6')
+        @self.global_key_bindings.add('f6', eager=copying)
         def attach_agent(event):
             self._direct_attach(choose=True)
 
         dispatch('f4', 'run_action', 'commands')
         dispatch('c-q', 'quit')
 
-        @self.global_key_bindings.add('f5', filter=Condition(lambda:
+        @self.global_key_bindings.add('f5', eager=copying, filter=Condition(lambda:
             self.screen_mode != 'small' and self.dialogs.future is None and not self.help_visible))
         def activity(event):
             self.hide_activity() if self.activity_visible else self.show_activity()
 
-        @self.global_key_bindings.add('f7', filter=Condition(lambda:
+        @self.global_key_bindings.add('f7', eager=copying, filter=Condition(lambda:
             self.selecting_text or self.screen_mode != 'small'
             and self.dialogs.future is None and not self.help_visible))
         def select_text(event):
             # Let the terminal own drag selection and its native clipboard shortcut.
-            # Do not move focus or modify the composer buffer/selection.
             self.selecting_text = not self.selecting_text
+            if (not self.selecting_text and self.dialogs.future is None
+                    and not self.help_visible):
+                # Copying often starts after clicking the transcript. Return to
+                # the editor instead of leaving its shortcuts on another control.
+                if not self.focus_named('composer'):
+                    event.app.layout.current_window = self.composer.window
+                    self.state.focus_name = 'composer'
             event.app.invalidate()
 
         @bindings.add('c-c')

@@ -128,6 +128,12 @@ history, agent status, and reconnection after server restarts. Incoming replies
 do not overwrite the input prompt. Messages entered while disconnected are
 rejected rather than queued for later delivery.
 
+On wide terminals, sessions, agent status, and pending input share a left rail.
+The conversation and message input use the main column. Agent details expand
+beside the rail for readable paths and recovery commands. Narrow terminals stack
+the controls below chat. Accent borders mark the focused pane, and the footer
+shows NORMAL, INSERT, or COPY mode.
+
 ### Keyboard controls
 
 | Key | Action |
@@ -140,24 +146,39 @@ rejected rather than queued for later delivery.
 | F7 | Toggle terminal text selection: drag to select, use your terminal's Copy shortcut, then F7 to restore app mouse controls |
 | F1 | Open Help |
 | Tab / Shift+Tab | Move between visible controls |
-| Enter | Select the highlighted choice or send the composer text |
-| Alt+Enter | Add a line without sending |
+| i / I | Enter INSERT mode at the cursor / first nonblank character |
+| a / A | Enter INSERT mode after the cursor / at the line end |
+| Enter | In INSERT: accept the highlighted completion or add a newline. In NORMAL: send the message. In dialogs: select the highlighted choice |
+| Escape, then Enter | Return to NORMAL and send the message |
+| h / j / k / l, w / b, 0 / $ | In NORMAL: move left/down/up/right, by word, or to line start/end |
 | PageUp / PageDown | Scroll a page in the focused conversation or Activity pane |
 | End | Follow the latest messages in the focused conversation and clear its new-message count; jump to the bottom in Activity |
 | Mouse wheel | Scroll three wrapped lines in conversation or Activity; conversation wheel-up leaves follow, and reaching the bottom resumes follow and clears its new-message count |
-| Escape | Cancel the current dialog, close Help/Activity (including after Retry unread, from any pane), or return from Agents to the message box |
+| Escape | Return the message composer to NORMAL; cancel the current dialog, close Help/Activity, or return from Agents to the message box |
 | Ctrl+C | Cancel the current dialog while preserving the message draft |
-| Ctrl+D | Delete at the cursor, or Quit when the composer is empty |
+| Ctrl+D | In INSERT: delete at the cursor. In either mode: Quit when the composer is empty |
 | Ctrl+Q | Confirm unsent drafts when needed, checkpoint, and quit |
 
 Session names have inset rows, a blank separator, and a full-row highlight.
 A dot marks the open session. Click a row to open it; blank sidebar space does
 not change sessions. Up/Down and mouse-wheel scrolling remain available.
 
+The message box starts in **NORMAL** mode. Press **i** to write in **INSERT**
+mode; Enter adds a newline instead of sending. Press **Escape**, then **Enter**
+to send deliberately. The message-box title shows the current mode and shortcuts.
+Pasting enters INSERT mode automatically. This supports the Normal/Insert modes
+and movement keys listed above, rather than the full Vim command set.
+Mentions such as **@agent-1** appear bright cyan and bold while you write;
+their stored and sent text stays unchanged. Mention styling marks handle-shaped
+text and does not verify that an agent is online.
+
 To copy a string from a response, press **F7**, drag over the text, then use
-your terminal's Copy shortcut (**Ctrl+Shift+C** in GNOME Terminal). Press **F7**
-again to restore clicking and mouse-wheel scrolling in the app. Message focus,
-draft text, and cursor position are preserved. On terminals that support it,
+your terminal's Copy shortcut (**Ctrl+Shift+C** in GNOME Terminal). Selection
+mode hides the sidebar and conversation borders so multiline selections contain
+message text without UI separators. Message editing and sending pause during selection.
+Press **F7** again to restore the layout, clicking, and mouse-wheel scrolling,
+and return focus to the message input. Your NORMAL/INSERT mode and draft are
+preserved, so editing resumes where you left it. On terminals that support it,
 holding **Shift** while dragging also bypasses app mouse capture. Inside tmux,
 its mouse mode can still intercept dragging: use Shift-drag or tmux copy mode.
 Copying uses your terminal's clipboard; physical selection depends on the terminal.
@@ -219,6 +240,10 @@ shell substitutions and pipelines are not evaluated.
 
 Resume shows the saved working directory as read-only and reuses it automatically;
 you do not need to enter it again. Add agent still lets you choose a directory.
+If submission fails, the form keeps your entries and shows the error at the top.
+Use **Attach** (**F6**) to open an agent whose terminal is already running.
+After a temporary heartbeat disconnect, the same running wrapper restores its
+status when it reconnects; a deliberately stopped agent still needs Resume.
 
 F3 always opens the agent chooser, including empty sessions. Its **Add agent**
 button opens the form directly and stays visible when search finds no matches.
@@ -307,11 +332,12 @@ supported hook installer; other adapters retain generic terminal detection.
 | `/help` | Show commands |
 | `/quit` | Checkpoint the selected session and exit; server and agents keep running |
 
-Completion suggestions cover commands, agent handles, and channel names. Tab
-chooses a suggestion; Enter applies it, and a later Enter sends. Full-screen
-Escape cancels dialogs without altering the composer. Alt+Enter inserts a
-newline; terminals that send it as Escape followed by Enter must complete that
-key sequence before the terminal timeout. Draft text and cursor position survive
+Completion suggestions cover commands, agent handles, and channel names. In
+INSERT mode, Tab chooses a suggestion and Enter applies it; Enter without a
+selected suggestion adds a newline. Escape returns to NORMAL, where Enter sends.
+Escape cancels dialogs without altering the composer. Alt+Enter can produce the
+same terminal bytes as Escape followed by Enter, so use plain Enter in INSERT
+mode for newlines. Draft text and cursor position survive
 session/channel switches and resize. Up to 50 nonempty drafts are kept in
 memory, each at most 64 KiB of UTF-8 text. At capacity, send or clear one before
 opening another destination. Drafts are not persisted and disappear when the

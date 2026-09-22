@@ -112,7 +112,7 @@ class TuiApplication:
                                      composer_actions=self.composer_actions)
         bindings = KeyBindings()
 
-        @bindings.add(Keys.SIGINT)
+        @bindings.add(Keys.SIGINT, eager=True)
         def interrupt(event):
             self._schedule_signal()
 

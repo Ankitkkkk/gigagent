@@ -91,8 +91,9 @@ class CliTests(unittest.TestCase):
 
     def test_readme_cli_examples_parse_offline(self):
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
-        examples = [line for line in readme.splitlines() if line.startswith("python cli.py")]
-        self.assertIn("python cli.py --session billing --no-resume", examples)
+        examples = [line for line in readme.splitlines()
+                    if line.startswith(("python cli.py", "python gigagent.py"))]
+        self.assertIn("python gigagent.py --session billing --no-resume", examples)
         for line in examples:
             with self.subTest(example=line), redirect_stderr(io.StringIO()):
                 try:

@@ -190,14 +190,17 @@ class DialogHost:
         return await self._open(dialog, bindings,
                                 yes_button if default else no_button, escape)
 
-    async def form(self, title, fields, *, submit_label, error=None):
+    async def form(self, title, fields, *, submit_label, error=None, description=None):
         """Collect raw field values; show validation errors until resubmitted."""
         cancelled = ModalResult(cancelled=True)
         if self.future is not None:
             return cancelled
         fields = tuple(fields)
         controls = {}
-        rows = []
+        # Put refusals ahead of the editable fields: optional context below the
+        # fields can be clipped on short terminals, hiding a failed submission.
+        error_label = Label(body_text(error) if error else '', style='class:dialog.error')
+        rows = [error_label]
         for field in fields:
             if field.choices:
                 control = RadioList([(value, label_text(value)) for value in field.choices],
@@ -209,8 +212,8 @@ class DialogHost:
                                    input_processors=[_SafeInput()])
             controls[field.name] = control
             rows.extend([Label(label_text(field.label)), control])
-        error_label = Label(body_text(error) if error is not None else '')
-        rows.append(error_label)
+        if description:
+            rows.append(Label(body_text(description)))
 
         def submit():
             values = {name: (control.current_value if isinstance(control, RadioList)
@@ -711,7 +714,7 @@ class TuiWorkflows:
                 if action == 'resume':
                     context += '\nResume automatically uses the saved working directory.'
             result = await self._dialog('form', title, fields, submit_label=submit,
-                                             error='\n'.join(filter(None, [context, error])) or None)
+                                       error=error, description=context or None)
             if result.cancelled:
                 return ActionOutcome('cancelled')
             if not self._unchanged(scope):
@@ -763,7 +766,7 @@ class TuiWorkflows:
         error = None
         while True:
             result = await self._dialog('form', 'Loop guard', [field], submit_label='Save',
-                                       error='\n'.join(filter(None, [context, error])))
+                                       error=error, description=context)
             if result.cancelled:
                 return ActionOutcome('cancelled')
             field = replace(field, default=result.value['hops'])
@@ -883,8 +886,13 @@ class TuiWorkflows:
             from cli import HELP
             text = ('F2 Sessions/Channels · F3 Agents · F4 Commands · F5 Activity · F6 Attach\n'
                     'F7 Select text: drag, terminal Copy (Ctrl+Shift+C), F7 return\n'
+                    'Editing/sending pause during selection; F7 restores message focus and mode.\n'
                     'Shift-drag also bypasses mouse capture in supporting terminals.\n'
-                    'Tab changes focus · Enter selects/sends · Alt+Enter adds a line\n'
+                    'Message starts NORMAL: i/I/a/A edit · Enter sends\n'
+                    'INSERT: Enter completes/adds a line · Escape returns NORMAL\n'
+                    'NORMAL movement: h/j/k/l, w/b, 0/$ · Paste enters INSERT\n'
+                    'Mentions such as @agent-1 appear bright cyan and bold\n'
+                    'Tab changes focus · Enter selects dialog choices\n'
                     'Ctrl+Q Quit · Escape cancels · Ctrl+C preserves draft\n'
                     'Sessions opens navigation. Committed switches and Quit checkpoint.\n\n' +
                     HELP.replace('/history            Show recent messages in this channel',

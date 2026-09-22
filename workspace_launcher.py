@@ -66,7 +66,7 @@ class TmuxOps:
     def has_session(self, name: str) -> bool:
         try:
             return subprocess.run(
-                ["tmux", "has-session", "-t", name], capture_output=True, timeout=5
+                ["tmux", "has-session", "-t", '=' + name], capture_output=True, timeout=5
             ).returncode == 0
         except Exception:
             return False
@@ -303,7 +303,8 @@ class WorkspaceLauncher:
         adapter = self._validate(ws, agent["provider"], requested_cwd)
         effective_cwd = str(Path(requested_cwd).resolve())
         if agent["last_state"] in ("starting", "running") or self._tmux.has_session(self.tmux_name(agent)):
-            raise LaunchError(409, f"{agent['registry_name']} is already running")
+            raise LaunchError(409, f"{agent['registry_name']} is already running; "
+                              "use Attach to open the existing terminal")
         session_id = agent["native_session_id"]
         if not fresh:
             if not adapter.supports_resume:
@@ -399,16 +400,32 @@ class WorkspaceLauncher:
                 and (agent.get("last_launch") or {}).get("startup_delivery_done") is False):
             self._background(self._after_ready, ws["id"], agent["agent_id"], agent["last_launch"].get("nonce"))
             return
-        if agent["last_state"] != "starting":
+        recovering = agent["last_state"] == "exited"
+        if recovering:
+            launch = agent.get('last_launch') or {}
+            expected_pid = self._wrapper_pid(agent)
+            # Crash-timeout deregistration can race a surviving wrapper's next
+            # heartbeat. Restore only that recorded launch, never a new occupant.
+            if (ws.get('archived') or launch.get('terminated')
+                    or type(pid) is not int or pid <= 0
+                    or type(expected_pid) is not int or expected_pid <= 0
+                    or pid != expected_pid
+                    or not self._tmux.has_session(self.tmux_name(agent))):
+                return
+        elif agent["last_state"] != "starting":
             return
         last_launch = dict(agent["last_launch"])
         last_launch["pid"] = pid
         self.store.update_agent(
-            ws["id"], agent["agent_id"], last_state="running", last_launch=last_launch
+            ws["id"], agent["agent_id"], last_state="running", last_error=None,
+            last_launch=last_launch
         )
         with self._lock:
             self._pending.pop(agent["agent_id"], None)
-        self._background(self._after_ready, ws["id"], agent["agent_id"], last_launch.get("nonce"))
+        # Missing delivery flags belong to older launches; recovery must not
+        # replay their identity/history prompts. Explicit pending delivery retries.
+        if not recovering or last_launch.get('startup_delivery_done') is False:
+            self._background(self._after_ready, ws["id"], agent["agent_id"], last_launch.get("nonce"))
 
     def _update_if_launch(self, ws_id: str, agent_id: str, nonce: str, **fields) -> bool:
         ok = self.store.update_agent_if_launch(ws_id, agent_id, nonce, **fields)
@@ -520,6 +537,10 @@ class WorkspaceLauncher:
         return last_launch.get("wrapper_pid") or last_launch.get("pid")
 
     def _terminate_launch(self, ws_id: str, agent: dict, reason: str) -> None:
+        # Persist before best-effort process cleanup. A late heartbeat must not
+        # undo a deliberate stop or timeout, even if killing tmux fails.
+        self.store.update_agent(ws_id, agent['agent_id'],
+                                last_launch=dict(agent.get('last_launch') or {}, terminated=True))
         self._tmux.kill_session(self.tmux_name(agent))
         pid = self._wrapper_pid(agent)
         if pid:

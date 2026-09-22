@@ -162,6 +162,11 @@ class TuiHarness:
         """Escape includes the configured 50ms terminal escape decoding timeout."""
         await self._send(self.sequences[name])
 
+    async def send_message(self):
+        """Perform the user's explicit Normal-mode send gesture."""
+        await self.key('Escape')
+        await self.key('Enter')
+
     def bind_submit(self, submit):
         self.submit_mock = submit
         self.callbacks['submit'] = submit

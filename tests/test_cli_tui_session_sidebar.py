@@ -13,7 +13,11 @@ class SessionSidebarTests(unittest.IsolatedAsyncioTestCase):
             ui.view.set_sessions([one, two])
             ui.state.selected_session_id = 'ws_b'
             await ui.wait_render()
-            for x, y in ((2, 10), (18, 12), (6, 18)):
+            info = ui.view.navigation_window.render_info
+            blank_rows = [y for y in range(info._y_offset, info._y_offset + info.window_height)
+                          if not ui.rows[y][1:21].strip()]
+            self.assertTrue(blank_rows)
+            for x, y in ((2, blank_rows[0]), (18, blank_rows[-1]), (6, blank_rows[-1])):
                 await ui.click(x, y)
             self.assertEqual(ui.calls, [])
             self.assertEqual(ui.state.selected_session_id, 'ws_b')
