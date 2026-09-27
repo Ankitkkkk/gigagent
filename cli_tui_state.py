@@ -79,6 +79,10 @@ class DraftStore:
     def items(self):
         return ((key, entry[0]) for key, entry in self._entries.items())
 
+    def entries(self):
+        """(key, text, cursor) for every unsent draft, oldest first."""
+        return ((key, entry[0], entry[1]) for key, entry in self._entries.items())
+
     def get(self, key):
         entry = self._entries.get(key)
         return '' if entry is None else entry[0]

@@ -233,3 +233,47 @@ def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess
                 'message': f'Installed yapp {version}.'}
     finally:
         lock.unlink(missing_ok=True)
+
+
+def save_relaunch_state(data_dir, *, drafts, session_id, channel, notices, now=time.time):
+    payload = {'saved_at': now(), 'session_id': session_id, 'channel': channel,
+               'notices': list(notices),
+               'drafts': [{'key': list(key), 'text': text, 'cursor': cursor}
+                          for key, text, cursor in drafts]}
+    path = Path(data_dir) / RELAUNCH_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.tmp')
+    fd = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w') as handle:
+        json.dump(payload, handle)
+    os.replace(temporary, path)
+
+
+def load_relaunch_state(data_dir, *, now=time.time):
+    """Return saved drafts/selection once, or None; the file is always removed."""
+    path = Path(data_dir) / RELAUNCH_FILE
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        payload = None
+    finally:
+        path.unlink(missing_ok=True)
+    try:
+        age = now() - float(payload['saved_at'])
+        if not 0 <= age <= RELAUNCH_MAX_AGE:
+            return None
+        drafts = []
+        for item in payload['drafts']:
+            key, text, cursor = item['key'], item['text'], item['cursor']
+            if (not isinstance(key, list) or len(key) != 2 or not all(isinstance(k, str) for k in key)
+                    or not isinstance(text, str) or not isinstance(cursor, int)):
+                return None
+            drafts.append(((key[0], key[1]), text, cursor))
+        session_id, channel = payload.get('session_id'), payload.get('channel')
+        notices = payload.get('notices', [])
+        if (not isinstance(session_id, (str, type(None))) or not isinstance(channel, (str, type(None)))
+                or not isinstance(notices, list) or not all(isinstance(n, str) for n in notices)):
+            return None
+    except (TypeError, KeyError, ValueError):
+        return None
+    return {'session_id': session_id, 'channel': channel, 'drafts': drafts, 'notices': notices}

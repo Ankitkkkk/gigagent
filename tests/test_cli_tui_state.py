@@ -389,5 +389,15 @@ class ResumeSanitationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output, ['first line\nnext\tfield'])
 
 
+class DraftEntriesTests(unittest.TestCase):
+    def test_entries_include_cursor(self):
+        from cli_tui_state import DraftStore
+        drafts = DraftStore()
+        drafts.set(('session', 'a'), 'hello', cursor=2)
+        drafts.set(('channel', 'general'), 'hi')
+        self.assertEqual(list(drafts.entries()),
+                         [(('session', 'a'), 'hello', 2), (('channel', 'general'), 'hi', 2)])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -280,5 +280,40 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class RelaunchStateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_round_trip_private_and_consumed_once(self):
+        updates.save_relaunch_state(
+            self.data, drafts=[(('session', 'ws_1'), 'hello @claude', 5)],
+            session_id='ws_1', channel=None, notices=['Updated to yapp 0.6.0.'], now=lambda: 100.0)
+        path = self.data / updates.RELAUNCH_FILE
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        state = updates.load_relaunch_state(self.data, now=lambda: 150.0)
+        self.assertEqual(state, {'session_id': 'ws_1', 'channel': None,
+                                 'drafts': [(('session', 'ws_1'), 'hello @claude', 5)],
+                                 'notices': ['Updated to yapp 0.6.0.']})
+        self.assertFalse(path.exists())
+        self.assertIsNone(updates.load_relaunch_state(self.data, now=lambda: 150.0))
+
+    def test_invalid_or_stale_state_is_ignored_and_deleted(self):
+        path = self.data / updates.RELAUNCH_FILE
+        payloads = ['{broken',
+                    json.dumps({'saved_at': 100, 'drafts': 'nope'}),
+                    json.dumps({'saved_at': 100, 'drafts': [{'key': ['session'], 'text': 'x', 'cursor': 0}]}),
+                    json.dumps({'saved_at': 'soon', 'drafts': []}),
+                    json.dumps({'saved_at': 100 - updates.RELAUNCH_MAX_AGE - 1, 'drafts': []})]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                path.write_text(payload)
+                self.assertIsNone(updates.load_relaunch_state(self.data, now=lambda: 100.0))
+                self.assertFalse(path.exists())
+
+
 if __name__ == '__main__':
     unittest.main()
