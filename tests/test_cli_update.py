@@ -24,6 +24,7 @@ class UpdateCommandTests(unittest.TestCase):
     def run_update(self, arguments, *, result=AVAILABLE, method='installer', answer='y', tty=True,
                    applied=None, api=None):
         self.lines = []
+        self.errors = []
         self.apply = Mock(return_value=applied or {'ok': True, 'state': 'installed',
                                                    'version': '0.6.0', 'message': 'Installed yapp 0.6.0.'})
         self.check = Mock(return_value=result)
@@ -31,8 +32,8 @@ class UpdateCommandTests(unittest.TestCase):
         if api is None:
             self.api.server_status.side_effect = CLIError('Could not connect to the local yapp server')
         return cli_update.run_update(
-            arguments, CONFIG, output=self.lines.append, ask=lambda prompt: answer,
-            stdin_tty=lambda: tty, check=self.check, apply=self.apply,
+            arguments, CONFIG, output=self.lines.append, error_output=self.errors.append,
+            ask=lambda prompt: answer, stdin_tty=lambda: tty, check=self.check, apply=self.apply,
             install_method=lambda: method, api_factory=lambda url: self.api)
 
     def test_check_exit_codes(self):
@@ -84,6 +85,51 @@ class UpdateCommandTests(unittest.TestCase):
     def test_already_current(self):
         self.assertEqual(self.run_update(args(), result=dict(AVAILABLE, state='current', current='0.6.0')), 0)
         self.assertIn('up to date', self.lines[-1])
+
+    def test_json_yes_success_emits_single_json_line_and_keeps_human_text_on_stderr(self):
+        api = Mock()
+        api.server_status.return_value = {'instance_id': 'i1', 'state': 'ready',
+                                          'restart_supported': True, 'reason': ''}
+        code = self.run_update(args(yes=True, json=True), api=api)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.lines), 1)
+        payload = json.loads(self.lines[0])
+        self.assertEqual(set(payload), {'check', 'outcome', 'server'})
+        self.assertTrue(payload['outcome']['ok'])
+        self.assertEqual(payload['check']['state'], 'update_available')
+        self.assertIsInstance(payload['server'], str)
+        self.assertTrue(any('Installed yapp 0.6.0.' in line for line in self.errors))
+        self.assertEqual(self.lines, [json.dumps(payload)])
+
+    def test_json_current_branch_emits_single_json_line(self):
+        code = self.run_update(args(yes=True, json=True),
+                               result=dict(AVAILABLE, state='current', current='0.6.0'))
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.lines), 1)
+        payload = json.loads(self.lines[0])
+        self.assertEqual(payload, {'check': dict(AVAILABLE, state='current', current='0.6.0'),
+                                   'outcome': None, 'server': None})
+
+    def test_json_unsupported_method_emits_single_json_line(self):
+        code = self.run_update(args(yes=True, json=True), method='checkout')
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.lines), 1)
+        payload = json.loads(self.lines[0])
+        self.assertEqual(payload, {'check': AVAILABLE, 'outcome': None, 'server': None})
+        self.apply.assert_not_called()
+
+    def test_json_without_yes_is_rejected(self):
+        self.assertEqual(self.run_update(args(json=True)), 1)
+        self.assertFalse(self.lines)
+        self.assertIn('--yes', self.errors[-1])
+        self.check.assert_not_called()
+        self.apply.assert_not_called()
+
+    def test_non_local_url_is_rejected_before_checking_or_applying(self):
+        self.assertEqual(self.run_update(args(url='http://example.com')), 1)
+        self.assertIn('local server', self.errors[-1])
+        self.check.assert_not_called()
+        self.apply.assert_not_called()
 
     def test_parser_accepts_update_flags(self):
         parsed = cli.build_parser().parse_args(['update', '--check', '--json'])

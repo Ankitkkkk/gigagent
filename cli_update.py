@@ -4,31 +4,46 @@ import json
 import sys
 
 import updates
-from cli_api import CLIError
+from cli_api import CLIError, local_url
 from cli_workspaces import WorkspaceAPI
 
 
-def _restart_local_server(url, api_factory, output):
+def _default_error_output(text):
+    print(text, file=sys.stderr)
+
+
+def _restart_local_server(url, api_factory):
     try:
         api = api_factory(url)
         status = api.server_status()
-    except (CLIError, OSError):
-        output('No local server is running; the new version starts next time you run yapp.')
-        return
+    except (CLIError, OSError, ValueError):
+        return 'No local server is running; the new version starts next time you run yapp.'
     if not status.get('restart_supported') or status.get('state') != 'ready':
-        output('Restart the yapp server to finish the update (F4 → Restart server in yapp).')
-        return
+        return 'Restart the yapp server to finish the update (F4 → Restart server in yapp).'
     try:
         api.restart_server(status['instance_id'])
     except (CLIError, OSError) as error:
-        output(f'Could not restart the server ({error}); restart it from yapp with F4 → Restart server.')
-        return
-    output('Server restarted. Open yapp windows reopen on the new version automatically.')
+        return f'Could not restart the server ({error}); restart it from yapp with F4 → Restart server.'
+    return 'Server restarted. Open yapp windows reopen on the new version automatically.'
 
 
-def run_update(args, config, *, output=print, ask=input, stdin_tty=sys.stdin.isatty,
-               check=updates.check, apply=updates.apply, install_method=updates.install_method,
-               api_factory=WorkspaceAPI):
+def run_update(args, config, *, output=print, error_output=_default_error_output, ask=input,
+               stdin_tty=sys.stdin.isatty, check=updates.check, apply=updates.apply,
+               install_method=updates.install_method, api_factory=WorkspaceAPI):
+    if args.url:
+        try:
+            local_url(args.url)
+        except ValueError as error:
+            error_output(str(error))
+            return 1
+    # With --json (outside --check), stdout must be exactly one JSON document, so human
+    # text goes to error_output and an unattended run needs --yes to avoid a stdin prompt.
+    json_mode = args.json and not args.check
+    if json_mode and not args.yes:
+        error_output('yapp update --json requires --yes')
+        return 1
+    say = error_output if json_mode else output
+
     data_dir = updates.data_dir_from_config(config)
     result = check(data_dir=data_dir, config=config, force=True, explicit=True)
     if args.check:
@@ -41,32 +56,40 @@ def run_update(args, config, *, output=print, ask=input, stdin_tty=sys.stdin.isa
         else:
             output(f"Could not check for updates: {result['error']}")
         return {'update_available': 10, 'current': 0}.get(result['state'], 1)
+
+    outcome = None
+    server = None
+
+    def finish(code):
+        if json_mode:
+            output(json.dumps({'check': result, 'outcome': outcome, 'server': server}))
+        return code
+
     if result['state'] == 'current':
-        output(f"yapp {result['current']} is up to date.")
-        return 0
+        say(f"yapp {result['current']} is up to date.")
+        return finish(0)
     if result['state'] != 'update_available':
-        output(f"Could not check for updates: {result['error']}")
-        return 1
+        say(f"Could not check for updates: {result['error']}")
+        return finish(1)
     method = install_method()
     if method not in ('installer', 'pipx'):
-        output(updates.manual_instructions(method))
-        return 1
-    output(f"yapp {result['latest']} is available (you have {result['current']}).\n"
-           f"Release notes: {result['url']}")
+        say(updates.manual_instructions(method))
+        return finish(1)
+    say(f"yapp {result['latest']} is available (you have {result['current']}).\n"
+        f"Release notes: {result['url']}")
     if not args.yes:
         if not stdin_tty():
-            output('Run yapp update --yes to update without a terminal.')
-            return 1
+            say('Run yapp update --yes to update without a terminal.')
+            return finish(1)
         if ask('Update now? [y/N] ').strip().lower() not in ('y', 'yes'):
-            return 0
-    output(f"Installing yapp {result['latest']}…")
+            return finish(0)
+    say(f"Installing yapp {result['latest']}…")
     outcome = apply(result, method=method, data_dir=data_dir)
-    if args.json:
-        output(json.dumps(outcome))
     if not outcome['ok']:
-        output(outcome['message'])
-        return 1
-    output(outcome['message'])
+        say(outcome['message'])
+        return finish(1)
+    say(outcome['message'])
     url = args.url or f"http://127.0.0.1:{config.get('server', {}).get('port', 8300)}"
-    _restart_local_server(url, api_factory, output)
-    return 0
+    server = _restart_local_server(url, api_factory)
+    say(server)
+    return finish(0)
