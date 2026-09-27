@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yapp"
+dynamic = ["version"]
+description = "A full-screen terminal workspace for your AI coding agents."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "mcp>=1.0,<2.0",  # v2 removes mcp.server.fastmcp (issue #85)
+    "prompt-toolkit>=3.0.53,<4.0",
+    "websockets>=15.0,<18.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Ankitkkkk/yapp"
+
+# Both names start the same application.
+[project.scripts]
+yapp = "yapp.yapp:main"
+goon = "yapp.yapp:main"
+
+# The modules live flat in the repository root and import each other by
+# top-level name; yapp.yapp:main puts the installed package directory on
+# sys.path so those imports keep working.
+[tool.setuptools]
+package-dir = { "yapp" = ".", "yapp.providers" = "providers" }
+packages = ["yapp", "yapp.providers"]
+
+[tool.setuptools.package-data]
+yapp = [
+    "VERSION",
+    "config.toml",
+    "config.local.toml.example",
+    "static/*",
+    "static/sounds/*",
+    "session_templates/*.json",
+]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }

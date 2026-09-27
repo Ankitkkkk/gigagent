@@ -54,7 +54,7 @@ def _probe_status(url, timeout):
         raise
     if (not isinstance(status, dict) or not isinstance(status.get('paused'), bool)
             or not isinstance(status.get('data_dir'), str) or not status['data_dir']):
-        raise CLIError('The local endpoint did not return an yapp server status')
+        raise CLIError('The local endpoint did not return a yapp server status')
     return status
 
 

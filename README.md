@@ -36,57 +36,50 @@ resolved in the provider's own terminal.
 
 ## Quick start
 
-Use Python 3.11+ and tmux on Linux, macOS, or WSL2. From a new checkout:
+Use Python 3.11+ and tmux on Linux, macOS, or WSL2. Install with
+[pipx](https://pipx.pypa.io/):
 
 ```sh
-git clone https://github.com/Ankitkkkk/yapp.git
-cd yapp
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-cli.txt
-.venv/bin/python yapp.py
+pipx install git+https://github.com/Ankitkkkk/yapp.git
+yapp
 ```
 
-Or run `./install.sh` to set up `.venv` and a shell command with a name you choose (e.g. `yapp` or `goon`).
+The package installs two equivalent commands, `yapp` and `goon`; use either.
 
 Interactive startup can start the local server automatically when tmux is
 available. Select or create a session, choose **Add agent**, and enter the
 provider, name, and project directory. Use **F1** for Help.
 
-See [INSTALLATION.md](INSTALLATION.md) for system dependencies, a shell
-command named as you choose (e.g. `yapp` or `goon`), manual server startup, Windows limitations, and instructions an
-AI agent can follow to install and verify the application. Installation uses
-this source checkout; release ZIPs from `build_release.py` do not include the TUI.
+See [INSTALLATION.md](INSTALLATION.md) for system dependencies, installing from a
+source checkout, manual server startup, Windows limitations, and instructions an
+AI agent can follow to install and verify the application. Release ZIPs from
+`build_release.py` do not include the TUI.
 
 ## TUI guide
 
 **yapp** includes a full-screen terminal UI and shell client.
-See [INSTALLATION.md](INSTALLATION.md) for installation steps, a shell command
-named as you choose, and a checklist an AI agent can follow on a new system.
+See [INSTALLATION.md](INSTALLATION.md) for installation steps and a checklist an
+AI agent can follow on a new system. Every example below works with `goon` in
+place of `yapp`.
 
-Yapp also works from a terminal without opening a browser. After setting
-up the Python environment, run these commands from the source repository:
+yapp works from a terminal without opening a browser:
 
 ```sh
-python -m pip install -r requirements-cli.txt
-python yapp.py
-python yapp.py --plain
-python yapp.py chat --plain
+yapp
+yapp --plain
+yapp chat --plain
 ```
 
-Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
-`.venv\Scripts\python.exe` on Windows). To start only the server, run
-`python run.py` in a separate terminal. `python yapp.py chat` explicitly starts
-interactive mode.
+`yapp chat` explicitly starts interactive mode. In a source checkout,
+`python yapp.py` and `python cli.py` accept the same arguments, and
+`python run.py` starts only the server.
 
-`python yapp.py` is the branded entry point; `python cli.py` remains supported
-with the same arguments and behavior.
-
-From this source checkout, `python yapp.py` opens the full-screen terminal UI and
+`yapp` opens the full-screen terminal UI and
 its session picker. Create a session or select an existing one; the picker can
 also show archived sessions and asks before restoring one. Terminal sessions
 group a channel, working directories, and persistent agent identities.
 
-Use `python yapp.py --plain` or `python yapp.py chat --plain` for the legacy
+Use `yapp --plain` or `yapp chat --plain` for the legacy
 scrolling prompt. When stdout is not a terminal, or on macOS/Linux when `TERM`
 is unset, empty, or `dumb`, interactive chat automatically uses that renderer
 and prints `Full-screen unavailable; using plain mode.` once to stderr. Input
@@ -95,15 +88,15 @@ failure after full-screen startup exits with one line naming only the exception
 type and recommends rerunning with `--plain`.
 
 ```sh
-python yapp.py
-python yapp.py --channel general
-python yapp.py --session billing --no-resume
-python yapp.py new billing --orchestrator-provider codex --cwd /absolute/project --json
-python yapp.py spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal --role code-reviewer --personality meticulous
-python yapp.py resume reviewer --session billing --fresh
-python yapp.py attach reviewer --session billing
-python yapp.py unread --session billing
-python yapp.py archive billing --yes
+yapp
+yapp --channel general
+yapp --session billing --no-resume
+yapp new billing --orchestrator-provider codex --cwd /absolute/project --json
+yapp spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal --role code-reviewer --personality meticulous
+yapp resume reviewer --session billing --fresh
+yapp attach reviewer --session billing
+yapp unread --session billing
+yapp archive billing --yes
 ```
 
 `--session` accepts an exact session ID, exact name, or unique name prefix.
@@ -285,9 +278,9 @@ the field to remove them. Existing running agents pick up changes on their next
 launch. The shell and slash commands support the same option:
 
 ```sh
-python yapp.py spawn codex --session billing --cwd /absolute/project --provider-flags='--model MODEL_NAME'
-python yapp.py resume reviewer --session billing --provider-flags='--model MODEL_NAME'
-python yapp.py resume reviewer --session billing --provider-flags=''
+yapp spawn codex --session billing --cwd /absolute/project --provider-flags='--model MODEL_NAME'
+yapp resume reviewer --session billing --provider-flags='--model MODEL_NAME'
+yapp resume reviewer --session billing --provider-flags=''
 ```
 
 In chat, use `/spawn codex --provider-flags='--model MODEL_NAME'` or
@@ -422,12 +415,12 @@ keeps running. Attaching inside tmux switches clients; switch back with
 For scripts and one-shot commands:
 
 ```sh
-python yapp.py send --channel general --name Pat "@claude review the latest changes"
-python yapp.py read --channel general --limit 20
-python yapp.py status
-python yapp.py channels
-python yapp.py read --json
-python yapp.py send --json - < task.txt
+yapp send --channel general --name Pat "@claude review the latest changes"
+yapp read --channel general --limit 20
+yapp status
+yapp channels
+yapp read --json
+yapp send --json - < task.txt
 ```
 
 `send` waits for a server acknowledgment after persistence (or command handling).
@@ -459,11 +452,8 @@ end to end. Real provider authentication, trust dialogs, and terminal behavior
 depend on the installed provider CLI. Decision buttons, attachment uploads, and
 other graphical workflows still use the web UI.
 
-These commands require a source checkout. `build_release.py` has a pre-existing
-packaging gap: it does not yet ship the CLI files, `requirements-cli.txt`, or
-terminal-session core modules (`workspace_store.py`, `workspace_unread.py`,
-`workspace_launcher.py`, and `providers/`). Release archives do not provide
-this workflow yet.
+Release ZIPs from `build_release.py` do not ship the CLI files or the
+terminal-session core modules; install the package instead.
 
 ## Browser and wrapper quickstart (Windows)
 
@@ -1027,7 +1017,7 @@ Available models: `MiniMax-M3` (default), `MiniMax-M2.7`, `MiniMax-M2.7-highspee
 
 ## Architecture
 
-`yapp.py` launches the terminal client. Its UI, forms, and terminal handoff
+`yapp.py` (the `yapp` and `goon` commands) launches the terminal client. Its UI, forms, and terminal handoff
 live in `cli_tui.py`, `cli_tui_view.py`, and `cli_tui_dialogs.py`. The client uses
 authenticated HTTP and WebSocket connections to the same local server shown
 below; `cli.py` remains a compatible entry point.
@@ -1085,8 +1075,8 @@ below; `cli.py` remains a compatible entry point.
 - **Linux/macOS/WSL2**: `tmux` for TUI agent lifecycle and server auto-start
 - An interactive terminal at least **80 × 18** for the full-screen TUI
 
-Install **`requirements-cli.txt`** for yapp; it includes the server packages
-from `requirements.txt`, plus the terminal dependencies. The browser/wrapper
+Installing the package pulls in the server and terminal dependencies
+(`requirements-cli.txt` lists the same set for manual setups). The browser/wrapper
 quickstart scripts install their own server dependencies on first launch.
 Native Windows chat can connect to a manually running server, but the TUI's
 tmux lifecycle actions require Linux/macOS or WSL2.

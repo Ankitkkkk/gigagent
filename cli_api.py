@@ -78,7 +78,7 @@ def fetch_session_token(url, timeout=5):
             raise ValueError("Unexpected redirect from the local server") from None
         raise
     if not parser.token:
-        raise ValueError("The server did not provide an yapp session token")
+        raise ValueError("The server did not provide a yapp session token")
     return parser.token
 
 

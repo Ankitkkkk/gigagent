@@ -91,13 +91,17 @@ class CliTests(unittest.TestCase):
 
     def test_readme_cli_examples_parse_offline(self):
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
-        examples = [line for line in readme.splitlines()
-                    if line.startswith(("python cli.py", "python yapp.py"))]
-        self.assertIn("python yapp.py --session billing --no-resume", examples)
+        examples, in_code = [], False
+        for line in readme.splitlines():
+            if line.startswith("```"):
+                in_code = not in_code
+            elif in_code and line.startswith(("python cli.py", "yapp ", "goon ")):
+                examples.append(line)
+        self.assertIn("yapp --session billing --no-resume", examples)
         for line in examples:
             with self.subTest(example=line), redirect_stderr(io.StringIO()):
                 try:
-                    build_parser().parse_args(shlex.split(line)[2:])
+                    build_parser().parse_args(shlex.split(line)[2 if line.startswith('python') else 1:])
                 except SystemExit as error:
                     self.fail(f"README example rejected (exit {error.code}): {line}")
 
