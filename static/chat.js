@@ -203,13 +203,13 @@ async function checkForUpdate() {
         if (!pill) return;
 
         const dismissed = localStorage.getItem('yapp-dismissed-version');
-        if (data.state === 'current' || data.state === 'unknown' || dismissed === data.latest) {
+        if (data.state !== 'update_available' || dismissed === data.latest) {
             pill.classList.add('hidden');
             return;
         }
 
-        const label = data.state === 'upstream_update' ? 'Upstream update available' : 'Update available';
-        pill.href = data.url || 'https://github.com/bcurts/agentchattr/releases';
+        const label = 'Update available';
+        pill.href = data.url || 'https://github.com/Ankitkkkk/yapp/releases';
         pill.innerHTML = `<span>${label}</span><button class="update-dismiss" onclick="dismissUpdate(event, '${data.latest}')" title="Dismiss">&times;</button>`;
         pill.classList.remove('hidden');
     } catch {
