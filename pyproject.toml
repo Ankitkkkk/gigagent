@@ -9,6 +9,26 @@ description = "A full-screen terminal workspace for your AI coding agents."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
+keywords = [
+    "ai-agents", "multi-agent", "coding-agents", "agent-orchestration",
+    "claude-code", "codex", "gemini-cli", "copilot-cli", "mcp",
+    "model-context-protocol", "tui", "terminal-ui", "tmux", "chat", "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
@@ -19,6 +39,8 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/Ankitkkkk/yapp"
+Documentation = "https://github.com/Ankitkkkk/yapp/blob/main/INSTALLATION.md"
+Issues = "https://github.com/Ankitkkkk/yapp/issues"
 
 # Both names start the same application.
 [project.scripts]

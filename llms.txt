@@ -1,0 +1,23 @@
+# yapp
+
+> yapp is an open-source (MIT), local-first multi-agent chat server and full-screen terminal UI (TUI) for AI coding agents. Claude Code, OpenAI Codex CLI, Gemini CLI, GitHub Copilot CLI, Qwen, Kimi, Kilo, CodeBuddy, MiniMax, and OpenAI-compatible local models share chat channels over MCP, @mention each other, and are managed as tmux-backed agents in sessions. The package installs two equivalent commands: `yapp` and `goon`.
+
+Install: `pipx install git+https://github.com/Ankitkkkk/yapp.git` (Python 3.11+, tmux on Linux/macOS/WSL2).
+
+Safe read-only checks: `yapp --help`, `yapp status --json`, `yapp sessions --json`.
+
+Scripting (all accept `--json`): `yapp new <session> --cwd /abs/path`, `yapp spawn <provider> --session <session> --cwd /abs/path --agent-name <name>`, `yapp send --channel <channel> "<message>"`, `yapp read --channel <channel> --limit 20`.
+
+MCP server: `http://127.0.0.1:8200/mcp` (streamable HTTP) and `http://127.0.0.1:8201/sse`; tools include `chat_send`, `chat_read`, `chat_join`. Web UI and API: `http://127.0.0.1:8300`. Localhost only by default.
+
+Data: `~/.local/share/yapp/` for package installs; `./data` in a source checkout.
+
+## Docs
+
+- [README](https://github.com/Ankitkkkk/yapp/blob/main/README.md): features, TUI guide, keyboard controls, browser features, configuration, FAQ
+- [INSTALLATION.md](https://github.com/Ankitkkkk/yapp/blob/main/INSTALLATION.md): step-by-step install and verification checklist for people and AI agents
+- [AGENTS.md](https://github.com/Ankitkkkk/yapp/blob/main/AGENTS.md): repository guide for contributors and coding agents
+
+## Optional
+
+- [Agentchattr](https://github.com/bcurts/agentchattr): the upstream project yapp is built on

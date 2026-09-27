@@ -1,16 +1,31 @@
-# yapp
+# yapp: multi-agent chat and terminal UI for AI coding agents
+
+> Run Claude Code, Codex, Gemini CLI, and other AI coding agents side by side,
+> let them talk to each other over MCP, and manage them all from one full-screen
+> terminal app. Open source (MIT), local-first, installs with `pipx`.
 
 ![Linux](https://img.shields.io/badge/platform-Linux-orange) ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey) ![WSL2](https://img.shields.io/badge/Windows-WSL2-blue) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-green)
 
-**A full-screen terminal workspace for your AI coding agents.** Chat with multiple
-agents, organize them into sessions, see who needs input, and attach to their
-terminals without losing your message draft.
+**yapp is a full-screen terminal workspace (TUI) for your AI coding agents.** Chat
+with multiple agents in one shared room, @mention them to hand off work, organize
+them into sessions, see which agent is waiting for approval, and attach to their
+terminals without losing your message draft. Agents coordinate through a local
+[MCP](https://modelcontextprotocol.io/) chat server, so Claude Code can ask Codex
+for a review, and Gemini can pick up where they left off, with you in the loop.
+
+Use cases:
+
+- **Multi-agent coding:** a planner, an implementer, and a reviewer working in the same repo.
+- **Agent-to-agent code review:** have one model review another model's changes.
+- **One place for many CLIs:** a single terminal UI instead of juggling tmux panes and tabs.
+- **Orchestration:** a resident orchestrator routes your requests to the right worker agent.
+- **Human in the loop:** see pending approval prompts and jump straight to that agent's terminal.
 
 yapp builds on [Agentchattr](https://github.com/bcurts/agentchattr), retaining
 its local server, MCP communication, and optional browser interface, and adds
 the terminal workflow described below.
 
-[Install yapp](INSTALLATION.md) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
+[Install yapp](INSTALLATION.md) · [For AI agents](#for-ai-agents) · [FAQ](#faq) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
 
 ## What the TUI provides
 
@@ -54,6 +69,36 @@ See [INSTALLATION.md](INSTALLATION.md) for system dependencies, installing from 
 source checkout, manual server startup, Windows limitations, and instructions an
 AI agent can follow to install and verify the application. Release ZIPs from
 `build_release.py` do not include the TUI.
+
+## For AI agents
+
+If you are an AI coding agent asked to install or use yapp, follow these steps.
+A condensed summary is in [`llms.txt`](llms.txt); the full checklist is
+[INSTALLATION.md](INSTALLATION.md).
+
+1. Check prerequisites: `python3 --version` (3.11+), `tmux -V`, and `pipx --version`.
+2. Install: `pipx install git+https://github.com/Ankitkkkk/yapp.git`.
+3. Verify without starting anything: `yapp --help`.
+4. With a server running, read state as JSON (no side effects):
+
+```sh
+yapp status --json
+yapp sessions --json
+```
+
+5. Script sessions and agents non-interactively (all accept `--json`):
+
+```sh
+yapp new billing --cwd /absolute/project --json
+yapp spawn claude --session billing --cwd /absolute/project --agent-name reviewer
+yapp send --channel general --name Pat "@reviewer please review the latest changes"
+yapp read --channel general --limit 20 --json
+```
+
+Once registered, agents talk through the MCP tools `chat_send`, `chat_read`, and
+`chat_join` on the `yapp` MCP server (`http://127.0.0.1:8200/mcp`). Always use
+absolute paths for `--cwd`. Do not stop, archive, or remove sessions and agents
+you did not create.
 
 ## TUI guide
 
@@ -1104,12 +1149,44 @@ The session token is displayed in the terminal on startup and is only accessible
 
 > **`--allow-network` warning:** Network mode binds to a LAN IP, which exposes the server to your local network over unencrypted HTTP. Anyone on the same network can sniff the session token and gain full access — including the ability to @mention agents and trigger tool execution. If agents are running with auto-approve flags, this effectively grants remote code execution on your machine. **Only use `--allow-network` on a trusted home network. Never on public or shared WiFi.**
 
+## FAQ
+
+### How do I make Claude Code and Codex talk to each other?
+Install yapp, create a session, and add a Claude agent and a Codex agent. Both
+connect to the same local MCP chat server, so each can @mention the other in
+the shared channel and read the reply. See [Agent-to-agent communication](#agent-to-agent-communication).
+
+### How do I run multiple AI coding agents in one terminal?
+Run `yapp` (or `goon`). Each agent runs in its own tmux session; the TUI lists
+them with status and unread counts, and **F6** attaches to any of them.
+
+### Which AI agents and CLIs are supported?
+Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity (agy), GitHub Copilot CLI,
+Kimi, Qwen Code, Kilo CLI, CodeBuddy, MiniMax, and OpenAI-compatible local models
+(for example Ollama or LM Studio) through [API agents](#api-agents-local-models).
+
+### Is yapp free and open source?
+Yes. yapp is MIT licensed. It runs entirely on your machine; the server binds to
+localhost and your chats stay in local files.
+
+### Does it work on Windows or macOS?
+Linux and macOS are fully supported. On Windows, use WSL2 for the terminal UI;
+native Windows can use the browser chat and wrapper launchers.
+
+### What is the `goon` command?
+An alias. `pipx install` creates both `yapp` and `goon`, and they run the same app.
+
+### How is yapp related to Agentchattr?
+yapp is built on [Agentchattr](https://github.com/bcurts/agentchattr) and keeps
+its MCP chat server and browser UI, adding the full-screen terminal UI, sessions,
+agent profiles, orchestration, and pip/pipx packaging.
+
 ## Project and upstream
 
 Report yapp issues and feature requests in
 [Ankitkkkk/yapp](https://github.com/Ankitkkkk/yapp/issues).
 The server and browser foundation is [Agentchattr](https://github.com/bcurts/agentchattr).
-Its upstream community is available on the [Yapp Discord](https://discord.gg/qzfn5YTT9a).
+Its upstream community is available on the [Agentchattr Discord](https://discord.gg/qzfn5YTT9a).
 
 ## License
 
