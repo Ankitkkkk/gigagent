@@ -5,21 +5,23 @@ Status: approved in conversation; spec awaiting review
 
 ## Goal
 
-People who installed yapp should learn when a new version is published and be
-able to update in one step without leaving the TUI. Success: one confirmation
-takes a user from the old version to the new one running, with their agents
-still alive.
+People who installed yapp should get new versions automatically. When a new
+release is published, a running TUI installs it, restarts the server, and
+reopens itself on the new version, with agents still running and unsent drafts
+restored. Success: users stay current without doing anything.
 
 Decisions made with the user:
 
 - A "new version" means a **published GitHub Release** of `Ankitkkkk/yapp`
   (tag `vX.Y.Z`). Commits to `main` alone never prompt.
-- Accepting an update **installs it, restarts the server, and relaunches the
-  TUI automatically**.
+- Updates are **automatic and immediate**: as soon as a running TUI finds a
+  release, it installs it, restarts the server, and relaunches itself. No
+  confirmation. Users can turn automatic installs off (then they get a notice
+  and the F4 command instead).
 
 ## Non-goals
 
-- Automatic updates without confirmation.
+- Updating when no TUI is running (shell commands such as `yapp status` never update).
 - Downgrades, pre-release channels, or picking an arbitrary version.
 - Self-updating source checkouts (they get instructions only).
 - Publishing to PyPI.
@@ -44,14 +46,16 @@ third-party dependencies (uses `urllib`), so it works in every install type.
 - `check(force=False)` returns a result with `state` in `update_available`,
   `current`, `unknown`, or `disabled`, plus `current`, `latest`, `url`,
   `archive_url`. Results are cached in `<data_dir>/update_check.json` for
-  24 hours; `force=True` bypasses the cache. Network errors, timeouts
+  6 hours; `force=True` bypasses the cache. Network errors, timeouts
   (5 seconds), rate limits, and malformed JSON yield `unknown` and are
   cached for 1 hour so an offline machine does not retry on every launch.
-- Opt-out: environment variable `YAPP_NO_UPDATE_CHECK=1`, or
-  `[updates] check = false` in `config.toml` / `config.local.toml`. When
-  disabled, `check()` makes no network request and returns `disabled`.
-  `yapp update` still works when invoked explicitly (an explicit command is
-  consent to one request).
+- Opt-outs, in `config.toml` / `config.local.toml` or the environment:
+  - `[updates] auto = false` or `YAPP_NO_AUTO_UPDATE=1`: keep checking, but
+    never install without being asked (notice + F4 command only).
+  - `[updates] check = false` or `YAPP_NO_UPDATE_CHECK=1`: no background
+    checks at all; `check()` makes no network request and returns `disabled`.
+  `yapp update` and F4 → Update yapp still work when invoked explicitly (an
+  explicit command is consent to one request).
 
 The existing `/api/version_check` endpoint in `app.py` (which still points at
 the upstream `bcurts/agentchattr` releases and uses fork detection) is
@@ -89,26 +93,58 @@ failure if it did not change to the release version.
 
 ## 3. TUI
 
-- On startup, the TUI runs `updates.check()` in a background thread after the
-  UI is up. When `state == update_available`, it shows one notice:
-  `yapp <latest> is available. F4 → Update yapp`. It does not repeat the
-  notice during that TUI run.
-- F4 Commands gains **Update yapp**, always listed. Selecting it:
-  1. Runs `check(force=True)`. If already current, shows
-     `yapp <version> is up to date.` If unknown, shows the error.
-  2. For `checkout` / `unknown` installs, shows the instruction message only.
-  3. Otherwise shows a confirmation dialog: current → latest version, the
-     release notes URL, and "Installs the update, restarts the server, and
-     reopens yapp. Agents keep running. Unsent drafts are lost." Default: No.
-  4. On yes: notice `Installing yapp <latest>…`, runs `apply()` in a thread.
-     On failure: notice with the message; the old version keeps running.
-  5. On success: if the connected server is local and reports
-     `restart_supported`, restart it through the existing restart action and
-     wait for it to become ready. If restart is unsupported or fails, show a
-     notice telling the user to restart the server, and continue.
-  6. Exit the TUI cleanly, then `os.execv` the same command (`sys.argv`) so
-     the new code loads. The relaunch happens in `cli.main` after the TUI
-     returns a "relaunch" result, never from inside the running event loop.
+### Checking
+
+The TUI runs `updates.check()` in a background thread once the UI is up, and
+again every 6 hours while it stays open. Checks never block the UI.
+
+### Automatic update (default)
+
+When a check returns `update_available`, the install method is `installer` or
+`pipx`, and automatic updates are not turned off:
+
+1. **Wait for a safe moment.** If the user is attached to an agent terminal
+   (F6 handoff), has a dialog or menu open, or a mutation/action is in
+   flight, wait until all of those have finished and the TUI is back on the
+   main screen. Re-check every 2 seconds.
+2. **Announce.** Show the notice `Updating yapp to <latest>… (agents keep
+   running)` and keep the UI responsive while installing.
+3. **Install.** Run `apply()` in a thread. On failure, show
+   `Automatic update to <latest> failed: <reason>. F4 → Update yapp to retry.`
+   and do not retry automatically for this release during this TUI run (the
+   old version keeps running).
+4. **Restart the server.** If the connected server is local and reports
+   `restart_supported`, restart it through the existing restart action and
+   wait for readiness. If that fails, continue; the relaunched TUI will show
+   `Restart the server to finish the update (F4 → Restart server).`
+5. **Save drafts.** Write every unsent draft (destination, text, cursor) and
+   the selected session/channel to `<data_dir>/relaunch_state.json`
+   (mode 0600).
+6. **Relaunch.** Exit the TUI cleanly and `os.execv` the same command
+   (`sys.argv`). The relaunch happens in `cli.main` after the TUI returns a
+   "relaunch" result, never from inside the running event loop.
+7. **Restore.** On startup, if `relaunch_state.json` exists and is less than
+   10 minutes old, the TUI restores those drafts and the selection, shows
+   `Updated to yapp <version>.`, and deletes the file. Older or unreadable
+   files are deleted without restoring.
+
+Before step 3, the TUI imports every module it needs for steps 4 to 6 so that
+files replaced by the install cannot change code mid-sequence.
+
+### Manual update: F4 → Update yapp
+
+Always listed in F4 Commands. It runs `check(force=True)`:
+
+- Already current: `yapp <version> is up to date.`
+- Unknown: shows the reason.
+- `checkout` / `unknown` install: shows the instruction message only.
+- Otherwise: a confirmation dialog (current → latest, release notes URL,
+  "Installs the update, restarts the server, and reopens yapp. Agents keep
+  running and drafts are kept."), default No. On yes it runs steps 2 to 7
+  above without waiting.
+
+When automatic updates are off, a found update only shows the notice
+`yapp <latest> is available. F4 → Update yapp` once per TUI run.
 
 ## 4. CLI: `yapp update`
 
@@ -142,7 +178,9 @@ says so.
 - Server restart fails after a successful install: the new code is installed;
   notice tells the user to restart the server (F4 → Restart server).
 - Concurrent updates: `apply()` holds a lock file in the data directory and
-  refuses to run twice.
+  refuses to run twice. If several TUIs are open, the first one to take the
+  lock updates; the others see the lock, wait for it to clear, then relaunch
+  themselves (steps 5 to 7) once the installed version has changed.
 
 ## Testing
 
@@ -153,10 +191,12 @@ says so.
   construction with a fake runner (no real installs); lock handling.
 - CLI tests for `yapp update --check` exit codes, `--json`, and refusal
   without `--yes` when stdin is not a terminal.
-- TUI tests (existing harness): F4 lists Update yapp; update-available notice
-  on startup; confirm declined does nothing; success path calls apply,
-  restart, and returns the relaunch result; failure path leaves the TUI
-  running with a notice.
+- TUI tests (existing harness): automatic update runs apply, restart, draft
+  save, and returns the relaunch result; it waits while attached or while a
+  dialog is open; a failed install leaves the TUI running with a notice and
+  is not retried; `auto = false` only shows the notice; F4 lists Update yapp
+  and a declined confirm does nothing; drafts and selection are restored from
+  `relaunch_state.json` and stale files are ignored.
 - `/api/version_check` returns the new shape.
 - Manual end-to-end: install with `install.sh` into a scratch home from a
   local archive, confirm the marker file, then run `yapp update` against a
