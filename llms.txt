@@ -2,6 +2,8 @@
 
 > yapp is an open-source (MIT), local-first multi-agent chat server and full-screen terminal UI (TUI) for AI coding agents. Claude Code, OpenAI Codex CLI, Gemini CLI, GitHub Copilot CLI, Qwen, Kimi, Kilo, CodeBuddy, MiniMax, and OpenAI-compatible local models share chat channels over MCP, @mention each other, and are managed as tmux-backed agents in sessions. The package installs two equivalent commands: `yapp` and `goon`.
 
+Website: https://yapp.riggedcode.com/
+
 Install: `pipx install git+https://github.com/Ankitkkkk/yapp.git` (Python 3.11+, tmux on Linux/macOS/WSL2).
 
 Safe read-only checks: `yapp --help`, `yapp status --json`, `yapp sessions --json`.

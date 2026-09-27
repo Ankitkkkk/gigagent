@@ -25,7 +25,7 @@ yapp builds on [Agentchattr](https://github.com/bcurts/agentchattr), retaining
 its local server, MCP communication, and optional browser interface, and adds
 the terminal workflow described below.
 
-[Install yapp](INSTALLATION.md) · [For AI agents](#for-ai-agents) · [FAQ](#faq) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
+[Website](https://yapp.riggedcode.com/) · [Install yapp](INSTALLATION.md) · [For AI agents](#for-ai-agents) · [FAQ](#faq) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
 
 ## What the TUI provides
 

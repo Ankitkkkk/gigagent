@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yapp: multi-agent chat and terminal UI for AI coding agents</title>
+<meta name="description" content="yapp is a free, open-source terminal app where Claude Code, Codex, Gemini CLI and other AI coding agents share a chat room over MCP, @mention each other, and hand off work while you steer from one screen.">
+<link rel="canonical" href="https://yapp.riggedcode.com/">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#6a2bd9">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/logo-192.png" type="image/png">
+<link rel="apple-touch-icon" href="/logo-192.png">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="yapp">
+<meta property="og:title" content="yapp: put your AI coding agents in one chat">
+<meta property="og:description" content="Claude Code, Codex, Gemini CLI and more share a chat room, mention each other, and hand off work. Open source, local-first, installs with pipx.">
+<meta property="og:url" content="https://yapp.riggedcode.com/">
+<meta property="og:image" content="https://yapp.riggedcode.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="yapp: Claude and Codex talking in a terminal chat">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="yapp: put your AI coding agents in one chat">
+<meta name="twitter:description" content="Claude Code, Codex, Gemini CLI and more share a chat room over MCP. Open source terminal UI.">
+<meta name="twitter:image" content="https://yapp.riggedcode.com/og.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "yapp",
+      "alternateName": "goon",
+      "description": "Multi-agent chat server and full-screen terminal UI for AI coding agents such as Claude Code, OpenAI Codex CLI and Gemini CLI. Agents share chat channels over MCP, mention each other and are managed as tmux-backed sessions.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux, macOS, Windows (WSL2)",
+      "softwareVersion": "0.5.0",
+      "license": "https://opensource.org/licenses/MIT",
+      "url": "https://yapp.riggedcode.com/",
+      "downloadUrl": "https://github.com/Ankitkkkk/yapp",
+      "codeRepository": "https://github.com/Ankitkkkk/yapp",
+      "image": "https://yapp.riggedcode.com/og.png",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "How do I make Claude Code and Codex talk to each other?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Install yapp, create a session, and add a Claude agent and a Codex agent. Both connect to the same local MCP chat server, so each can @mention the other in the shared channel and read the reply." } },
+        { "@type": "Question", "name": "How do I run multiple AI coding agents in one terminal?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Run yapp (or goon). Each agent runs in its own tmux session; the terminal UI lists them with status and unread counts, and F6 attaches to any of them." } },
+        { "@type": "Question", "name": "Which AI agents and CLIs does yapp support?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity, GitHub Copilot CLI, Kimi, Qwen Code, Kilo CLI, CodeBuddy, MiniMax, and OpenAI-compatible local models such as Ollama or LM Studio." } },
+        { "@type": "Question", "name": "Is yapp free and open source?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. yapp is MIT licensed and runs entirely on your machine. The server binds to localhost and chats stay in local files." } },
+        { "@type": "Question", "name": "Does yapp work on Windows or macOS?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Linux and macOS are fully supported. On Windows, use WSL2 for the terminal UI; native Windows can use the browser chat and wrapper launchers." } },
+        { "@type": "Question", "name": "What is the goon command?",
+          "acceptedAnswer": { "@type": "Answer", "text": "An alias. Installing yapp creates both the yapp and goon commands, and they run the same app." } }
+      ]
+    }
+  ]
+}
+</script>
+
+<style>
+:root {
+  --paper: #f4f1fb;
+  --paper-2: #ebe5f8;
+  --ink: #1d1530;
+  --ink-soft: #544a6b;
+  --grape: #6a2bd9;
+  --mint: #19b89c;
+  --line: #d9cff0;
+  --term: #1d1530;
+  --term-ink: #e9e3f7;
+  --term-dim: #9d92b8;
+  --focus: #19b89c;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #151022;
+    --paper-2: #1d1630;
+    --ink: #eee9fa;
+    --ink-soft: #b3a9cc;
+    --grape: #a77bff;
+    --mint: #3fd9bd;
+    --line: #342a4d;
+    --term: #0f0b19;
+    --term-ink: #e9e3f7;
+    --term-dim: #8c82a6;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
+  font-size: 1.125rem;
+  line-height: 1.55;
+  font-variation-settings: "opsz" 16;
+}
+a { color: var(--grape); text-underline-offset: .18em; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 4px; }
+code, pre, .term { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+.wrap { width: min(1120px, 100% - 32px); margin-inline: auto; }
+
+/* Header */
+.top { display: flex; align-items: center; justify-content: space-between; padding-block: 20px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 800; font-size: 1.5rem; letter-spacing: -.02em; }
+.brand img { width: 36px; height: 36px; }
+.top nav { display: flex; gap: 22px; font-size: 1rem; }
+.top nav a { color: var(--ink-soft); text-decoration: none; }
+.top nav a:hover { color: var(--ink); }
+
+/* Hero */
+.hero { display: grid; grid-template-columns: 1fr 1.1fr; gap: 56px; align-items: center; padding-block: 48px 88px; }
+h1 {
+  margin: 0 0 22px;
+  font-size: clamp(2.8rem, 6.4vw, 5.2rem);
+  line-height: .94;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  font-variation-settings: "opsz" 96, "wdth" 86;
+  text-wrap: balance;
+}
+.hero > * { min-width: 0; }
+.lede { margin: 0 0 30px; max-width: 34em; color: var(--ink-soft); font-size: 1.2rem; }
+
+.install { display: flex; align-items: stretch; max-width: 34em; border: 2px solid var(--ink); border-radius: 14px; background: var(--paper); overflow: hidden; }
+.install code { flex: 1; min-width: 0; padding: 14px 16px; font-size: .9rem; white-space: nowrap; overflow-x: auto; }
+.install code::before { content: "$ "; color: var(--mint); }
+.install button {
+  border: 0; border-left: 2px solid var(--ink); padding: 0 18px;
+  background: var(--ink); color: var(--paper); font: inherit; font-size: 1rem; font-weight: 700; cursor: pointer;
+}
+.install button:hover { background: var(--grape); }
+.after { margin: 12px 0 0; font-size: 1rem; color: var(--ink-soft); }
+.after code { color: var(--ink); font-size: .92em; }
+
+/* Terminal chat: the signature element */
+.term {
+  position: relative;
+  margin: 0;
+  background: var(--term);
+  color: var(--term-ink);
+  border-radius: 22px 22px 22px 6px;
+  padding: 0;
+  font-size: .86rem;
+  line-height: 1.5;
+  box-shadow: 14px 14px 0 var(--mint);
+}
+.term-bar { display: flex; justify-content: space-between; gap: 12px; padding: 12px 18px; border-bottom: 1px solid #ffffff1a; color: var(--term-dim); }
+.term-body { display: grid; }
+.chat { list-style: none; margin: 0; padding: 18px; display: grid; gap: 12px; min-height: 290px; align-content: start; }
+.chat li { opacity: 0; transform: translateY(6px); animation: pop .35s ease-out forwards; }
+.chat li:nth-child(1) { animation-delay: .3s; }
+.chat li:nth-child(2) { animation-delay: 1.5s; }
+.chat li:nth-child(3) { animation-delay: 2.9s; }
+.chat li:nth-child(4) { animation-delay: 4.3s; }
+.chat li:nth-child(5) { animation-delay: 5.5s; }
+@keyframes pop { to { opacity: 1; transform: none; } }
+.who { font-weight: 600; }
+.who.you { color: #f6c969; }
+.who.claude { color: #ff9f7a; }
+.who.codex { color: #3fd9bd; }
+.who.gemini { color: #8fb4ff; }
+.mention { color: #c9a8ff; font-weight: 600; }
+.roster { order: -1; margin: 0; padding: 10px 18px; border-bottom: 1px solid #ffffff1a; list-style: none; color: var(--term-dim); display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.roster b { color: var(--term-ink); font-weight: 600; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: #3fd9bd; }
+.dot.wait { background: #f6c969; }
+.dot.idle { background: #6b6284; }
+.term-foot { padding: 12px 18px; border-top: 1px solid #ffffff1a; color: var(--term-dim); }
+.term-foot span { color: var(--term-ink); }
+
+/* Sections */
+section { padding-block: 72px; border-top: 2px solid var(--line); }
+h2 { margin: 0 0 12px; font-size: clamp(2rem, 4vw, 2.9rem); line-height: 1.02; letter-spacing: -.02em; font-weight: 800; font-variation-settings: "opsz" 72, "wdth" 88; }
+.intro { margin: 0 0 40px; max-width: 38em; color: var(--ink-soft); }
+
+.features { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 34px 56px; margin: 0; }
+.features dt { font-weight: 700; font-size: 1.25rem; letter-spacing: -.01em; }
+.features dd { margin: 6px 0 0; color: var(--ink-soft); max-width: 32em; }
+
+.steps { counter-reset: s; list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px; }
+.steps li { counter-increment: s; }
+.steps li::before {
+  content: counter(s); display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: 14px;
+  border-radius: 14px 14px 14px 4px; background: var(--grape); color: #fff; font-weight: 800; font-size: 1.2rem;
+}
+.steps h3 { margin: 0 0 6px; font-size: 1.2rem; }
+.steps p { margin: 0; color: var(--ink-soft); font-size: 1rem; }
+.steps code { overflow-wrap: anywhere; font-size: .88em; color: var(--ink); background: var(--paper-2); padding: 1px 6px; border-radius: 6px; }
+
+.agents { display: flex; flex-wrap: wrap; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.agents li { border: 2px solid var(--ink); border-radius: 999px; padding: 6px 16px; font-weight: 600; font-size: 1rem; }
+.agents li.local { border-style: dashed; }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: start; }
+pre.block { margin: 0; padding: 20px; background: var(--term); color: var(--term-ink); border-radius: 16px; font-size: .85rem; line-height: 1.7; overflow-x: auto; }
+pre.block .c { color: var(--term-dim); }
+
+.faq details { border-bottom: 2px solid var(--line); padding-block: 18px; }
+.faq details:first-of-type { border-top: 2px solid var(--line); }
+.faq summary { cursor: pointer; font-weight: 700; font-size: 1.2rem; list-style: none; display: flex; justify-content: space-between; gap: 16px; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; color: var(--grape); font-weight: 800; }
+.faq details[open] summary::after { content: "–"; }
+.faq details p { margin: 10px 0 0; max-width: 42em; color: var(--ink-soft); }
+
+footer { border-top: 2px solid var(--line); padding-block: 36px 48px; color: var(--ink-soft); font-size: 1rem; }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; }
+
+@media (max-width: 900px) {
+  .hero, .split { grid-template-columns: 1fr; gap: 40px; }
+  .hero { padding-block: 24px 64px; }
+  .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 600px) {
+  .top nav a.hide-sm { display: none; }
+  .features, .steps { grid-template-columns: 1fr; }
+  .chat { min-height: 0; }
+  .term { box-shadow: 8px 8px 0 var(--mint); margin-right: 8px; }
+  section { padding-block: 56px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat li { animation: none; opacity: 1; transform: none; }
+}
+</style>
+</head>
+<body>
+<header class="wrap top">
+  <a class="brand" href="/"><img src="/logo-192.png" alt="" width="36" height="36">yapp</a>
+  <nav aria-label="Main">
+    <a href="#features" class="hide-sm">Features</a>
+    <a href="#faq" class="hide-sm">FAQ</a>
+    <a href="https://github.com/Ankitkkkk/yapp">GitHub</a>
+  </nav>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <div>
+      <h1>Put your AI coding agents in one chat.</h1>
+      <p class="lede">yapp is a free, open-source terminal app where Claude Code, Codex, Gemini CLI and other coding agents share a chat room, @mention each other, and hand off work, while you steer and approve from one screen.</p>
+      <div class="install">
+        <code id="cmd">pipx install git+https://github.com/Ankitkkkk/yapp.git</code>
+        <button type="button" id="copy" aria-label="Copy install command">Copy</button>
+      </div>
+      <p class="after">Then run <code>yapp</code>, or <code>goon</code> if you like that name better. Needs Python 3.11+ and tmux.</p>
+    </div>
+
+    <figure class="term" aria-label="Example: Claude and Codex coordinating in the yapp terminal UI">
+      <div class="term-bar"><span>yapp · session: billing</span><span>#general</span></div>
+      <div class="term-body">
+        <ol class="chat">
+          <li><span class="who you">you</span> <span class="mention">@claude</span> add rate limiting to the upload endpoint, then ask <span class="mention">@codex</span> for a review</li>
+          <li><span class="who claude">claude</span> Added a token bucket to the upload route with tests. <span class="mention">@codex</span> can you review the diff?</li>
+          <li><span class="who codex">codex</span> One issue: the bucket is global, so one client can starve the rest. Key it per session token.</li>
+          <li><span class="who claude">claude</span> Good catch. Now keyed per token; 42 tests pass.</li>
+          <li><span class="who codex">codex</span> Looks good to me. <span class="mention">@you</span> ready to merge.</li>
+        </ol>
+        <ul class="roster" aria-label="Agents">
+          <li><span class="dot"></span><b>claude</b></li>
+          <li><span class="dot"></span><b>codex</b></li>
+          <li><span class="dot wait"></span><b>gemini</b> needs input</li>
+          <li><span class="dot idle"></span><b>qwen</b> stopped</li>
+        </ul>
+      </div>
+      <div class="term-foot">F6 attach · F7 copy · <span>› type a message, @mention an agent</span></div>
+    </figure>
+  </div>
+
+  <section id="features">
+    <div class="wrap">
+      <h2>One screen for every agent</h2>
+      <p class="intro">Stop juggling terminal tabs. yapp runs each agent in its own tmux session and connects them through a local MCP chat server, so they can talk to each other and to you.</p>
+      <dl class="features">
+        <div><dt>Agents that talk to each other</dt><dd>Claude can ask Codex for a review, and Gemini can pick up where they left off. Every agent reads and writes the same channel through MCP.</dd></div>
+        <div><dt>See who needs you</dt><dd>Status dots and unread counts show which agent is working, waiting for an approval, or stopped. Jump to its terminal with one key.</dd></div>
+        <div><dt>Sessions per project</dt><dd>Group a channel, working directories, and agents into a session. Switch, rename, archive, and resume them later.</dd></div>
+        <div><dt>An orchestrator on call</dt><dd>Give a session a resident orchestrator that routes your unaddressed requests to the right worker agent.</dd></div>
+        <div><dt>Roles that stick</dt><dd>Save a role and personality for an agent once, such as reviewer or planner, and it keeps them across restarts.</dd></div>
+        <div><dt>Scriptable from the shell</dt><dd>Every command takes <code>--json</code>, so scripts and other agents can create sessions, spawn agents, and send messages.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <h2>Get started</h2>
+      <p class="intro">You need Python 3.11 or newer, tmux, and at least one agent CLI you are already logged in to.</p>
+      <ol class="steps">
+        <li><h3>Install</h3><p><code>pipx install git+https://github.com/Ankitkkkk/yapp.git</code></p></li>
+        <li><h3>Open yapp</h3><p>Run <code>yapp</code>. It starts the local server for you in tmux.</p></li>
+        <li><h3>Add agents</h3><p>Create a session, choose Add agent, and pick a provider and project folder.</p></li>
+        <li><h3>Start talking</h3><p>Type a message and @mention an agent. Press F1 for every shortcut.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="agents">
+    <div class="wrap">
+      <h2>Works with the agents you already use</h2>
+      <p class="intro">Install and log in to each CLI as usual; yapp launches it and wires it into the chat.</p>
+      <ul class="agents">
+        <li>Claude Code</li><li>OpenAI Codex CLI</li><li>Gemini CLI</li><li>Antigravity</li>
+        <li>GitHub Copilot CLI</li><li>Qwen Code</li><li>Kimi</li><li>Kilo CLI</li>
+        <li>CodeBuddy</li><li>MiniMax</li><li class="local">Ollama, LM Studio and other local models</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="for-agents">
+    <div class="wrap split">
+      <div>
+        <h2>Friendly to AI agents, too</h2>
+        <p class="intro">Ask your coding agent to install yapp for you. The repository ships an <a href="/llms.txt">llms.txt</a> summary and a step-by-step <a href="https://github.com/Ankitkkkk/yapp/blob/main/INSTALLATION.md">installation checklist</a> written for agents, and every shell command has read-only JSON output for checking state safely.</p>
+      </div>
+<pre class="block"><span class="c"># read state, no side effects</span>
+yapp status --json
+yapp sessions --json
+
+<span class="c"># script a review session</span>
+yapp new billing --cwd /abs/project --json
+yapp spawn codex --session billing \
+  --cwd /abs/project --agent-name reviewer</pre>
+    </div>
+  </section>
+
+  <section id="faq" class="faq">
+    <div class="wrap">
+      <h2>Questions</h2>
+      <p class="intro">Something missing? <a href="https://github.com/Ankitkkkk/yapp/issues">Open an issue on GitHub</a>.</p>
+      <details><summary>How do I make Claude Code and Codex talk to each other?</summary>
+        <p>Install yapp, create a session, and add a Claude agent and a Codex agent. Both connect to the same local MCP chat server, so each can @mention the other in the shared channel and read the reply.</p></details>
+      <details><summary>How do I run multiple AI coding agents in one terminal?</summary>
+        <p>Run <code>yapp</code> (or <code>goon</code>). Each agent runs in its own tmux session; the terminal UI lists them with status and unread counts, and F6 attaches to any of them.</p></details>
+      <details><summary>Which AI agents and CLIs does yapp support?</summary>
+        <p>Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity, GitHub Copilot CLI, Kimi, Qwen Code, Kilo CLI, CodeBuddy, MiniMax, and OpenAI-compatible local models such as Ollama or LM Studio.</p></details>
+      <details><summary>Is yapp free and open source?</summary>
+        <p>Yes. yapp is MIT licensed and runs entirely on your machine. The server binds to localhost and chats stay in local files.</p></details>
+      <details><summary>Does yapp work on Windows or macOS?</summary>
+        <p>Linux and macOS are fully supported. On Windows, use WSL2 for the terminal UI; native Windows can use the browser chat and wrapper launchers.</p></details>
+      <details><summary>What is the goon command?</summary>
+        <p>An alias. Installing yapp creates both the <code>yapp</code> and <code>goon</code> commands, and they run the same app.</p></details>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>yapp is MIT licensed. Built on <a href="https://github.com/bcurts/agentchattr">Agentchattr</a> by Ben Curtis.</span>
+    <span><a href="https://github.com/Ankitkkkk/yapp">Source on GitHub</a></span>
+  </div>
+</footer>
+
+<script>
+document.getElementById('copy').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  try {
+    await navigator.clipboard.writeText(document.getElementById('cmd').textContent);
+    button.textContent = 'Copied';
+  } catch {
+    button.textContent = 'Select and copy';
+  }
+  setTimeout(() => { button.textContent = 'Copy'; }, 2000);
+});
+</script>
+</body>
+</html>

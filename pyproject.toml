@@ -38,7 +38,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Ankitkkkk/yapp"
+Homepage = "https://yapp.riggedcode.com/"
+Source = "https://github.com/Ankitkkkk/yapp"
 Documentation = "https://github.com/Ankitkkkk/yapp/blob/main/INSTALLATION.md"
 Issues = "https://github.com/Ankitkkkk/yapp/issues"
 
