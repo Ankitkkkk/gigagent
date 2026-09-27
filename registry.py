@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -42,6 +43,19 @@ class Instance:
 
 class RuntimeRegistry:
     GRACE_PERIOD = 30  # seconds — name reserved after deregister
+
+    @contextmanager
+    def guard_identity(self, name: str, token: str):
+        """Keep a verified name/token bound during a queue append.
+
+        The guarded block must perform only queue I/O, not registry/store calls
+        or callbacks. Mutations and their notifications retain existing boundaries.
+        """
+        with self._lock:
+            instance = self._instances.get(name)
+            if not instance or not secrets.compare_digest(instance.token, token):
+                raise ValueError('Agent identity changed before queue delivery')
+            yield
 
     def __init__(self, data_dir: str = "./data"):
         self._lock = threading.Lock()

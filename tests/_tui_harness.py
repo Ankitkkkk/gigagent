@@ -140,7 +140,7 @@ class TuiHarness:
     @property
     def focused_control(self):
         current = self.application.layout.current_control
-        for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'clear_draft'):
+        for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'clear_draft', 'restart_server'):
             target = getattr(self.view, name)
             if current is getattr(target, 'control', target):
                 return name
@@ -161,6 +161,11 @@ class TuiHarness:
     async def key(self, name):
         """Escape includes the configured 50ms terminal escape decoding timeout."""
         await self._send(self.sequences[name])
+
+    async def send_message(self):
+        """Perform the user's explicit Normal-mode send gesture."""
+        await self.key('Escape')
+        await self.key('Enter')
 
     def bind_submit(self, submit):
         self.submit_mock = submit
@@ -369,12 +374,17 @@ def capture(app):
              for y in range(size.rows)]
     current = app.layout.current_control
     owner = getattr(getattr(current, 'text', None), '__self__', None)
+    caption = getattr(owner, 'text', None)
+    # Button captions are strings; other controls can expose a text method.
+    # Focusing those controls must not break the observer's JSON snapshot.
+    if not isinstance(caption, str):
+        caption = None
     cursor = screen.get_cursor_position(app.layout.current_window)
     record = dict(count=count, time=time.monotonic(), columns=size.columns, rows=size.rows,
                   cells=cells, text='\n'.join(''.join(row).rstrip() for row in cells),
                   cursor=[cursor.x, cursor.y], buffer=app.current_buffer.text,
                   buffer_cursor=app.current_buffer.cursor_position,
-                  focus_caption=getattr(owner, 'text', None), source='pty-renderer')
+                  focus_caption=caption, source='pty-renderer')
     temp = Path(snapshot_path + '.new')
     temp.write_text(json.dumps(record, ensure_ascii=False))
     temp.replace(snapshot_path)

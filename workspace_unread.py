@@ -32,15 +32,16 @@ def unread(agent: dict, msgs: list[dict], routing: dict[int, list[str]]) -> list
     """Spec §4 definition. `msgs` are the workspace channel's messages, ascending."""
     policy = {"agent_id": agent["agent_id"], "floor_id": agent.get("floor_id")}
     acked = set(agent.get("acked_above_mark") or [])
+    late = set(agent.get("late_unacked_ids") or [])
     out = []
     for m in msgs:
-        if m["id"] <= agent["read_mark"] or m["id"] in acked:
+        if m["id"] not in late and (m["id"] <= agent["read_mark"] or m["id"] in acked):
             continue
         if m.get("type", "chat") not in ("chat", "summary"):
             continue
-        if m.get("sender") == agent["registry_name"]:
+        if m.get("sender") == agent["registry_name"] and m.get('actor_kind') != 'human':
             continue
-        if agent["agent_id"] not in routing.get(m["id"], []):
+        if m["id"] not in late and agent["agent_id"] not in routing.get(m["id"], []):
             continue
         if not visible(policy, m):
             continue
@@ -73,7 +74,8 @@ def apply_acks(read_mark: int, acked: list[int], returned_ids: list[int],
                routed_ids: list[int]) -> tuple[int, list[int]]:
     """Acknowledge `returned_ids` that are routed to the agent, then compact.
 
-    read_mark: every routed id <= read_mark is acknowledged.
+    read_mark: compacted acknowledgement boundary; the store separately tracks
+    late assignments at or below this boundary.
     acked: routed ids above the mark already acknowledged.
     routed_ids: every id routed to this agent (sorted ascending).
     Returns (new_read_mark, new_acked)."""

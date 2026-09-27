@@ -5,11 +5,14 @@ from contextvars import ContextVar
 from contextlib import asynccontextmanager
 import importlib.util
 import json
+import os
 import signal
 import subprocess
 import threading
 import unittest
 from unittest.mock import Mock, patch
+
+from prompt_toolkit.output import ColorDepth
 
 from cli import ChatClient
 from cli_api import CLIError
@@ -21,6 +24,24 @@ from tests.test_cli_workspace_chat import ControlledSocket
 
 
 class ApplicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_palette_capability_reaches_real_renderer(self):
+        cases = [({'TERM': 'xterm-kitty'}, ColorDepth.DEPTH_24_BIT, '48;2;30;30;46'),
+                 ({'TERM': 'xterm-256color'}, ColorDepth.DEPTH_8_BIT, '48;5;'),
+                 ({'COLORTERM': 'truecolor', 'PROMPT_TOOLKIT_COLOR_DEPTH': 'DEPTH_4_BIT'},
+                  ColorDepth.DEPTH_4_BIT, None),
+                 ({'TERM': 'xterm-kitty', 'NO_COLOR': '1'}, ColorDepth.DEPTH_1_BIT, None)]
+        for environment, depth, sequence in cases:
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
+                async with self.ui(selected=workspace()) as ui:
+                    await self.connected(ui)
+                    self.assertEqual(ui.application.color_depth, depth)
+                    emitted = ui.stream.getvalue()
+                    if sequence:
+                        self.assertIn(sequence, emitted)
+                    else:
+                        self.assertNotIn('38;', emitted)
+                        self.assertNotIn('48;', emitted)
+
     async def test_f7_releases_terminal_mouse_without_changing_message_focus(self):
         async with self.ui(selected=workspace()) as ui:
             await self.connected(ui)
@@ -160,7 +181,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                     ui.view.focus_named('composer')
                     ui.api.reset_mock()
                     with patch.object(ui.client, 'submit_outcome', side_effect=AssertionError('legacy history')):
-                        await ui.key('Enter')
+                        await ui.send_message()
                         await ui.wait_until(lambda: not ui.composer_actions.sending or ui.dialogs.future is not None)
                     self.assertFalse(ui.view.activity_visible)
                     self.assertTrue(ui.state.viewport.follow)
@@ -375,7 +396,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         async with self.ui(selected=workspace()) as ui:
             await self.connected(ui)
             await ui.type_text('/quit')
-            await ui.key('Enter')
+            await ui.send_message()
             await asyncio.wait_for(ui.task, 2)
             self.assertEqual(ui.events.count('checkpoint'), 1)
 
@@ -728,6 +749,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             loop.remove_signal_handler(signal.SIGTERM)
             signal.signal(signal.SIGTERM, old)
 
+    async def test_f7_copy_mode_does_not_swallow_synthetic_interrupt(self):
+        async with self.ui(plain=True) as ui:
+            await self.connected(ui)
+            await ui._send('\x1b[18~')
+            ui.application.key_processor.send_sigint()
+            await asyncio.wait_for(asyncio.shield(ui.task), 2)
+
     async def test_signal_fallback_and_no_prior_registration_restore_process_handlers(self):
         loop = asyncio.get_running_loop()
         old_int, old_term = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
@@ -846,7 +874,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         async with self.ui(selected=workspace(agents=[agent()])) as ui:
             await self.connected(ui)
             await ui.type_text('/join other')
-            await ui.key('Enter')
+            await ui.send_message()
             self.assertEqual(ui.view.composer.text, '/join other')
             self.assertEqual(ui.client.channel, 'ws_one')
             await ui.tui.submit('/help')

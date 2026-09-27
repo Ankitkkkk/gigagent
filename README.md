@@ -19,11 +19,12 @@ configuration, API names, and stored sessions remain compatible.
 | --- | --- |
 | Searchable sessions | Create, switch, rename, and archive sessions with their own chat and agents. |
 | Chat and drafts | Read styled messages, scroll history, mention agents, and keep drafts while navigating or attaching. |
-| Agent status | See colored status indicators, unread counts, and working directories. |
+| Agent status | See colored status indicators, unread counts, saved roles, and orchestrators. |
 | Pending input | See waiting agents from the selected session and open their terminals to resolve prompts. |
 | Direct attachment | Press F6 to choose an agent, or use Attach / Review input for the selected agent. |
 | Agent lifecycle | Add named agents, stop or resume them, and remove entries with their tmux sessions. |
-| Saved launch settings | Keep working directories and provider flags across resumes; agents receive their assigned session identity. |
+| Saved profiles | Choose a role and personality once; startup instructions and badges remain locked across resumes. |
+| Session orchestration | Give each new session a resident orchestrator which routes unmentioned human requests to suitable workers. |
 | Loop guard controls | Set the hop limit through F4 → Loop guard and use `/continue` to resume a paused conversation. |
 | Text copying | Press F7 to release mouse capture, select text, and copy with your terminal. |
 | Shell commands | Script session management and chat with JSON output, alongside the interactive TUI. |
@@ -97,8 +98,8 @@ type and recommends rerunning with `--plain`.
 python gigagent.py
 python gigagent.py --channel general
 python gigagent.py --session billing --no-resume
-python gigagent.py new billing --json
-python gigagent.py spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal
+python gigagent.py new billing --orchestrator-provider codex --cwd /absolute/project --json
+python gigagent.py spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal --role code-reviewer --personality meticulous
 python gigagent.py resume reviewer --session billing --fresh
 python gigagent.py attach reviewer --session billing
 python gigagent.py unread --session billing
@@ -128,6 +129,20 @@ history, agent status, and reconnection after server restarts. Incoming replies
 do not overwrite the input prompt. Messages entered while disconnected are
 rejected rather than queued for later delivery.
 
+On wide terminals, sessions, agent status, and pending input share a left rail.
+The conversation and message input use the main column. Agent details expand
+beside the rail for readable paths and recovery commands. Narrow terminals stack
+the controls below chat. Accent borders mark the focused pane, and the footer
+shows NORMAL, INSERT, or COPY mode.
+
+The TUI uses [Catppuccin Mocha](https://github.com/catppuccin/palette): explicit
+dark surfaces, lavender focus accents, colored agent states, and matching dialogs
+and completion menus. A header keeps the session and connection visible; padded
+messages wrap at a readable width on large terminals. Kitty and terminals that
+advertise `COLORTERM=truecolor` or `24bit` use RGB colors. Other terminals use
+their detected color depth; `PROMPT_TOOLKIT_COLOR_DEPTH` and `NO_COLOR` overrides
+are respected. Restart the TUI after updating to load the theme.
+
 ### Keyboard controls
 
 | Key | Action |
@@ -140,24 +155,63 @@ rejected rather than queued for later delivery.
 | F7 | Toggle terminal text selection: drag to select, use your terminal's Copy shortcut, then F7 to restore app mouse controls |
 | F1 | Open Help |
 | Tab / Shift+Tab | Move between visible controls |
-| Enter | Select the highlighted choice or send the composer text |
-| Alt+Enter | Add a line without sending |
+| i / I | Enter INSERT mode at the cursor / first nonblank character |
+| a / A | Enter INSERT mode after the cursor / at the line end |
+| Enter | In INSERT: accept the highlighted completion or add a newline. In NORMAL: send the message. In dialogs: select the highlighted choice |
+| Escape, then Enter | Return to NORMAL and send the message |
+| h / j / k / l, w / b, 0 / $ | In NORMAL: move left/down/up/right, by word, or to line start/end |
 | PageUp / PageDown | Scroll a page in the focused conversation or Activity pane |
 | End | Follow the latest messages in the focused conversation and clear its new-message count; jump to the bottom in Activity |
 | Mouse wheel | Scroll three wrapped lines in conversation or Activity; conversation wheel-up leaves follow, and reaching the bottom resumes follow and clears its new-message count |
-| Escape | Cancel the current dialog, close Help/Activity (including after Retry unread, from any pane), or return from Agents to the message box |
+| Escape | Return the message composer to NORMAL; cancel the current dialog, close Help/Activity, or return from Agents to the message box |
 | Ctrl+C | Cancel the current dialog while preserving the message draft |
-| Ctrl+D | Delete at the cursor, or Quit when the composer is empty |
+| Ctrl+D | In INSERT: delete at the cursor. In either mode: Quit when the composer is empty |
 | Ctrl+Q | Confirm unsent drafts when needed, checkpoint, and quit |
+
+To release agent CPU and memory, open **F4 Commands → Stop all agents**.
+The confirmation shows the number of saved agents across every session,
+including stopped entries that may still have leftover processes.
+Stopping interrupts active work and closes their terminals and wrappers while
+keeping saved sessions and history for **Resume agent**. Individual failures are
+reported, and other agents still receive their stop request. Quitting the TUI
+alone leaves agents running. This covers agents managed by saved sessions;
+unrelated standalone terminals are outside its scope.
+
+Use the visible **Restart server** button, or **F4 Commands → Restart server**,
+to restart the connected local `run.py` instance on Linux or macOS. The
+confirmation defaults to No and names the connected URL. Chat and MCP disconnect
+briefly, then the TUI reconnects with fresh credentials. Agent terminals, the
+selected session, composer mode, cursor, and unsent drafts remain intact.
+On the first upgrade, restart `run.py` and the TUI manually to load this feature.
+Browser tabs need a page reload after a server restart. The restart request is sent once. If readiness
+times out, do not click repeatedly: check Activity and the server logs because
+the old server may still be draining. Start `run.py` manually only after
+confirming that the old server stopped.
 
 Session names have inset rows, a blank separator, and a full-row highlight.
 A dot marks the open session. Click a row to open it; blank sidebar space does
 not change sessions. Up/Down and mouse-wheel scrolling remain available.
 
+The message box starts in **NORMAL** mode. Press **i** to write in **INSERT**
+mode; Enter adds a newline instead of sending. Press **Escape**, then **Enter**
+to send deliberately. The message-box title shows the current mode and shortcuts.
+Pasting enters INSERT mode automatically. This supports the Normal/Insert modes
+and movement keys listed above, rather than the full Vim command set.
+After clicking another main pane, press **i** or **I** to focus the message box
+and enter INSERT mode again. **a** and **A** also return to editing with their
+usual cursor movement. Clicking the message box restores focus while retaining
+its current mode. These shortcuts do not interrupt dialogs, Help, or F7 copying.
+Mentions such as **@agent-1** appear bright cyan and bold while you write;
+their stored and sent text stays unchanged. Mention styling marks handle-shaped
+text and does not verify that an agent is online.
+
 To copy a string from a response, press **F7**, drag over the text, then use
-your terminal's Copy shortcut (**Ctrl+Shift+C** in GNOME Terminal). Press **F7**
-again to restore clicking and mouse-wheel scrolling in the app. Message focus,
-draft text, and cursor position are preserved. On terminals that support it,
+your terminal's Copy shortcut (**Ctrl+Shift+C** in GNOME Terminal). Selection
+mode hides the sidebar and conversation borders so multiline selections contain
+message text without UI separators. Message editing and sending pause during selection.
+Press **F7** again to restore the layout, clicking, and mouse-wheel scrolling,
+and return focus to the message input. Your NORMAL/INSERT mode and draft are
+preserved, so editing resumes where you left it. On terminals that support it,
 holding **Shift** while dragging also bypasses app mouse capture. Inside tmux,
 its mouse mode can still intercept dragging: use Shift-drag or tmux copy mode.
 Copying uses your terminal's clipboard; physical selection depends on the terminal.
@@ -187,10 +241,34 @@ current server value. Changes are saved and apply immediately to all sessions;
 each channel counts its own agent-to-agent hops. Use `/continue` afterward if
 a conversation is already paused. Escape cancels without saving.
 
-Choose **New session**, enter its name, and press Enter. Click **Add agent**
+Choose **New session**, enter its name, then choose its orchestrator provider
+and working directory. Existing sessions expose **Enable orchestrator** under
+F4 Commands; stopped orchestrators show **Resume orchestrator**. Orchestrators
+remain distinct from workers and route new unmentioned human requests.
+
+Explicit mentions, including `@all` and unknown handles, bypass orchestration.
+Agent replies, jobs, and structured workflow turns do not create routing requests.
+The orchestrator chooses from ready workers in its own session using their names
+and saved profiles. A system message shows which workers received the assignment.
+
+An enabled, non-archived session keeps its orchestrator resident even when a
+client switches sessions. Stop, Stop all, and Archive pause its automatic recovery;
+new requests remain pending until it is resumed. Existing sessions and API calls
+that omit orchestrator configuration do not launch one automatically.
+
+If dispatch is interrupted, the notice reports uncertainty. The original request
+remains in worker unread history, including assignments older than its read
+cursor. Review the worker's state before using Retry; queueing confirms delivery
+to the wrapper queue, not task completion.
+
+Click **Add agent**
 beneath Actions to open the form directly, even with an empty agent list.
 Select a provider, enter an existing absolute working directory, and review
-the history mode before starting. Each launch receives its assigned session
+the history mode. Next, choose a saved role and personality. Roles include
+generalist, implementer, code-reviewer, planner, tester, and debugger;
+personalities include pragmatic, meticulous, concise, and supportive. These
+choices supply startup instructions and stay locked across Stop and Resume.
+Each launch receives its assigned session
 name and channel explicitly; `none` history mode still delivers this identity
 prompt without requesting old chat. Subsequent triggers reinforce the current
 name, including after a rename. Click the directory or name input to edit it,
@@ -219,6 +297,10 @@ shell substitutions and pipelines are not evaluated.
 
 Resume shows the saved working directory as read-only and reuses it automatically;
 you do not need to enter it again. Add agent still lets you choose a directory.
+If submission fails, the form keeps your entries and shows the error at the top.
+Use **Attach** (**F6**) to open an agent whose terminal is already running.
+After a temporary heartbeat disconnect, the same running wrapper restores its
+status when it reconnects; a deliberately stopped agent still needs Resume.
 
 F3 always opens the agent chooser, including empty sessions. Its **Add agent**
 button opens the form directly and stays visible when search finds no matches.
@@ -307,11 +389,12 @@ supported hook installer; other adapters retain generic terminal detection.
 | `/help` | Show commands |
 | `/quit` | Checkpoint the selected session and exit; server and agents keep running |
 
-Completion suggestions cover commands, agent handles, and channel names. Tab
-chooses a suggestion; Enter applies it, and a later Enter sends. Full-screen
-Escape cancels dialogs without altering the composer. Alt+Enter inserts a
-newline; terminals that send it as Escape followed by Enter must complete that
-key sequence before the terminal timeout. Draft text and cursor position survive
+Completion suggestions cover commands, agent handles, and channel names. In
+INSERT mode, Tab chooses a suggestion and Enter applies it; Enter without a
+selected suggestion adds a newline. Escape returns to NORMAL, where Enter sends.
+Escape cancels dialogs without altering the composer. Alt+Enter can produce the
+same terminal bytes as Escape followed by Enter, so use plain Enter in INSERT
+mode for newlines. Draft text and cursor position survive
 session/channel switches and resize. Up to 50 nonempty drafts are kept in
 memory, each at most 64 KiB of UTF-8 text. At capacity, send or clear one before
 opening another destination. Drafts are not persisted and disappear when the
@@ -516,9 +599,21 @@ When an agent is triggered with a job, it sees the full job context — title, s
 Agents can also propose jobs directly via `chat_propose_job` — a proposal card appears in the timeline for you to Accept or Dismiss. The jobs panel opens from the header. Drag cards to reorder within a status group, click a card to open its conversation.
 
 ### Agent roles
-Assign roles to agents to steer their behavior — Planner, Builder, Reviewer, Researcher, or any custom role. Roles aren't a hard constraint — they're a persistent nudge. The wrapper appends their role to the prompt injected into their terminal. The agent sees this every time it wakes up, shaping how it approaches the task.
+Saved terminal agents choose a role and personality when they are created. Their
+expanded startup instructions stay fixed for that saved agent across stop,
+resume, and fresh conversations. Browser role pills show a lock for these agents;
+create a new agent to choose a different profile. The session orchestrator has
+its own fixed routing instructions and is separate from worker roles.
 
-Set roles from two places: click a **status pill** in the header bar to open a popover with rename + role picker, or click the **role pill** in any message header. Choose from presets or type a custom role (max 20 characters). Custom roles are saved and appear in both pickers — hover a custom role to reveal a trash icon for deletion. Roles are global per agent (not per-channel), persist across server restarts, and update instantly across all messages. Clear a role by selecting "None".
+Unmanaged agents retain editable roles — Planner, Builder, Reviewer, Researcher,
+or a custom role. These guide behavior through the wrapper's wake prompt.
+
+For unmanaged agents, click a **status pill** for the role picker, or click the
+**role pill** in a message header. Choose a preset or custom role (max 20
+characters). Custom roles appear in both pickers; hover one to delete it. These
+roles are global per agent, persist across server restarts, and can be cleared
+with "None". Structured workflow role assignments remain separate from saved
+agent profiles.
 
 ### Rules
 Rules set the working style for your agents. Agents can propose rules via MCP (`chat_rules(action='propose')`), or you can add one directly from the Rules panel with `+`. Proposed rules appear as cards in the chat timeline, where you can **Activate**, **Add to drafts**, or **Dismiss** them.

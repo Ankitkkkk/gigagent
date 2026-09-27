@@ -163,7 +163,13 @@ def _agent_line(agent):
     state = agent.get('last_state', 'unknown')
     if state == 'starting' and (agent.get('last_launch') or {}).get('kind') == 'fresh':
         state = 'fresh'
-    line = f'{_agent_label(agent)} {state}'
+    badges = []
+    if agent.get('kind') == 'orchestrator':
+        badges.append('orchestrator')
+    profile = agent.get('profile')
+    if isinstance(profile, dict):
+        badges.extend(str(profile[key]) for key in ('role', 'personality') if profile.get(key))
+    line = f'{_agent_label(agent)} {state}' + (f' · {" · ".join(badges)}' if badges else '')
     if agent.get('waiting_for_input') and agent.get('last_state') in ('running', 'starting'):
         line += ' · Waiting for input — Attach'
     if agent.get('unread_count'):
@@ -308,7 +314,7 @@ async def choose_workspace(api, prompt, output, *, selector=None, no_resume=Fals
 SESSION_COMMANDS = {'/spawn', '/resume', '/stop', '/retry', '/unread', '/history',
                     '/rename', '/archive', '/sessions', '/attach'}
 SUMMARY_ERROR = 'summary history mode is not available in this version; use literal or none'
-SESSION_HELP = """/spawn PROVIDER [--agent-name NAME] [--cwd PATH] [--history-mode none|literal] [--provider-flags='FLAGS']
+SESSION_HELP = """/spawn PROVIDER [--agent-name NAME] [--cwd PATH] [--history-mode none|literal] [--role ROLE] [--personality STYLE] [--provider-flags='FLAGS']
 /resume AGENT [--fresh] [--agent-name NAME] [--cwd PATH] [--provider-flags='FLAGS']
 /attach AGENT        Attach to an agent terminal
 /stop AGENT          Stop a session agent
@@ -341,6 +347,10 @@ def _parse_command(command, words):
         parser.add_argument('--cwd')
         parser.add_argument('--agent-name')
         parser.add_argument('--history-mode')
+        parser.add_argument('--role', choices=('generalist', 'implementer', 'code-reviewer',
+                                               'planner', 'tester', 'debugger'))
+        parser.add_argument('--personality', choices=('pragmatic', 'meticulous', 'concise',
+                                                      'supportive'))
     elif command == '/resume':
         parser.add_argument('agent')
         parser.add_argument('--fresh', action='store_true')
@@ -779,11 +789,14 @@ class WorkspaceChatController:
 
     def _validate_action(self, action, payload):
         fields = {
+            'restart_server': {'instance_id', 'confirmed'},
+            'stop_all': {'targets', 'confirmed'},
             'set_loop_guard': {'max_agent_hops'},
-            'create_session': {'name'}, 'rename_session': {'name'},
+            'create_session': {'name', 'orchestrator'}, 'rename_session': {'name'},
+            'configure_orchestrator': {'provider', 'cwd', 'provider_args'},
             'select_session': {'session_id'},
             'archive_session': {'confirmed'},
-            'spawn': {'provider', 'cwd', 'name', 'history_mode', 'provider_args'},
+            'spawn': {'provider', 'cwd', 'name', 'history_mode', 'provider_args', 'role', 'personality'},
             'resume': {'agent_id', 'fresh', 'cwd', 'name', 'provider_args'},
             'stop': {'agent_id'}, 'remove': {'agent_id'}, 'attach': {'agent_id'}, 'unread': {'agent_id'},
             'retry': {'agent_id'}, 'history': {'agent_id', 'mode'},
@@ -793,13 +806,23 @@ class WorkspaceChatController:
         if not isinstance(payload, dict):
             raise CLIError('action payload must be an object')
         allowed = fields[action]
-        required = set() if action == 'unread' else allowed - {'provider_args'}
+        optional = {'provider_args', 'orchestrator'}
+        if action == 'spawn':
+            optional |= {'role', 'personality'}
+        required = set() if action == 'unread' else allowed - optional
         if set(payload) - allowed:
             raise CLIError('unexpected action fields: ' + ', '.join(sorted(map(str, set(payload) - allowed))))
         if required - set(payload):
             raise CLIError('missing action fields: ' + ', '.join(sorted(required - set(payload))))
         for key, value in payload.items():
-            if key == 'max_agent_hops':
+            if key == 'targets':
+                if (not isinstance(value, (tuple, list)) or any(
+                        not isinstance(target, (tuple, list)) or len(target) != 3
+                        or any(not isinstance(part, str) or not part for part in target[:2])
+                        or target[2] is not None and not isinstance(target[2], str)
+                        for target in value)):
+                    raise CLIError('Stop targets must contain session ID, agent ID and launch nonce')
+            elif key == 'max_agent_hops':
                 if type(value) is not int or not 1 <= value <= 50:
                     raise CLIError('Enter a whole number from 1 to 50')
             elif key == 'provider_args':
@@ -807,6 +830,11 @@ class WorkspaceChatController:
                     validate_provider_args(value)
                 except ValueError as error:
                     raise CLIError(str(error)) from None
+            elif key == 'orchestrator':
+                if value is not None and (not isinstance(value, dict)
+                        or not isinstance(value.get('provider'), str) or not value['provider']
+                        or not isinstance(value.get('cwd'), str) or not value['cwd']):
+                    raise CLIError('orchestrator must include provider and working directory')
             elif key in ('fresh', 'confirmed'):
                 if not isinstance(value, bool):
                     raise CLIError(f'{key} must be a boolean')
@@ -816,14 +844,15 @@ class WorkspaceChatController:
                 continue
             elif not isinstance(value, str):
                 raise CLIError(f'{key} must be text')
-            elif (key in ('provider', 'agent_id', 'session_id') or key == 'cwd' and action == 'spawn') and not value:
+            elif (key in ('provider', 'agent_id', 'session_id', 'instance_id')
+                  or key == 'cwd' and action == 'spawn') and not value:
                 raise CLIError(f'{key} is required')
         mode = payload.get('history_mode', payload.get('mode'))
         if mode is not None:
             _validate_history(mode)
-        if action in ('spawn', 'resume', 'attach'):
+        if action in ('spawn', 'resume', 'attach', 'stop_all'):
             require_tmux_platform()
-        if action != 'set_loop_guard' and (self.plain_channel or
+        if action not in ('set_loop_guard', 'stop_all', 'restart_server') and (self.plain_channel or
                 self.workspace is None and action not in ('create_session', 'select_session')):
             raise CLIError('This command requires a selected session; start chat with --session or the session picker.')
         agent_id = payload.get('agent_id')
@@ -841,6 +870,8 @@ class WorkspaceChatController:
         try:
             self._validate_action(action, payload)
             payload = dict(payload)
+            if action == 'stop_all':
+                payload['targets'] = tuple(dict.fromkeys(tuple(target) for target in payload['targets']))
             if action == 'unread':
                 payload.setdefault('agent_id', None)
             agent_id = payload.get('agent_id')
@@ -849,9 +880,14 @@ class WorkspaceChatController:
         if action == 'select_session':
             return await self.select_session(payload['session_id'])
         generation = self._selection_version
+        def frozen(value):
+            if isinstance(value, dict):
+                return tuple(sorted((key, frozen(item)) for key, item in value.items()))
+            if isinstance(value, (list, tuple)):
+                return tuple(frozen(item) for item in value)
+            return value
         key = (ws_id, generation, action,
-               tuple(sorted((field, tuple(value) if isinstance(value, list) else value)
-                            for field, value in payload.items())))
+               tuple(sorted((field, frozen(value)) for field, value in payload.items())))
         if key in self._active_actions:
             message = 'Session action already in progress.'
             self._notice(message)
@@ -879,15 +915,34 @@ class WorkspaceChatController:
     async def _execute_locked(self, action, payload, ws_id, workspace, version):
         agent_id = payload.get('agent_id')
         try:
-            if action == 'set_loop_guard':
+            if action == 'stop_all':
+                return await self._stop_all_locked(payload, ws_id)
+            elif action == 'restart_server':
+                if not payload['confirmed']:
+                    return ActionOutcome('cancelled', workspace_id=ws_id)
+                result = await self._run_mutation(self.api.restart_server, payload['instance_id'])
+                self._notice('Server restarted; chat reconnects automatically.')
+                return ActionOutcome('completed', workspace_id=ws_id)
+            elif action == 'set_loop_guard':
                 result = await self._run_mutation(self.api.set_loop_guard, payload['max_agent_hops'])
                 if (not isinstance(result, dict) or result.get('max_agent_hops') != payload['max_agent_hops']):
                     raise CLIError('Server did not confirm the loop guard value; reopen Loop guard to check.')
                 self._notice(f"Loop guard set to {result['max_agent_hops']} hops for all sessions.")
                 return ActionOutcome('completed', workspace_id=ws_id)
             elif action == 'create_session':
-                result = await self._run_mutation(self.api.create, payload['name'])
+                kwargs = ({'orchestrator': payload['orchestrator']}
+                          if payload.get('orchestrator') is not None else {})
+                result = await self._run_mutation(self.api.create, payload['name'], **kwargs)
+                if result.get('orchestration_error'):
+                    self._notice('Session saved, but orchestrator failed: '
+                                 + str(result['orchestration_error']))
                 return ActionOutcome('completed', workspace_id=result['id'])
+            elif action == 'configure_orchestrator':
+                config = {key: payload[key] for key in ('provider', 'cwd', 'provider_args') if key in payload}
+                result = await self._run_mutation(self.api.configure_orchestrator, ws_id, config)
+                if self._accept_snapshot(version) and isinstance(result, dict) and result.get('id') == ws_id:
+                    self.on_workspace(result)
+                return ActionOutcome('completed', workspace_id=ws_id)
             if action == 'archive_session':
                 if not payload['confirmed']:
                     return ActionOutcome('cancelled', workspace_id=ws_id)
@@ -907,10 +962,14 @@ class WorkspaceChatController:
                 finally:
                     self.client.resume_output()
             elif action == 'spawn':
-                agent = await self._run_mutation(self.api.action, ws_id, 'spawn', body={
+                body = {
                     'provider': payload['provider'], 'cwd': payload['cwd'],
                     'history_mode': payload['history_mode'], 'name': payload['name'],
-                    **({'provider_args': payload['provider_args']} if 'provider_args' in payload else {})})
+                    **({'provider_args': payload['provider_args']} if 'provider_args' in payload else {})}
+                for key in ('role', 'personality'):
+                    if payload.get(key) is not None:
+                        body[key] = payload[key]
+                agent = await self._run_mutation(self.api.action, ws_id, 'spawn', body=body)
                 agent_id = agent['agent_id']
                 if self._accept_snapshot(version):
                     self._store_agent(agent)
@@ -958,6 +1017,44 @@ class WorkspaceChatController:
                       agent_name=payload['name'], cwd=payload['cwd'])) if action == 'resume' else None)
             return self._failed_action(error, ws_id, agent_id, resume=resume)
 
+    async def _stop_all_locked(self, payload, selected_id):
+        """Own the confirmed batch through completion; never retry a mutation."""
+        if not payload['confirmed']:
+            return ActionOutcome('cancelled', workspace_id=selected_id)
+        targets = payload['targets']
+        stopped, failures = 0, []
+        for index, (ws_id, agent_id, nonce) in enumerate(targets, 1):
+            self._notice(f'Stopping agents: {index}/{len(targets)} · {ws_id}/{agent_id}')
+            try:
+                result = await self._run_mutation(self.api.action, ws_id, 'stop_verified', agent_id,
+                                                  body={'expected_nonce': nonce})
+                if (not isinstance(result, dict) or result.get('agent_id') != agent_id
+                        or result.get('last_state') != 'exited' or result.get('stop_confirmed') is not True):
+                    raise CLIError('Server did not confirm process cleanup. Restart the server with updated code, then retry.')
+                stopped += 1
+            except (CLIError, OSError, TimeoutError) as error:
+                reason = (terminal_text(error) if isinstance(error, CLIError)
+                          else 'Request failed or timed out; stop is unconfirmed.')
+                if isinstance(error, CLIError) and error.status == 404 and error.message == 'Not Found':
+                    reason = 'Server needs an update: restart it, then retry. No verified stop was performed.'
+                failures.append(f'{ws_id}/{agent_id}: {reason}')
+        # Fetch after all mutations, using the normal event/HTTP overlap guard.
+        # A selection changed elsewhere must never be restored by this response.
+        if self.workspace is not None and not self._closed:
+            version = self._snapshot_version()
+            self._refresh_requested = True
+            try:
+                data = await asyncio.to_thread(self.api.get, self.workspace['id'])
+                if self._accept_snapshot(version):
+                    self.on_workspace(data)
+            except (CLIError, OSError, TimeoutError):
+                self._notice('Agent status refresh failed; retry Refresh.')
+        message = f'Confirmed stopped: {stopped} of {len(targets)} agents across all sessions.'
+        if failures:
+            message += '\nStop unconfirmed for:\n' + '\n'.join(failures)
+        self._notice(message)
+        return ActionOutcome('failed' if failures else 'completed', message, selected_id)
+
     async def dispatch_action(self, text):
         parts = text.strip().split(maxsplit=1)
         if not parts:
@@ -994,7 +1091,12 @@ class WorkspaceChatController:
                     mode = 'literal' if self.presentation is not None else (
                         (await self.prompt('History mode [none/literal]:', default='literal')).strip() or 'literal')
                     _validate_history(mode)
-                payload = {'provider': args.provider, 'cwd': args.cwd, 'history_mode': mode, 'name': args.agent_name}
+                payload = {'provider': args.provider, 'cwd': args.cwd, 'history_mode': mode,
+                           'name': args.agent_name}
+                if args.role is not None:
+                    payload['role'] = args.role
+                if args.personality is not None:
+                    payload['personality'] = args.personality
             elif command == '/rename':
                 action, payload = 'rename_session', {'name': args.name}
             else:

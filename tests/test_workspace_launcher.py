@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,7 +23,7 @@ from providers.claude import ClaudeAdapter
 from providers.codex import CodexAdapter, originator_for
 from registry import RuntimeRegistry
 from store import MessageStore
-from workspace_launcher import LaunchError, WorkspaceLauncher
+from workspace_launcher import LaunchError, TmuxOps, WorkspaceLauncher
 from workspace_store import WorkspaceStore
 
 
@@ -37,6 +38,19 @@ class FakePopen:
 
         class P:
             pid = 4242
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
 
         return P()
 
@@ -435,12 +449,100 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("since_id=-1", q[0]["prompt"])
         self.assertIn("has_more", q[0]["prompt"])
 
+    def test_ready_heartbeat_recovers_exited_wrapper_without_replaying_startup(self):
+        ag = self.launcher.spawn(self.ws['id'], 'claude', str(self.proj), 'literal',
+                                 provider_args=['--model', 'saved'])
+        self.tmux.sessions.add(self.launcher.tmux_name(ag))
+        self.launcher.on_heartbeat('claude-1', ready=True, pid=4242)
+        before = self.agent(ag)
+        queued = self.queue('claude-1')
+        self.store.mark_exited('claude-1')
+
+        self.launcher.on_heartbeat('claude-1', ready=True, pid=4242)
+        self.launcher.on_heartbeat('claude-1', ready=True, pid=4242)
+
+        self.assertEqual(self.agent(ag), before)
+        self.assertEqual(self.queue('claude-1'), queued)
+
+    def test_ready_heartbeat_recovers_legacy_pid_without_replaying_old_startup(self):
+        ag = self._running_claude(mode='literal')
+        launch = dict(self.agent(ag)['last_launch'])
+        for field in ('wrapper_pid', 'identity_prompt_sent', 'startup_delivery_done'):
+            launch.pop(field, None)
+        before = self.store.update_agent(self.ws['id'], ag['agent_id'], last_launch=launch)
+        queued = self.queue('claude-1')
+        self.store.mark_exited('claude-1')
+
+        self.launcher.on_heartbeat('claude-1', ready=True, pid=1)
+
+        self.assertEqual(self.agent(ag), before)
+        self.assertEqual(self.queue('claude-1'), queued)
+
+    def test_recovered_ready_wrapper_finishes_pending_startup_once(self):
+        ag = self.launcher.spawn(self.ws['id'], 'claude', str(self.proj), 'literal')
+        self.tmux.sessions.add(self.launcher.tmux_name(ag))
+        self.store.mark_exited('claude-1')
+
+        self.launcher.on_heartbeat('claude-1', ready=True, pid=4242)
+        self.launcher.on_heartbeat('claude-1', ready=True, pid=4242)
+
+        got = self.agent(ag)
+        self.assertEqual(got['last_state'], 'running')
+        self.assertEqual(got['last_launch']['nonce'], ag['last_launch']['nonce'])
+        self.assertEqual(got['history_state'], 'done')
+        self.assertEqual(len(self.queue('claude-1')), 1)
+        self.assertIn('since_id=-1', self.queue('claude-1')[0]['prompt'])
+
+    def test_exited_heartbeat_recovery_requires_same_ready_wrapper_and_live_session(self):
+        ag = self._running_claude()
+        launch = dict(self.agent(ag)['last_launch'])
+        for label, pid, ready, present, archived, expected_pid in (
+                ('missing pid', None, True, True, False, 4242),
+                ('zero pid', 0, True, True, False, 0),
+                ('negative pid', -1, True, True, False, -1),
+                ('boolean pid', True, True, True, False, True),
+                ('string pid', '4242', True, True, False, 4242),
+                ('mismatched pid', 99, True, True, False, 4242),
+                ('provider pid cannot override wrapper', 1, True, True, False, 4242),
+                ('not ready', 4242, False, True, False, 4242),
+                ('missing session', 4242, True, False, False, 4242),
+                ('archived', 4242, True, True, True, 4242)):
+            with self.subTest(label=label):
+                self.store.set_archived(self.ws['id'], archived)
+                self.tmux.sessions = {self.launcher.tmux_name(ag)} if present else set()
+                before = self.store.update_agent(self.ws['id'], ag['agent_id'], last_state='exited',
+                    last_launch=dict(launch, wrapper_pid=expected_pid))
+                self.launcher.on_heartbeat('claude-1', ready=ready, pid=pid)
+                self.assertEqual(self.agent(ag), before)
+
+    def test_stopped_wrapper_cannot_recover_from_late_ready_heartbeat(self):
+        ag = self._running_claude()
+        with patch.object(self.tmux, 'kill_session'):
+            with self.assertRaises(LaunchError):
+                self.launcher.stop(self.ws['id'], ag['agent_id'])
+        before = self.agent(ag)
+        self.launcher.on_heartbeat('claude-1', ready=True, pid=4242)
+        self.assertEqual(self.agent(ag), before)
+
+    def test_tmux_presence_requires_exact_session_name(self):
+        def run(command, **kwargs):
+            target = command[-1]
+            names = {'agentchattr-ag_one-extra'}
+            found = (target[1:] in names if target.startswith('=') else
+                     any(name.startswith(target) for name in names))
+            return subprocess.CompletedProcess(command, 0 if found else 1)
+
+        with patch('workspace_launcher.subprocess.run', side_effect=run):
+            self.assertFalse(TmuxOps().has_session('agentchattr-ag_one'))
+            self.assertTrue(TmuxOps().has_session('agentchattr-ag_one-extra'))
+
     def test_stale_literal_catchup_cas_never_enqueues(self):
         ag = self.launcher.spawn(
             self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="literal"
         )
         nonce = ag["last_launch"]["nonce"]
 
+        self.store.update_agent(self.ws['id'], ag['agent_id'], last_state='running')
         with patch.object(self.store, "update_agent_if_launch", return_value=False):
             self.launcher._after_ready(self.ws["id"], ag["agent_id"], nonce)
 
@@ -453,6 +555,7 @@ class LauncherTests(unittest.TestCase):
         )
         nonce = ag["last_launch"]["nonce"]
 
+        self.store.update_agent(self.ws['id'], ag['agent_id'], last_state='running')
         with patch.object(self.agents, "trigger_sync", side_effect=OSError("queue read only")):
             with self.assertLogs("workspace_launcher", level="ERROR") as logs:
                 self.launcher._after_ready(self.ws["id"], ag["agent_id"], nonce)
@@ -531,6 +634,15 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaises(LaunchError) as cm:
             self.launcher.resume(self.ws["id"], kilo["agent_id"])
         self.assertIn("adapter", cm.exception.message)
+
+    def test_resume_live_terminal_refusal_recommends_attach(self):
+        ag = self._running_claude()
+        self.store.mark_exited('claude-1')
+        with self.assertRaises(LaunchError) as caught:
+            self.launcher.resume(self.ws['id'], ag['agent_id'])
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn('already running', caught.exception.message)
+        self.assertIn('Attach', caught.exception.message)
 
     def test_resume_success_and_bundle(self):
         ag = self._running_claude()

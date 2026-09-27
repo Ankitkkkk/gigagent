@@ -56,7 +56,9 @@ class MessageStore:
             uid: str | None = None,
             timestamp: float | None = None,
             time_str: str | None = None,
-            _bulk: bool = False) -> dict:
+            _bulk: bool = False, actor_kind: str | None = None) -> dict:
+        if actor_kind not in (None, 'human', 'agent', 'system'):
+            raise ValueError('invalid actor kind')
         with self._lock:
             ts = timestamp if timestamp is not None else time.time()
             msg = {
@@ -74,6 +76,8 @@ class MessageStore:
                 msg["reply_to"] = reply_to
             if metadata:
                 msg["metadata"] = metadata
+            if actor_kind is not None:
+                msg['actor_kind'] = actor_kind
             self._next_id += 1
             self._messages.append(msg)
             if not _bulk:

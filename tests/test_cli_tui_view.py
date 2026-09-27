@@ -8,6 +8,25 @@ from tests._tui_harness import tui_harness
 
 
 class ViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_f7_selection_rows_exclude_ui_borders_and_sidebar(self):
+        for width in (120, 80):
+            with self.subTest(width=width):
+                async with tui_harness(size=(width, 35)) as ui:
+                    ui.view.set_sessions([{'id': 'ws_copy', 'name': 'sidebar-only'}])
+                    text = 'copy first line\n    indented content\n│ actual message separator\ncopy last line'
+                    ui.client.handle_event({'type': 'message', 'data': {
+                        'id': 1, 'sender': 'agent', 'text': text}})
+                    await ui.wait_render()
+                    self.assertIn('│ copy first line', ui.screen_text())
+                    await ui._send('\x1b[18~')
+                    start = next(i for i, row in enumerate(ui.rows) if 'copy first line' in row)
+                    self.assertEqual('\n'.join(ui.rows[start:start + 4]), text)
+                    self.assertNotIn('sidebar-only', ui.screen_text())
+                    await ui._send('\x1b[18~')
+                    self.assertIn('│ copy first line', ui.screen_text())
+                    if width == 120:
+                        self.assertIn('sidebar-only', ui.screen_text())
+
     async def test_agent_rows_use_compact_symbols_and_preserve_selected_status_color(self):
         async with tui_harness(size=(120, 35)) as ui:
             rows = [dict(agent_id='ag_' + state, registry_name=name, provider='codex',
@@ -26,12 +45,12 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('✉ 2', text)
             self.assertIn('◌ Starting', text)
             self.assertIn('○ Stopped', text)
-            self.assertIn('/private/verbose/project/path', text)
+            self.assertNotIn('/private/verbose/project/path', text)
             for hidden in ('native-secret', 'history done', 'id present', 'cwd'):
                 self.assertNotIn(hidden, text)
             waiting = next(f for f in fragments if '! Input' in f[1])
             attrs = ui.view.style.get_attrs_for_style_str(waiting[0])
-            self.assertEqual(attrs.color, 'ansiyellow')
+            self.assertEqual(attrs.color, 'f9e2af')
             self.assertTrue(attrs.bold)
             self.assertIn('/private/verbose/project/path', ui.view.inspector_text())
             ui.client.websocket = object()
@@ -100,7 +119,8 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
                     y, row = next((y, row) for y, row in enumerate(ui.rows) if 'Review input' in row)
                     cell = ui.application.renderer.last_rendered_screen.data_buffer[y][row.index('Review input')]
                     attrs = ui.application._merged_style.get_attrs_for_style_str(cell.style)
-                    self.assertEqual(attrs.bgcolor, 'ansiyellow')
+                    self.assertEqual(attrs.color, 'f9e2af')
+                    self.assertEqual(attrs.bgcolor, '181825')
                     ui.view.focus_named('agents')
                     await ui.key('Tab')
                     self.assertIs(ui.application.layout.current_control, ui.view.agent_review.control)
@@ -120,7 +140,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(ui.focused_control, 'composer')
                     self.assertEqual(ui.view.composer.text, 'keep this draft')
 
-    async def test_waiting_inspector_wraps_details_beside_review_button(self):
+    async def test_waiting_inspector_wraps_details_above_review_button(self):
         async with tui_harness(size=(80, 30)) as ui:
             path = '/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-END'
             agent = dict(agent_id='ag_one', registry_name='codex', last_state='running',
@@ -251,7 +271,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(style == 'class:chat.you' and 'You' in text for style, text in fragments))
             self.assertEqual(sum(style == 'class:chat.you' for style, text in fragments), 1)
             self.assertTrue(any(style == 'class:chat.agent' and 'codex-2' in text for style, text in fragments))
-            self.assertTrue(any(style == 'class:muted' and '21:52' in text for style, text in fragments))
+            self.assertTrue(any(style == 'class:chat.time' and '21:52' in text for style, text in fragments))
             screen = ui.screen_text()
             self.assertIn('│ Hello Codex', screen)
             self.assertIn('│ Ready to help.', screen)
@@ -534,15 +554,15 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(controller.presentation)
         self.assertTrue(ui.task.done())
 
-    async def test_focus_border_uses_cyan_and_default_background(self):
+    async def test_focus_border_uses_lavender_on_dark_composer(self):
         async with tui_harness() as ui:
             screen = ui.application.renderer.last_rendered_screen
             composer = ui.view.composer.window.render_info
             row = composer._y_offset - 1
             border = screen.data_buffer[row][22]
             attrs = ui.view.style.get_attrs_for_style_str(border.style)
-            self.assertEqual(attrs.color, 'ansicyan')
-            self.assertEqual(attrs.bgcolor, '')
+            self.assertEqual(attrs.color, 'b4befe')
+            self.assertEqual(attrs.bgcolor, '181825')
 
     async def test_inspector_scrolling_reaches_full_recovery_log(self):
         async with tui_harness(size=(80, 24)) as ui:

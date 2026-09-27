@@ -1,0 +1,11 @@
+# TUI server restart
+
+Add a visible, keyboard-accessible Restart server button and F4 action. Default-No confirmation names the connected local URL and explains brief chat/MCP disconnection; agent terminals and unsent draft stay intact. Available in plain channels and without a selected session, including compact 80x18 layout.
+
+run.py owns a lifecycle object, its web/MCP uvicorn servers and background workers. An authenticated GET /api/server reports instance_id, previous_instance_id, state, restart_supported, and reason. POST /api/server/restart accepts exactly instance_id and requires the browser session token under existing origin checks. It refuses a stale instance, coalesces duplicates, and schedules shutdown after the accepted response. Readiness requires web and both MCP transports started. Only localhost POSIX run.py instances advertise restart; other hosts/platforms/entrypoints return a useful reason.
+
+Shutdown stops new background work, signals periodic loops and all HTTP/MCP transports, and drains owned workers before replacing the same process via os.execv. Capture Python executable and original interpreter/application arguments. Keep effective endpoint/storage overrides on reload. Preserve cwd/environment/ports/data/uploads. Do not stop/deregister/checkpoint agent wrappers as a side effect. If draining is slow, the TUI times out without replaying POST; server keeps draining safely. If exec fails, log and exit nonzero so the user can start run.py manually.
+
+WorkspaceAPI submits once with the confirmed old instance ID and polls authenticated GET with fresh bootstrap tokens until a distinct ready instance with previous_instance_id matching the confirmed instance appears. Timeout or lost POST response never triggers mutation retry. Existing ChatClient reconnect obtains a fresh token; retain controller selection and composer state. Confirmation cancellation and stale selection perform no mutation.
+
+Verify authorization, duplicate/stale requests, shutdown ordering, invocation preservation, failure/timeout behavior, default-No and focused button at 80x18, plus an isolated real process restart proving same PID, new token/instance, persistence and surviving inert agent terminal. No live user instance or paid provider is touched. Full tests use isolated data, ports, uploads, PATH and tmux socket.

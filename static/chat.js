@@ -961,7 +961,7 @@ function appendMessage(msg, options = {}) {
         el.dataset.rawText = msg.text;
         const senderRole = _agentRoles[msg.sender] || '';
         const roleClass = senderRole ? 'bubble-role has-role' : 'bubble-role';
-        const rolePillHtml = !isSelf ? `<button class="${roleClass}" onclick="showBubbleRolePicker(this, '${escapeHtml(msg.sender)}')" title="${senderRole ? escapeHtml(senderRole) : 'Set role'}">${senderRole || 'choose a role'}</button>` : '';
+        const rolePillHtml = !isSelf ? `<button class="${roleClass}" onclick="showBubbleRolePicker(this, '${escapeHtml(msg.sender)}')" title="${_lockedProfiles[msg.sender] ? 'Saved profile — locked' : (senderRole ? escapeHtml(senderRole) : 'Set role')}">${escapeHtml(senderRole || 'choose a role')}${_lockedProfiles[msg.sender] ? ' 🔒' : ''}</button>` : '';
         // Inline decision choices (if present)
         let choicesHtml = '';
         const meta = msg.metadata || {};
@@ -1521,6 +1521,12 @@ function showPillPopover(pillEl, opts) {
     const inputEl = popover.querySelector('.pill-popover-input');
     const confirmBtn = popover.querySelector('.pill-popover-confirm');
     const customInput = popover.querySelector('.pill-popover-custom-input');
+    if (_lockedProfiles[opts.name]) {
+        const roleSection = customInput.closest('.pill-popover-section');
+        roleSection.querySelector('.pill-popover-label').textContent = 'Saved profile · locked';
+        roleSection.querySelectorAll('button, input').forEach(control => { control.disabled = true; });
+        customInput.placeholder = 'Create a new agent to change its profile';
+    }
 
     const closePopover = () => {
         popover.remove();
@@ -1681,6 +1687,10 @@ function showPillPopover(pillEl, opts) {
 // --- Bubble role picker ---
 
 function showBubbleRolePicker(btn, agentName) {
+    if (_lockedProfiles[agentName]) {
+        showToast('Role and personality stay locked for this saved agent. Create a new agent to change them.');
+        return;
+    }
     // Close any existing picker and reset z-index on its parent message
     document.querySelectorAll('.bubble-role-picker').forEach(p => {
         const msg = p.closest('.message');
@@ -1785,24 +1795,34 @@ function _syncBubbleRolePills(agentName) {
         const senderEl = msg.querySelector('.msg-sender');
         const btn = msg.querySelector('.bubble-role');
         if (!btn || !senderEl || senderEl.textContent !== agentName) return;
-        btn.textContent = pillText;
-        btn.title = role || 'Set role';
+        btn.textContent = pillText + (_lockedProfiles[agentName] ? ' 🔒' : '');
+        btn.title = _lockedProfiles[agentName] ? 'Saved profile — locked' : (role || 'Set role');
         btn.classList.toggle('has-role', !!role);
     });
 }
 
-function _setRole(agentName, role) {
-    fetch(`/api/roles/${agentName}`, {
+async function _setRole(agentName, role) {
+    try {
+    const response = await fetch(`/api/roles/${encodeURIComponent(agentName)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN },
         body: JSON.stringify({ role }),
     });
-    // Optimistic update
+    const result = await response.json();
+    if (!response.ok) {
+        if (result.locked) _lockedProfiles[agentName] = true;
+        _syncBubbleRolePills(agentName);
+        showToast(result.error || 'Could not change role', 'error');
+        return;
+    }
     _agentRoles[agentName] = role;
     _syncBubbleRolePills(agentName);
     // If custom role (not in presets), auto-save it
     if (role && !ROLE_PRESETS.some(p => p.label.toLowerCase() === role.toLowerCase())) {
         _addCustomRole(role);
+    }
+    } catch (error) {
+        showToast('Could not change role: ' + error.message, 'error');
     }
 }
 
@@ -1835,11 +1855,22 @@ function _deleteCustomRole(role) {
 // --- Status ---
 
 const _agentRoles = {};  // name → role string
+const _lockedProfiles = {};
 
 function fetchRoles() {
     fetch('/api/roles').then(r => r.json()).then(roles => {
         Object.assign(_agentRoles, roles);
         for (const name of Object.keys(roles || {})) {
+            _syncBubbleRolePills(name);
+        }
+    }).catch(() => {});
+    fetch('/api/agent-profiles', { headers: { 'X-Session-Token': SESSION_TOKEN } }).then(r => {
+        if (!r.ok) throw new Error('Could not load saved profiles');
+        return r.json();
+    }).then(profiles => {
+        for (const [name, profile] of Object.entries(profiles)) {
+            _lockedProfiles[name] = !!profile.locked;
+            _agentRoles[name] = profile.role;
             _syncBubbleRolePills(name);
         }
     }).catch(() => {});
@@ -1853,6 +1884,11 @@ const _ROLE_EMOJI = {
 function updateStatus(data) {
     for (const [name, info] of Object.entries(data)) {
         if (name === 'paused') continue;
+        if (info.profile_locked !== undefined) _lockedProfiles[name] = info.profile_locked;
+        if (info.role !== undefined) {
+            _agentRoles[name] = info.role;
+            _syncBubbleRolePills(name);
+        }
         const pill = document.getElementById(`status-${name}`);
         if (!pill) continue;
 
@@ -1871,11 +1907,6 @@ function updateStatus(data) {
         // Keep agent color in sync
         if (info.color) pill.style.setProperty('--agent-color', info.color);
 
-        // Track role (displayed on bubbles, not on pill)
-        if (info.role !== undefined) {
-            _agentRoles[name] = info.role;
-            _syncBubbleRolePills(name);
-        }
     }
 }
 

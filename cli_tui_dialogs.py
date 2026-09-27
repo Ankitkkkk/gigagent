@@ -14,7 +14,7 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
-from prompt_toolkit.layout import FloatContainer, HSplit, VSplit, Window
+from prompt_toolkit.layout import FloatContainer, HSplit, ScrollablePane, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import walk
@@ -27,10 +27,19 @@ from cli_tui_state import body_text, label_text
 from cli_view_contracts import ActionOutcome
 from cli_workspace_chat import _agent_cwd, _agent_line, _agent_label, SESSION_HELP
 from cli_workspaces import WINDOWS_TMUX_ERROR
+from agent_profiles import ROLE_CHOICES, PERSONALITY_CHOICES
 
 _NAVIGATION_BUSY = object()
 _CHOICE_BACK = object()
 _ADD_AGENT = object()
+
+
+def _style_input(control, *, read_only=False):
+    """Keep field focus visible independently of the terminal's own palette."""
+    base_style = control.window.style
+    control.window.style = lambda: base_style + ' ' + (
+        'class:dialog.input.readonly' if read_only else
+        'class:dialog.input.focused' if has_focus(control)() else 'class:dialog.input')
 
 
 @dataclass(frozen=True)
@@ -190,27 +199,33 @@ class DialogHost:
         return await self._open(dialog, bindings,
                                 yes_button if default else no_button, escape)
 
-    async def form(self, title, fields, *, submit_label, error=None):
+    async def form(self, title, fields, *, submit_label, error=None, description=None):
         """Collect raw field values; show validation errors until resubmitted."""
         cancelled = ModalResult(cancelled=True)
         if self.future is not None:
             return cancelled
         fields = tuple(fields)
         controls = {}
+        # Put refusals ahead of the editable fields: optional context below the
+        # fields can be clipped on short terminals, hiding a failed submission.
+        error_label = Label(body_text(error) if error else '', style='class:dialog.error')
         rows = []
         for field in fields:
             if field.choices:
                 control = RadioList([(value, label_text(value)) for value in field.choices],
-                                    default=field.default, select_on_focus=True)
+                                    default=field.default, select_on_focus=True,
+                                    show_scrollbar=False)
+                control.window.height = Dimension.exact(len(field.choices))
             else:
                 control = TextArea(text=field.default, multiline=False, height=1,
                                    read_only=field.read_only,
                                    focus_on_click=True,
                                    input_processors=[_SafeInput()])
+                _style_input(control, read_only=field.read_only)
             controls[field.name] = control
             rows.extend([Label(label_text(field.label)), control])
-        error_label = Label(body_text(error) if error is not None else '')
-        rows.append(error_label)
+        if description:
+            rows.append(Label(body_text(description)))
 
         def submit():
             values = {name: (control.current_value if isinstance(control, RadioList)
@@ -232,7 +247,10 @@ class DialogHost:
         def accept(event):
             submit()
 
-        dialog = Dialog(title=label_text(title), body=HSplit(rows),
+        # Let each list show its choices. On short terminals scroll the fields
+        # together, keeping validation and action buttons outside the viewport.
+        body = HSplit([error_label, ScrollablePane(HSplit(rows))])
+        dialog = Dialog(title=label_text(title), body=body,
                         buttons=[submit_button, cancel_button], modal=False)
         first = next((controls[field.name] for field in fields if not field.read_only), submit_button)
         return await self._open(dialog, bindings, first, cancelled)
@@ -248,6 +266,7 @@ class DialogHost:
         selected_id = visible[0]['id'] if visible else None
         search = TextArea(multiline=False, height=1, prompt='Search: ',
                           input_processors=[_SafeInput()])
+        _style_input(search)
 
         def render_rows():
             fragments = []
@@ -428,6 +447,7 @@ class TuiWorkflows:
             return ModalResult(_NAVIGATION_BUSY)
         search = TextArea(text=self.state.search, multiline=False, height=1, prompt='Search: ',
                           input_processors=[_SafeInput()])
+        _style_input(search)
         tasks = set()
         owner = asyncio.current_task()
         fetch_error = None
@@ -634,22 +654,56 @@ class TuiWorkflows:
         # A fresh server ID cannot already own a draft.
         if not self._admit(('new_session', None), mandatory):
             return ActionOutcome('cancelled')
+        if not self.controller.providers:
+            return self._failure('No providers configured')
         scope = self._scope()
-        fields = [Field('name', 'Session name:')]
+        name_fields = [Field('name', 'Session name:')]
+        last_cwd = next((a.get('cwd') for a in reversed(self.view.agent_rows()) if a.get('cwd')), None)
+        orchestrator_fields = [
+            Field('provider', 'Orchestrator provider:', choices=tuple(self.controller.providers), required=True),
+            Field('cwd', 'Working directory:', default=last_cwd or str(Path.cwd()), required=True),
+            Field('provider_flags', 'Provider flags:'),
+        ]
         error = None
         while True:
-            result = await self._dialog('form', 'New session', fields, submit_label='Create session', error=error)
-            if result.cancelled:
+            identity = await self._dialog('form', 'New session · 1 of 2', name_fields,
+                                          submit_label='Next', error=error)
+            if identity.cancelled:
+                return ActionOutcome('cancelled')
+            if not self._unchanged(scope):
+                return self._cancelled_selection()
+            details = await self._dialog('form', 'New session · 2 of 2', orchestrator_fields,
+                                         submit_label='Create session', error=error,
+                                         description='Orchestrator remains resident for this session.')
+            if details.cancelled:
                 return ActionOutcome('cancelled')
             if not self._unchanged(scope):
                 return self._cancelled_selection()
             if not self._admit(('new_session', None), mandatory):
                 return ActionOutcome('cancelled')
-            outcome = await self.controller.execute_action('create_session', result.value)
+            try:
+                provider_args = parse_provider_flags(details.value.get('provider_flags', ''))
+            except ValueError as exc:
+                error = str(exc)
+                name_fields = [replace(f, default=identity.value[f.name]) for f in name_fields]
+                orchestrator_fields = [replace(f, default=details.value[f.name]) for f in orchestrator_fields]
+                continue
+            cwd = details.value['cwd']
+            if not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+                error = 'Working directory must be an absolute existing directory.'
+                name_fields = [replace(f, default=identity.value[f.name]) for f in name_fields]
+                orchestrator_fields = [replace(f, default=details.value[f.name]) for f in orchestrator_fields]
+                continue
+            orchestrator = {'provider': details.value['provider'], 'cwd': cwd}
+            if provider_args:
+                orchestrator['provider_args'] = provider_args
+            payload = {'name': identity.value['name'], 'orchestrator': orchestrator}
+            outcome = await self.controller.execute_action('create_session', payload)
             if outcome.status != 'failed':
                 break
             error = outcome.message
-            fields = [replace(f, default=result.value[f.name]) for f in fields]
+            name_fields = [replace(f, default=identity.value[f.name]) for f in name_fields]
+            orchestrator_fields = [replace(f, default=details.value[f.name]) for f in orchestrator_fields]
         if outcome.status == 'completed':
             await self.refresh_sessions()
             return await self._select(outcome.workspace_id, mandatory=mandatory)
@@ -687,7 +741,12 @@ class TuiWorkflows:
                       Field('history_mode', 'History mode [none/literal]:', default='literal',
                             choices=('none', 'literal'), required=True),
                       Field('provider_flags', 'Provider flags:')]
-            title, submit = 'New agent', 'Start agent'
+            title, submit = 'New agent · 1 of 2', 'Next'
+            profile_fields = [
+                Field('role', 'Role:', default='generalist', choices=ROLE_CHOICES, required=True),
+                Field('personality', 'Personality:', default='pragmatic',
+                      choices=PERSONALITY_CHOICES, required=True),
+            ]
         elif action == 'resume':
             fields = [Field('cwd', 'Working directory (read-only):', default=agent.get('cwd', ''), read_only=True),
                       Field('name', 'Agent name (blank keeps stored):'),
@@ -709,9 +768,13 @@ class TuiWorkflows:
                     'History: ' + str(current.get('history_state') or 'unknown'),
                     str(current.get('history_note') or '')])
                 if action == 'resume':
-                    context += '\nResume automatically uses the saved working directory.'
+                    profile = current.get('profile') or {}
+                    locked = (('Locked profile: ' + str(profile['role']) + ' · '
+                               + str(profile['personality'])) if profile else
+                              'Legacy agent — no saved profile')
+                    context += '\n' + locked + '\nResume automatically uses the saved working directory.'
             result = await self._dialog('form', title, fields, submit_label=submit,
-                                             error='\n'.join(filter(None, [context, error])) or None)
+                                       error=error, description=context or None)
             if result.cancelled:
                 return ActionOutcome('cancelled')
             if not self._unchanged(scope):
@@ -733,6 +796,16 @@ class TuiWorkflows:
                 payload['name'] = values['name'] or None
                 if provider_args:
                     payload['provider_args'] = provider_args
+                profile = await self._dialog('form', 'New agent · 2 of 2', profile_fields,
+                    submit_label='Start agent', error=error,
+                    description='Role and personality stay locked after startup.')
+                if profile.cancelled:
+                    return ActionOutcome('cancelled')
+                if not self._unchanged(scope):
+                    return self._cancelled_selection()
+                profile_fields = [replace(field, default=profile.value[field.name])
+                                  for field in profile_fields]
+                payload.update(profile.value)
             elif action == 'resume':
                 fresh = values['launch_mode'] == 'fresh'
                 if fresh:
@@ -763,7 +836,7 @@ class TuiWorkflows:
         error = None
         while True:
             result = await self._dialog('form', 'Loop guard', [field], submit_label='Save',
-                                       error='\n'.join(filter(None, [context, error])))
+                                       error=error, description=context)
             if result.cancelled:
                 return ActionOutcome('cancelled')
             field = replace(field, default=result.value['hops'])
@@ -779,9 +852,123 @@ class TuiWorkflows:
                 return outcome
             error = outcome.message
 
+    async def orchestrator_form(self, scope):
+        if self.controller.workspace is None:
+            return self._failure('Select a session first')
+        if not self.controller.providers:
+            return self._failure('No providers configured')
+        rows = self.view.agent_rows()
+        current = next((agent for agent in rows if agent.get('kind') == 'orchestrator'), {})
+        last_cwd = current.get('cwd') or next((a.get('cwd') for a in reversed(rows) if a.get('cwd')), None)
+        fields = [
+            Field('provider', 'Orchestrator provider:', default=current.get('provider', ''),
+                  choices=tuple(self.controller.providers), required=True),
+            Field('cwd', 'Working directory:', default=last_cwd or str(Path.cwd()), required=True),
+            Field('provider_flags', 'Provider flags:',
+                  default=shlex.join(current.get('provider_args', []))),
+        ]
+        error = None
+        while True:
+            result = await self._dialog('form', 'Enable orchestrator', fields,
+                                        submit_label='Enable', error=error,
+                                        description='One resident orchestrator routes new session requests.')
+            if result.cancelled:
+                return ActionOutcome('cancelled')
+            if not self._unchanged(scope):
+                return self._cancelled_selection()
+            fields = [replace(field, default=result.value[field.name]) for field in fields]
+            try:
+                provider_args = parse_provider_flags(result.value.get('provider_flags', ''))
+            except ValueError as exc:
+                error = str(exc)
+                continue
+            cwd = result.value['cwd']
+            if not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+                error = 'Working directory must be an absolute existing directory.'
+                continue
+            payload = {'provider': result.value['provider'], 'cwd': cwd}
+            if provider_args:
+                payload['provider_args'] = provider_args
+            outcome = await self.controller.execute_action('configure_orchestrator', payload)
+            if outcome.status != 'failed':
+                return outcome
+            error = outcome.message
+
     def _failure(self, message):
         self.notice(message)
         return ActionOutcome('failed', message)
+
+    async def restart_server(self, scope):
+        try:
+            status = await asyncio.to_thread(self.controller.api.server_status)
+        except (CLIError, OSError, TimeoutError) as error:
+            return self._failure(str(error) if isinstance(error, CLIError)
+                                 else 'Could not check server restart support.')
+        if not self._unchanged(scope):
+            return self._cancelled_selection()
+        if not status['restart_supported']:
+            return self._failure(status['reason'] or 'This server cannot restart itself.')
+        if status['state'] != 'ready':
+            return self._failure('Server is already ' + status['state'] + '; wait before restarting.')
+        prompt = ('Restart server? [y/N]\n' + self.client.url
+                  + '\nChat and MCP disconnect briefly.\n'
+                    'Agent terminals and unsent drafts stay intact.')
+        accepted = await self._dialog('confirm', prompt, default=False, escape=False)
+        if not self._unchanged(scope):
+            return self._cancelled_selection()
+        if not accepted:
+            return ActionOutcome('cancelled')
+        self.notice('Restarting server…')
+        return await self.controller.execute_action('restart_server', {
+            'instance_id': status['instance_id'], 'confirmed': True})
+
+    async def stop_all_agents(self, scope):
+        if sys.platform == 'win32':
+            return self._failure(WINDOWS_TMUX_ERROR)
+        self.notice('Checking agents across all sessions…')
+        try:
+            response = await self.controller.list_sessions(include_archived=True)
+            if not isinstance(response, dict) or not isinstance(response.get('workspaces'), list):
+                raise CLIError('Could not read all sessions; retry Stop all agents.')
+            targets = []
+            for workspace in response['workspaces']:
+                if (not isinstance(workspace, dict) or not isinstance(workspace.get('id'), str)
+                        or not workspace['id'] or not isinstance(workspace.get('agents'), list)):
+                    raise CLIError('Incomplete session list; retry Stop all agents.')
+                for agent in workspace['agents']:
+                    if (not isinstance(agent, dict) or not isinstance(agent.get('agent_id'), str)
+                            or not agent['agent_id']):
+                        raise CLIError('Incomplete agent list; retry Stop all agents.')
+                    launch = agent.get('last_launch') or {}
+                    if not isinstance(launch, dict) or (launch.get('nonce') is not None
+                                                        and not isinstance(launch['nonce'], str)):
+                        raise CLIError('Incomplete launch identity; retry Stop all agents.')
+                    targets.append((agent.get('kind') != 'orchestrator', workspace['id'],
+                                    agent['agent_id'], launch.get('nonce')))
+            targets = tuple(item[1:] for item in sorted(dict.fromkeys(targets)))
+        except (CLIError, OSError, TimeoutError) as error:
+            return self._failure(str(error) if isinstance(error, CLIError)
+                                 else 'Could not check agents; retry Stop all agents.')
+        if not self._unchanged(scope):
+            return self._cancelled_selection()
+        if not targets:
+            message = 'No saved agents across any session.'
+            self.notice(message)
+            return ActionOutcome('completed', message)
+        agents, sessions = len(targets), len({target[0] for target in targets})
+        prompt = (f'Stop all agents? [y/N]\n{agents} agent{"s" if agents != 1 else ""} across '
+                  f'{sessions} session{"s" if sessions != 1 else ""}.\n'
+                  'Active work will be interrupted.\n'
+                  'Also checks stopped agents for leftover processes.\n'
+                  'Saved sessions and history are kept for resuming later.')
+        accepted = await self._dialog('confirm', prompt, default=False, escape=False)
+        if not self._unchanged(scope):
+            return self._cancelled_selection()
+        if not accepted:
+            return ActionOutcome('cancelled')
+        outcome = await self.controller.execute_action('stop_all', {'targets': targets, 'confirmed': True})
+        await self.refresh_sessions()
+        return outcome
 
     async def _menu(self, title, actions, target_id, scope):
         choices = [choice for choice in self.view.action_choices() if choice['id'] in actions]
@@ -858,7 +1045,11 @@ class TuiWorkflows:
             self._active.discard(key)
 
     async def _run(self, action, target_id, scope):
-        if action == 'loop_guard':
+        if action == 'restart_server':
+            return await self.restart_server(scope)
+        elif action == 'stop_all':
+            return await self.stop_all_agents(scope)
+        elif action == 'loop_guard':
             return await self.loop_guard_form()
         elif action == 'commands':
             return await self.show_palette()
@@ -866,6 +1057,8 @@ class TuiWorkflows:
             await self.view.callbacks['quit']()
         elif action == 'new_session':
             return await self.new_session()
+        elif action == 'enable_orchestrator':
+            return await self.orchestrator_form(scope)
         elif action == 'switch_session':
             return await self.view.callbacks['navigate']()
         elif action == 'select_session':
@@ -883,8 +1076,13 @@ class TuiWorkflows:
             from cli import HELP
             text = ('F2 Sessions/Channels · F3 Agents · F4 Commands · F5 Activity · F6 Attach\n'
                     'F7 Select text: drag, terminal Copy (Ctrl+Shift+C), F7 return\n'
+                    'Editing/sending pause during selection; F7 restores message focus and mode.\n'
                     'Shift-drag also bypasses mouse capture in supporting terminals.\n'
-                    'Tab changes focus · Enter selects/sends · Alt+Enter adds a line\n'
+                    'Message starts NORMAL: i/I/a/A edit · Enter sends\n'
+                    'INSERT: Enter completes/adds a line · Escape returns NORMAL\n'
+                    'NORMAL movement: h/j/k/l, w/b, 0/$ · Paste enters INSERT\n'
+                    'Mentions such as @agent-1 appear bright cyan and bold\n'
+                    'Tab changes focus · Enter selects dialog choices\n'
                     'Ctrl+Q Quit · Escape cancels · Ctrl+C preserves draft\n'
                     'Sessions opens navigation. Committed switches and Quit checkpoint.\n\n' +
                     HELP.replace('/history            Show recent messages in this channel',

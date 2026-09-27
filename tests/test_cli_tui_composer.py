@@ -8,8 +8,9 @@ from cli_view_contracts import SubmitOutcome
 from tests._tui_harness import tui_harness
 
 
-def bind(ui, submit=None):
-    ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': []})
+def bind(ui, submit=None, *, agent_names=()):
+    ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': [
+        {'agent_id': name, 'registry_name': name} for name in agent_names]})
     ui.bind_submit(submit or AsyncMock(return_value=SubmitOutcome('failed')))
 
 
@@ -85,7 +86,10 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
                 cancelled.append(task)
                 return task
+            await ui.key('Escape')
             with patch.object(ui.application, 'create_background_task', side_effect=cancel_before_start):
+                # Escape must precede this mock: prompt-toolkit also schedules
+                # terminal escape decoding through create_background_task().
                 await ui.key('Enter')
             self.assertTrue(cancelled)
             await asyncio.gather(*cancelled, return_exceptions=True)
@@ -100,7 +104,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             bind(ui)
             await ui.paste('one\ntwo')
             self.assertEqual(ui.view.composer.text, 'one\ntwo')
-            await ui.key('Enter')
+            await ui.send_message()
             self.assertEqual(ui.view.composer.text, 'one\ntwo')
             await ui.wait_until(lambda: ui.submit_mock.await_count == 1)
 
@@ -121,19 +125,22 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await task)
             self.assertEqual(ui.view.composer.text, 'keep this')
 
-    async def test_alt_enter_paste_and_ctrl_d(self):
+    async def test_fast_escape_enter_sends_then_paste_and_ctrl_d_edit(self):
         async with tui_harness() as ui:
             bind(ui, AsyncMock(return_value=SubmitOutcome('completed')))
             await ui.paste('one')
             await ui.key('AltEnter')
+            await ui.wait_until(lambda: ui.view.composer.text == '')
+            self.assertEqual(ui.submit_mock.await_args.args, ('one',))
             await ui.paste('two')
-            self.assertEqual(ui.view.composer.text, 'one\ntwo')
-            self.assertEqual(ui.submit_mock.await_count, 0)
+            self.assertEqual(ui.view.composer.text, 'two')
+            self.assertEqual(ui.submit_mock.await_count, 1)
             await ui.key('Home')
             await ui.key('CtrlD')
-            self.assertEqual(ui.view.composer.text, 'one\nwo')
-            await ui.key('Enter')
+            self.assertEqual(ui.view.composer.text, 'wo')
+            await ui.send_message()
             await ui.wait_until(lambda: ui.view.composer.text == '')
+            self.assertEqual(ui.submit_mock.await_count, 2)
             await ui.key('CtrlD')
             await ui.wait_until(lambda: ('quit',) in ui.calls)
 
@@ -144,7 +151,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ui.view.composer.window.render_info.window_height, 6)
             self.assertEqual(ui.view.composer.buffer.cursor_position, 13)
             self.assertIn('7', ui.screen_text())
-            await ui.key('Enter')
+            await ui.send_message()
             await ui.wait_until(lambda: ui.view.composer.text == '')
             self.assertEqual(ui.view.composer.window.render_info.window_height, 3)
 
@@ -182,7 +189,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             ui.bind_submit(AsyncMock(return_value=SubmitOutcome('completed')))
             await ui.paste('no destination')
             await ui.key('AltEnter')
-            await ui.key('Enter')
+            await ui.send_message()
             self.assertEqual(ui.view.composer.text, '')
             self.assertEqual(ui.submit_mock.await_count, 0)
 
@@ -194,10 +201,10 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                 return await gate
             bind(ui, submit)
             await ui.paste('earlier')
-            await ui.key('Enter')
+            await ui.send_message()
             await ui.wait_until(lambda: ('sent_snapshot', 'earlier') in ui.calls)
             await ui.paste(' newer')
-            await ui.key('Enter')
+            await ui.send_message()
             ui.client.handle_event({'type': 'message', 'data': {
                 'id': 1, 'channel': 'general', 'text': 'live arrival', 'sender': 'peer'}})
             await ui.wait_render()
@@ -218,7 +225,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                 return await gate
             bind(ui, submit)
             await ui.paste('first')
-            await ui.key('Enter')
+            await ui.send_message()
             ui.controller._select({'id': 'second', 'name': 'Second', 'channel': 'second-channel', 'agents': []})
             self.assertTrue(ui.composer_actions.switch_draft(('session', 'second')))
             await ui.paste('second')
@@ -235,10 +242,12 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                 return SubmitOutcome('completed')
             bind(ui, submit)
             await ui.paste('/rename old')
-            await ui.key('Enter')
+            await ui.send_message()
             await ui.wait_until(lambda: ui.dialogs.future is not None)
             # Simulate an external draft update while the command awaits its dialog.
-            ui.view.composer.buffer.insert_text(' newer')
+            from prompt_toolkit.document import Document
+            text = ui.view.composer.text + ' newer'
+            ui.view.composer.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
             await ui._send('y')
             await ui.wait_until(lambda: not ui.composer_actions.sending)
             self.assertEqual(ui.view.composer.text, '/rename old newer')
@@ -260,8 +269,9 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completion_enter_tab_and_ctrl_c(self):
         async with tui_harness() as ui:
-            bind(ui)
+            bind(ui, agent_names=['claude-2', 'claude-3'])
             ui.client.handle_event({'type': 'agents', 'data': ['claude-2', 'claude-3']})
+            await ui._send('i')
             await ui._send('@cl')
             await ui.wait_until(lambda: ui.view.composer.buffer.complete_state is not None)
             self.assertIn('claude-2', ui.screen_text())
@@ -272,6 +282,9 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ui.submit_mock.await_count, 0)
             await ui.key('Tab')
             self.assertEqual(ui.focused_control, 'clear_draft')
+            await ui.key('Tab')
+            self.assertEqual(ui.focused_control, 'restart_server')
+            self.assertIsNone(ui.dialogs.future)
             await ui.key('Tab')
             self.assertEqual(ui.focused_control, 'navigation')
             ui.view.focus_named('composer')
@@ -369,7 +382,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
         async with tui_harness() as ui:
             bind(ui, ui.client.submit_outcome)
             await ui.paste('offline message')
-            await ui.key('Enter')
+            await ui.send_message()
             await ui.wait_until(lambda: not ui.composer_actions.sending)
             self.assertEqual(ui.view.composer.text, 'offline message')
             self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'offline message')
@@ -407,7 +420,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ui.composer_actions.key, ('channel', 'renamed'))
             self.assertEqual(ui.view.composer.text, 'active text')
             self.assertEqual(ui.state.drafts.get(('channel', 'collision')), 'other text')
-            await ui.key('Enter')
+            await ui.send_message()
             self.assertEqual(ui.submit_mock.await_count, 0)
             self.assertEqual(ui.view.composer.text, 'active text')
             self.assertIn('destination changed', ui.state.notices.lines[-1])
@@ -425,7 +438,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                 return SubmitOutcome('completed', keep_running=False, message='Already published')
             bind(ui, submit)
             await ui.paste('/quit')
-            await ui.key('Enter')
+            await ui.send_message()
             await ui.wait_until(lambda: ('quit',) in ui.calls)
             self.assertEqual(ui.view.composer.text, '')
             self.assertEqual(ui.state.notices.lines, ('Already published',))
@@ -439,7 +452,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             await ui.key('Left')
             before = (ui.view.composer.text, ui.view.composer.buffer.cursor_position)
             await ui.client.submit_outcome('/join dev')
-            await ui.key('Enter')
+            await ui.send_message()
             self.assertEqual(ui.client.channel, 'dev')
             self.assertEqual(ui.submit_mock.await_count, 0)
             self.assertEqual((ui.view.composer.text, ui.view.composer.buffer.cursor_position), before)
@@ -484,11 +497,13 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
         async with tui_harness() as ui:
             bind(ui, AsyncMock(return_value=SubmitOutcome('cancelled')))
             await ui.paste('cancelled draft')
-            await ui.key('Enter')
+            await ui.send_message()
             self.assertEqual(ui.view.composer.text, 'cancelled draft')
             task = asyncio.create_task(ui.composer_actions.clear_draft())
             await ui.wait_until(lambda: ui.dialogs.future is not None)
-            ui.view.composer.buffer.insert_text(' changed')
+            from prompt_toolkit.document import Document
+            text = ui.view.composer.text + ' changed'
+            ui.view.composer.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
             await ui._send('y')
             self.assertFalse(await task)
             self.assertEqual(ui.view.composer.text, 'cancelled draft changed')
@@ -520,7 +535,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                 return result
             ui.bind_submit(submit)
             await ui.paste('/join dev')
-            await ui.key('Enter')
+            await ui.send_message()
             await ui.wait_until(lambda: not ui.composer_actions.sending)
             self.assertEqual(ui.client.channel, 'dev')
             self.assertEqual(ui.view.composer.text, 'waiting in dev')
@@ -536,7 +551,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                         return await gate
                     bind(ui, submit)
                     await ui.paste('first')
-                    await ui.key('Enter')
+                    await ui.send_message()
                     ui.controller._select({'id': 'second', 'name': 'Second', 'channel': 'second', 'agents': []})
                     ui.composer_actions.switch_draft(('session', 'second'))
                     await ui.paste('second')
@@ -582,8 +597,9 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completion_menu_is_hidden_in_resize_mode(self):
         async with tui_harness() as ui:
-            bind(ui)
+            bind(ui, agent_names=['claude-2', 'claude-3'])
             ui.client.handle_event({'type': 'agents', 'data': ['claude-2', 'claude-3']})
+            await ui._send('i')
             await ui._send('@cl')
             await ui.wait_until(lambda: ui.view.composer.buffer.complete_state is not None)
             await ui.resize(70, 16)
@@ -598,18 +614,20 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
         for text in ('hi @claude', 'hi #dev'):
             with self.subTest(text=text):
                 async with tui_harness() as ui:
-                    bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)))
+                    bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)),
+                         agent_names=['claude-2', 'claude'])
                     ui.client.handle_event({'type': 'agents', 'data': ['claude-2', 'claude']})
                     ui.client.channels = ['dev-ops', 'dev']
+                    await ui._send('i')
                     await ui._send(text)
                     await ui.wait_until(lambda: ui.view.composer.buffer.complete_state is not None)
                     self.assertIsNone(ui.view.composer.buffer.complete_state.complete_index)
-                    await ui.key('Enter')
+                    await ui.send_message()
                     self.assertEqual(ui.submit_mock.await_count, 1)
                     self.assertEqual(ui.submit_mock.await_args.args, (text,))
                     self.assertEqual(ui.view.composer.text, '')
 
-    async def test_delayed_escape_enter_inserts_newline_within_sequence_window(self):
+    async def test_delayed_escape_enter_sends_after_escape_timeout(self):
         async with tui_harness() as ui:
             bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)))
             await ui.paste('partial')
@@ -617,8 +635,9 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             # Deliberately exceed VT decoding timeout, but stay inside key sequence timeout.
             await asyncio.sleep(0.2)
             await ui.key('Enter')
-            self.assertEqual(ui.view.composer.text, 'partial\n')
-            self.assertEqual(ui.submit_mock.await_count, 0)
+            await ui.wait_until(lambda: ui.view.composer.text == '')
+            self.assertEqual(ui.submit_mock.await_count, 1)
+            self.assertEqual(ui.submit_mock.await_args.args, ('partial',))
 
     async def test_enter_typeahead_uses_original_snapshot_and_claims_send_synchronously(self):
         for status in ('completed', 'failed'):
@@ -626,7 +645,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
                 async with tui_harness() as ui:
                     bind(ui, AsyncMock(return_value=SubmitOutcome(status, sent=status == 'completed')))
                     await ui.paste('hello')
-                    await ui._send('\r\rxyz')
+                    await ui._send('\x1b\r\rixyz')
                     await ui.wait_until(lambda: not ui.composer_actions.sending)
                     self.assertEqual(ui.submit_mock.await_count, 1)
                     self.assertEqual(ui.submit_mock.await_args.args, ('hello',))
@@ -718,7 +737,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
         async with tui_harness() as ui:
             bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)))
             await ui.paste('hello')
-            await ui._send('\rxyz')
+            await ui._send('\x1b\rixyz')
             self.assertEqual(ui.submit_mock.await_count, 1)
             self.assertEqual(ui.submit_mock.await_args.args, ('hello',))
             self.assertEqual(ui.view.composer.text, 'helloxyz')

@@ -47,12 +47,12 @@ class ActivityBackTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(ui.view.composer.text, 'keep draft')
                     ui.api.action.assert_called_once_with('ws_one', 'retry', 'ag_one')
 
-    async def test_activity_escape_preserves_composer_alt_enter_and_modal(self):
+    async def test_activity_escape_preserves_insert_newline_and_modal(self):
         async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
             ui.view.show_activity()
             ui.view.focus_named('composer')
             await ui.type_text('draft')
-            await ui.key('AltEnter')
+            await ui.key('Enter')
             self.assertTrue(ui.view.activity_visible)
             self.assertEqual(ui.view.composer.text, 'draft\n')
             task = ui.start(ui.dialogs.confirm('Keep activity?'))

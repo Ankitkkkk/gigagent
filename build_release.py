@@ -25,6 +25,7 @@ INCLUDE_FILES = [
     "router.py",
     "rules.py",
     "run.py",
+    "server_lifecycle.py",
     "session_engine.py",
     "session_store.py",
     "store.py",

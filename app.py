@@ -265,10 +265,13 @@ def _install_security_middleware(token: str, cfg: dict):
     app.add_middleware(SecurityMiddleware)
 
 
-def configure(cfg: dict, session_token: str = ""):
+def configure(cfg: dict, session_token: str = "", *, lifecycle=None):
     global store, rules, summaries, jobs, schedules, router, agents, registry, session_store, session_engine, config, workspace_store
-    global _loop_guard_pending
+    global _loop_guard_pending, orchestration, workspace_launcher, server_lifecycle
+    server_lifecycle = lifecycle
     _loop_guard_pending = {}
+    orchestration = None
+    workspace_launcher = None
     config = cfg
     # --- Security: store the session token and install middleware ---
     _install_security_middleware(session_token, cfg)
@@ -372,13 +375,19 @@ def configure(cfg: dict, session_token: str = ""):
 
     _known_active = set()
     _known_waiting = set()
+    stop_event = lifecycle.stop_event if lifecycle else threading.Event()
+
+    def start_background(function):
+        if lifecycle:
+            lifecycle.start_worker(function)
+        else:
+            threading.Thread(target=function, daemon=True).start()
 
     def _background_checks():
         import time as _time
         import mcp_bridge
 
-        while True:
-            _time.sleep(3)
+        while not stop_event.wait(3):
             # Recovery flags
             try:
                 for flag in _data_dir.glob("*_recovered"):
@@ -517,13 +526,12 @@ def configure(cfg: dict, session_token: str = ""):
             except Exception:
                 pass
 
-    threading.Thread(target=_background_checks, daemon=True).start()
+    start_background(_background_checks)
 
     # --- Schedule runner: fires due scheduled prompts every 30s ---
     def _schedule_runner():
         import time as _time
-        while True:
-            _time.sleep(30)
+        while not stop_event.wait(30):
             try:
                 if not schedules:
                     continue
@@ -552,7 +560,7 @@ def configure(cfg: dict, session_token: str = ""):
             except Exception:
                 log.exception("schedule runner error")
 
-    threading.Thread(target=_schedule_runner, daemon=True).start()
+    start_background(_schedule_runner)
     wire_workspace_hooks()
 
 
@@ -568,11 +576,41 @@ _agent_last_channel: dict[str, str] = {}
 
 
 workspace_launcher = None   # WorkspaceLauncher, set by run.py (Task 12)
+server_lifecycle = None     # Only run.py owns process restart
+orchestration = None         # OrchestratorService, after launcher wiring
+
+
+def initialize_orchestration():
+    global orchestration
+    from orchestration import OrchestratorService
+    orchestration = OrchestratorService(
+        path=Path(config['server']['data_dir']) / 'orchestration.json',
+        workspaces=workspace_store, messages=store, registry=registry, agents=agents,
+        launcher=workspace_launcher,
+        allowed_agent=lambda channel: session_engine.get_allowed_agent(channel) if session_engine else None,
+        routing_paused=lambda channel: router.is_paused(channel))
+    workspace_launcher.on_startup_ready = orchestration.on_startup_ready
+    wire_workspace_hooks()
+
+
+def _saved_profile(name):
+    found = workspace_store.find_agent_by_registry_name(name) if workspace_store else None
+    if not found:
+        return None
+    _, agent = found
+    if agent.get('kind') == 'orchestrator':
+        return {'role': 'orchestrator', 'personality': '', 'locked': True}
+    profile = agent.get('profile')
+    return dict(profile, locked=True, kind='worker') if profile else None
 
 
 def wire_workspace_hooks():
     """Point mcp_bridge's visibility hooks at the workspace store (spec §1)."""
     import mcp_bridge
+    mcp_bridge.saved_profile = _saved_profile
+    mcp_bridge.saved_profile_names = lambda: workspace_store.member_names() if workspace_store else []
+    mcp_bridge.workspace_late_messages = _late_messages_for_agent
+    mcp_bridge.orchestration_service = orchestration
     if workspace_store is None:
         mcp_bridge.workspace_policy = None
         mcp_bridge.workspace_ack = None
@@ -610,6 +648,20 @@ def _filter_messages_for_agent(registry_name: str, msgs: list[dict]) -> list[dic
         if visible(pol, m):          # audience enforced for non-members too
             out.append(m)
     return out
+
+
+def _late_messages_for_agent(name, channel=None):
+    """Late assignments are visible despite an advanced ordinary read cursor."""
+    if workspace_store is None:
+        return []
+    found = workspace_store.find_agent_by_registry_name(name)
+    if not found:
+        return []
+    ws, agent = found
+    if ws.get('archived') or (channel and channel != ws['channel']):
+        return []
+    messages = [store.get_by_id(mid) for mid in agent.get('late_unacked_ids', [])]
+    return [message for message in messages if message and message.get('channel') == ws['channel']]
 
 
 def _migrate_agent_last_channel(old_name: str, new_name: str):
@@ -994,12 +1046,47 @@ async def _handle_new_message_inner(msg: dict, mark):
                            "errors": ["Invalid JSON in session block"], "valid": False},
             )
 
-    raw_targets = router.get_targets(sender, text, channel)
+    # A manager uses the authenticated routing tool; prose must not also relay
+    # tasks through ordinary mention fan-out.
+    saved_sender = workspace_store.find_agent_by_registry_name(sender) if workspace_store else None
+    if msg.get('actor_kind') != 'human' and saved_sender and saved_sender[1].get('kind') == 'orchestrator':
+        mark([])
+        return
+
+    from orchestration import has_explicit_handle, OrchestrationError
+    explicit_handle = has_explicit_handle(text)
+    actor = msg.get('actor_kind')
+    sender_is_known = (actor != 'human' if actor in ('human', 'agent') else
+                       sender.lower() in {name.lower() for name in router.agent_names})
+    configured = orchestration.configured_workspace(channel) if orchestration else None
+    if (configured and msg_type == 'chat' and not sender_is_known and
+            not explicit_handle and not stripped.startswith('/') and
+            not (session_engine and session_engine.get_active(channel))):
+        # Preserve the human reset of channel loop guards without using default
+        # recipients. The request goes to the manager alone.
+        router.continue_routing(channel=channel)
+        _loop_guard_pending.pop(channel, None)
+        mark([])
+        try:
+            await asyncio.to_thread(orchestration.submit, configured['id'], msg)
+        except (OrchestrationError, OSError) as error:
+            store.add('system', f'Orchestration could not queue this request: {error}',
+                      msg_type='system', channel=channel)
+        else:
+            if not (configured.get('orchestrator') or {}).get('enabled'):
+                store.add('system', 'Orchestrator is paused. Request saved; resume the orchestrator to route it.',
+                          msg_type='system', channel=channel)
+        return
+
+    raw_targets = router.get_targets(sender, text, channel, is_agent=sender_is_known)
+    if explicit_handle and not router.mention_tokens(text):
+        # A typo in an explicit recipient must not become default broadcast.
+        raw_targets = []
     if router.is_paused(channel):
         # The guard suppresses get_targets(); preserve the blocked mentions
         # so a human /continue can wake their recipients after resetting it.
         raw_targets = router.parse_mentions(text)
-    elif sender.lower() not in router.agent_names:
+    elif not sender_is_known:
         _loop_guard_pending.pop(channel, None)
     # Resolve base family names to actual registered instances
     # e.g. 'claude' → 'claude-prime' when slot-1 was renamed
@@ -1010,14 +1097,18 @@ async def _handle_new_message_inner(msg: dict, mark):
         else:
             targets.append(t)
     targets = list(dict.fromkeys(targets))  # dedupe, preserve order
-    if sender.lower() in router.agent_names:
+    if sender_is_known:
         targets = [target for target in targets if target.lower() != sender.lower()]
 
     # Spec §4: record stable recipients for unread tracking (side table, not the message).
+    recipient_ids = []
+    workspace_delivery = bool(workspace_launcher and workspace_store and
+                              workspace_store.is_workspace_channel(channel))
     if msg_type in ("chat", "summary"):
         tokens = router.mention_tokens(text)
         recipient_ids = workspace_store.resolve_recipients(channel, tokens, targets) if workspace_store else []
-        mark(recipient_ids)
+        if not workspace_delivery or router.is_paused(channel):
+            mark(recipient_ids)
         if workspace_store and workspace_store.is_workspace_channel(channel):
             allowed_names = {member["registry_name"] for member in workspace_store.members_in_channel(channel)
                              if member["agent_id"] in recipient_ids}
@@ -1054,8 +1145,15 @@ async def _handle_new_message_inner(msg: dict, mark):
     # Session turn guard: if a session is active on this channel and the sender
     # is an agent, only allow triggering the agent whose turn it is.
     # Human @mentions are always allowed (the session engine handles pausing).
-    sender_is_agent = sender in known_agents
+    sender_is_agent = sender_is_known
     allowed_agent = session_engine.get_allowed_agent(channel) if session_engine and sender_is_agent else None
+
+    if workspace_delivery:
+        delivery_ids = [member['agent_id'] for member in workspace_store.members_in_channel(channel)
+                        if member['agent_id'] in recipient_ids and member['registry_name'] in targets]
+        await asyncio.to_thread(_deliver_workspace_message, msg, delivery_ids, recipient_ids,
+                                custom_prompt, allowed_agent, mark)
+        return
 
     import mcp_bridge
     for target in targets:
@@ -1070,7 +1168,44 @@ async def _handle_new_message_inner(msg: dict, mark):
         if not mcp_bridge.is_online(target):
             store.add("system", f"{target} appears offline — message queued.", msg_type="system", channel=channel)
         if agents.is_available(target):
+            if workspace_launcher and not workspace_launcher.startup_ready(target):
+                continue  # Stable unread routing delivers after the profile bootstrap.
             await agents.trigger(target, message=chat_msg, channel=channel, prompt=custom_prompt)
+
+
+def _deliver_workspace_message(msg, delivery_ids, recipient_ids, prompt, allowed_agent, mark):
+    """Record and gate queue delivery in the same boundary as startup's drain.
+
+    Neither a lost wake between the drain and ready flag nor duplicate delivery
+    by both the drain and observer is possible within this lifecycle lock.
+    """
+    with workspace_launcher._lifecycle_lock:
+        import mcp_bridge
+        mark(recipient_ids)
+        members = {member['agent_id']: member for member in workspace_store.members_in_channel(msg['channel'])}
+        for agent_id in delivery_ids:
+            member = members.get(agent_id)
+            if not member:
+                continue
+            target = member['registry_name']
+            instance = registry.get_instance(target) if registry else None
+            if instance and instance.get('state') == 'pending':
+                continue
+            if allowed_agent and target != allowed_agent:
+                continue
+            if not mcp_bridge.is_online(target):
+                store.add('system', f'{target} appears offline — message queued.',
+                          msg_type='system', channel=msg['channel'])
+            if agents.is_available(target) and workspace_launcher.startup_ready(target):
+                identity = workspace_store.read_identity(agent_id) or {}
+                token = identity.get('token')
+                if not token:
+                    continue
+                try:
+                    agents.trigger_sync(target, message=f"{msg['sender']}: {msg['text']}",
+                                        channel=msg['channel'], prompt=prompt, expected_token=token)
+                except ValueError:
+                    log.info('Agent identity changed before delivery; original remains unread: %s', agent_id)
 
 
 # --- broadcasting ---
@@ -1421,7 +1556,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     reply_to = int(reply_to)
 
                 saved = store.add(sender, text, attachments=attachments, reply_to=reply_to,
-                                  channel=channel)
+                                  channel=channel, actor_kind='human')
                 await acknowledge(saved)
 
             elif event.get("type") == "delete":
@@ -1815,6 +1950,8 @@ async def get_messages(request: Request, since_id: int = 0, limit: int = 50, cha
     agent = _resolve_authenticated_agent(request)
     if agent:
         from workspace_unread import BLOCKED_TEXT
+        msgs = sorted({m['id']: m for m in msgs + _late_messages_for_agent(agent['name'], ch)}.values(),
+                      key=lambda m: m['id'])
         msgs = _filter_messages_for_agent(agent["name"], msgs)
         if msgs is None:
             return JSONResponse({"error": BLOCKED_TEXT}, status_code=403)
@@ -1843,7 +1980,7 @@ async def api_send(request: Request):
         return JSONResponse({"error": "text is required"}, status_code=400)
     channel = body.get("channel", "general")
 
-    msg = store.add(sender, text, channel=channel)
+    msg = store.add(sender, text, channel=channel, actor_kind='agent')
     return JSONResponse(msg)
 
 
@@ -1853,6 +1990,51 @@ async def get_status():
     status["paused"] = any(router.is_paused(ch) for ch in room_settings.get("channels", ["general"]))
     status["data_dir"] = str(Path(config.get("server", {}).get("data_dir", "./data")).resolve())
     return status
+
+
+@app.get('/api/server')
+async def server_status():
+    if server_lifecycle is None:
+        return {'instance_id': None, 'previous_instance_id': None, 'state': 'ready', 'restart_supported': False,
+                'reason': 'Restart is unavailable for this entrypoint. Start the server using run.py.'}
+    return server_lifecycle.status()
+
+
+class _RestartResponse(JSONResponse):
+    def __init__(self, result, lifecycle):
+        super().__init__(result, status_code=202)
+        self.lifecycle = lifecycle
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # An accepted restart owns shutdown even if its acknowledgement
+            # cannot be sent. A BackgroundTask alone is skipped on send failure.
+            self.lifecycle.begin_shutdown()
+
+
+@app.post('/api/server/restart')
+async def restart_server(request: Request):
+    from server_lifecycle import RestartError
+
+    body = await _json_body(request)
+    if (set(body) != {'instance_id'} or not isinstance(body.get('instance_id'), str)
+            or not body['instance_id']):
+        return JSONResponse({'error': 'instance_id is required; no other fields are accepted'}, status_code=400)
+    if server_lifecycle is None:
+        return JSONResponse({'error': 'Restart is unavailable for this entrypoint. Start the server using run.py.'},
+                            status_code=503)
+    try:
+        result = server_lifecycle.request_restart(body['instance_id'])
+    except RestartError as error:
+        return JSONResponse({'error': str(error)}, status_code=error.status)
+    return _RestartResponse(result, server_lifecycle)
+
+
+@app.get('/api/terminal-capabilities')
+async def terminal_capabilities():
+    return {'agent_profiles': 1, 'session_orchestrator': 1}
 
 
 @app.get("/api/settings")
@@ -2371,6 +2553,17 @@ async def get_roles():
     return mcp_bridge.get_all_roles()
 
 
+@app.get('/api/agent-profiles')
+async def get_agent_profiles():
+    """Display metadata for saved profiles, including stopped agents."""
+    profiles = {}
+    for name in workspace_store.member_names() if workspace_store else []:
+        profile = _saved_profile(name)
+        if profile:
+            profiles[name] = {key: profile.get(key) for key in ('role', 'personality', 'locked')}
+    return profiles
+
+
 @app.post("/api/roles/{agent_name}")
 async def set_agent_role(agent_name: str, request: Request):
     """Set or clear an agent's role."""
@@ -2380,7 +2573,10 @@ async def set_agent_role(agent_name: str, request: Request):
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
     role = body.get("role", "").strip()
-    mcp_bridge.set_role(agent_name, role)
+    try:
+        mcp_bridge.set_role(agent_name, role)
+    except ValueError as error:
+        return JSONResponse({'error': str(error), 'locked': True}, status_code=409)
     await broadcast_status()
     return JSONResponse({"ok": True, "role": role})
 
@@ -2893,7 +3089,7 @@ def _ws_view(ws: dict) -> dict:
         a["tmux_session"] = f"agentchattr-{a['agent_id']}"
         a['waiting_for_input'] = (a.get('last_state') in ('running', 'starting')
                                   and is_waiting_for_input(a.get('registry_name', '')))
-    for key in ("routing", "routing_done", "routing_high_water"):
+    for key in ("routing", "routing_done", "routing_high_water", "routing_assignments"):
         out.pop(key, None)
     return out
 
@@ -2923,11 +3119,58 @@ def _ensure_channel(name: str) -> None:
 
 @app.post("/api/workspaces")
 async def create_workspace(request: Request):
+    from workspace_launcher import LaunchError
     body = await _json_body(request)
+    if not isinstance(body, dict) or not isinstance(body.get('name', ''), (str, type(None))):
+        return JSONResponse({'error': 'Provide a session name.'}, status_code=400)
+    manager = body.get('orchestrator')
+    if manager is not None:
+        err = _launcher_or_503()
+        if err:
+            return err
+        try:
+            manager = _orchestrator_options(manager)
+            # Validate before creating a saved session. A later launch failure
+            # returns that saved session, so clients never unknowingly duplicate it.
+            await asyncio.to_thread(workspace_launcher._validate, {'archived': False},
+                                    manager['provider'], manager['cwd'])
+        except (ValueError, LaunchError) as error:
+            return JSONResponse({'error': str(error)}, status_code=getattr(error, 'status', 400))
     ws = workspace_store.create(body.get("name"))
     _ensure_channel(ws["channel"])
+    if manager is not None:
+        try:
+            ws = await asyncio.to_thread(workspace_launcher.configure_orchestrator, ws['id'], **manager)
+        except LaunchError as error:
+            ws = workspace_store.get(ws['id'])
+            ws['orchestration_error'] = str(error)
     await broadcast_settings()
     return _ws_view(ws)
+
+
+def _orchestrator_options(body):
+    from provider_args import validate_provider_args
+    if (not isinstance(body, dict) or set(body) - {'provider', 'cwd', 'provider_args'} or
+            not isinstance(body.get('provider'), str) or not isinstance(body.get('cwd'), str)):
+        raise ValueError('Orchestrator requires provider and an absolute cwd; provider_args is optional.')
+    result = {'provider': body['provider'], 'cwd': body['cwd']}
+    if 'provider_args' in body:
+        result['provider_args'] = validate_provider_args(body['provider_args'])
+    return result
+
+
+@app.post('/api/workspaces/{ws_id}/orchestrator')
+async def configure_workspace_orchestrator(ws_id: str, request: Request):
+    err = _launcher_or_503()
+    if err:
+        return err
+    from workspace_launcher import LaunchError
+    try:
+        options = _orchestrator_options(await _json_body(request))
+        ws = await asyncio.to_thread(workspace_launcher.configure_orchestrator, ws_id, **options)
+        return _ws_view(ws)
+    except (ValueError, LaunchError) as error:
+        return JSONResponse({'error': str(error)}, status_code=getattr(error, 'status', 400))
 
 
 @app.get("/api/workspaces/{ws_id}")
@@ -2950,12 +3193,20 @@ async def archive_workspace(ws_id: str):
         return err
     if workspace_launcher:
         def _archive_agents():
-            workspace_launcher.checkpoint(ws_id)
-            for a in ws["agents"]:
-                if a["last_state"] in ("starting", "running"):
+            with workspace_launcher._lifecycle_lock:
+                current = workspace_store.get(ws_id)
+                if current.get('orchestrator'):
+                    workspace_store.set_orchestrator(ws_id, enabled=False)
+                # Strict stop checkpoints live agents and verifies stale resources
+                # too. Keep identities for resume; archive does not remove agents.
+                for a in workspace_store.get(ws_id)['agents']:
                     workspace_launcher.stop(ws_id, a["agent_id"])
-                workspace_store.delete_identity(a["agent_id"])
-        await asyncio.to_thread(_archive_agents)
+                return workspace_store.set_archived(ws_id, True)
+        from workspace_launcher import LaunchError
+        try:
+            return _ws_view(await asyncio.to_thread(_archive_agents))
+        except LaunchError as error:
+            return JSONResponse({'error': str(error)}, status_code=error.status)
     return _ws_view(workspace_store.set_archived(ws_id, True))
 
 
@@ -2988,7 +3239,7 @@ async def spawn_agent(ws_id: str, request: Request):
         agent = await asyncio.to_thread(
             workspace_launcher.spawn, ws_id, str(body.get("provider", "")), str(body.get("cwd", "")),
             str(body.get("history_mode", "literal")), body.get("name") or None,
-            **({'provider_args': body['provider_args']} if 'provider_args' in body else {}))
+            **{key: body[key] for key in ('provider_args', 'role', 'personality') if key in body})
     except LaunchError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
     return agent
@@ -3001,6 +3252,8 @@ async def resume_agent(ws_id: str, agent_id: str, request: Request):
         return err
     from workspace_launcher import LaunchError
     body = await _json_body(request)
+    if any(key in body for key in ('role', 'personality', 'profile', 'kind')):
+        return JSONResponse({'error': 'Role and personality are locked for this saved agent.'}, status_code=409)
     try:
         return await asyncio.to_thread(workspace_launcher.resume, ws_id, agent_id,
                                        bool(body.get("fresh")), body.get("name") or None, body.get("cwd") or None,
@@ -3019,6 +3272,24 @@ async def stop_agent(ws_id: str, agent_id: str):
         return await asyncio.to_thread(workspace_launcher.stop, ws_id, agent_id)
     except LaunchError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+
+@app.post('/api/workspaces/{ws_id}/agents/{agent_id}/stop-verified')
+async def stop_verified_agent(ws_id: str, agent_id: str, request: Request):
+    """Separate route: older servers must reject before an unguarded stop."""
+    err = _launcher_or_503()
+    if err:
+        return err
+    from workspace_launcher import LaunchError
+    body = await _json_body(request)
+    if (set(body) != {'expected_nonce'} or body['expected_nonce'] is not None
+            and not isinstance(body['expected_nonce'], str)):
+        return JSONResponse({'error': 'expected_nonce is required and must be text or null'}, status_code=400)
+    try:
+        return await asyncio.to_thread(workspace_launcher.stop, ws_id, agent_id,
+                                       expected_nonce=body['expected_nonce'])
+    except LaunchError as exc:
+        return JSONResponse({'error': exc.message}, status_code=exc.status)
 
 
 @app.post("/api/workspaces/{ws_id}/agents/{agent_id}/retry")

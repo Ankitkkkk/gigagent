@@ -413,7 +413,9 @@ def build_parser(*, prog=None):
                         timeout=15, json=False, command="chat", agent_name=None,
                         history_mode="literal", cwd=None, fresh=False, archived=False,
                         yes=False, agent=None, no_resume=False, provider=None,
-                        session_name=None, target_session=None, plain=False)
+                        session_name=None, target_session=None, plain=False,
+                        role=None, personality=None,
+                        orchestrator_provider=None, provider_flags=None)
 
     def options(target):
         target.add_argument("--url", default=argparse.SUPPRESS, help="Local server URL")
@@ -469,6 +471,9 @@ def build_parser(*, prog=None):
                                    help="Include archived sessions")
         elif command == "new":
             subparser.add_argument("session_name", metavar="NAME")
+            subparser.add_argument('--orchestrator-provider', metavar='PROVIDER')
+            subparser.add_argument('--cwd', help='Orchestrator working directory')
+            subparser.add_argument('--provider-flags', help='Quoted orchestrator provider flags')
         elif command == "spawn":
             subparser.add_argument("provider", metavar="PROVIDER")
             subparser.add_argument('--provider-flags', help='Quoted provider flags; saved for later resumes')
@@ -476,6 +481,10 @@ def build_parser(*, prog=None):
             subparser.add_argument("--agent-name", default=argparse.SUPPRESS)
             subparser.add_argument("--history-mode", default=argparse.SUPPRESS,
                                    metavar="MODE")
+            subparser.add_argument('--role', choices=('generalist', 'implementer', 'code-reviewer',
+                                                      'planner', 'tester', 'debugger'))
+            subparser.add_argument('--personality', choices=('pragmatic', 'meticulous', 'concise',
+                                                             'supportive'))
         elif command == "resume":
             subparser.add_argument("agent", metavar="AGENT")
             subparser.add_argument('--provider-flags', help='Replace saved provider flags; empty text clears them')

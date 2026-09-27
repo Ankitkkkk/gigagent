@@ -16,6 +16,7 @@ from prompt_toolkit.layout import Layout
 from cli_api import CLIError
 from cli_tui_dialogs import DialogHost, TuiWorkflows
 from cli_tui_state import TuiState
+from cli_tui_theme import terminal_color_depth
 from cli_tui_view import ComposerActions, TuiView
 from cli_view_contracts import ActionOutcome, SubmitOutcome
 from cli_workspaces import prepare_attach, resolve_session, run_attach
@@ -112,12 +113,12 @@ class TuiApplication:
                                      composer_actions=self.composer_actions)
         bindings = KeyBindings()
 
-        @bindings.add(Keys.SIGINT)
+        @bindings.add(Keys.SIGINT, eager=True)
         def interrupt(event):
             self._schedule_signal()
 
         self.application = Application(layout=Layout(self.view.root, focused_element=self.view.composer),
-            input=input, output=output, full_screen=True,
+            input=input, output=output, full_screen=True, color_depth=terminal_color_depth,
             mouse_support=Condition(lambda: not self.view.selecting_text),
             key_bindings=merge_key_bindings([self.view.global_key_bindings, bindings]), style=self.view.style)
 
