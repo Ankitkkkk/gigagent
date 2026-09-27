@@ -20,6 +20,7 @@ from cli_tui_theme import terminal_color_depth
 from cli_tui_view import ComposerActions, TuiView
 from cli_view_contracts import ActionOutcome, SubmitOutcome
 from cli_workspaces import prepare_attach, resolve_session, run_attach
+import updates
 
 
 @contextmanager
@@ -82,12 +83,19 @@ async def _wait_owned(task):
 
 class TuiApplication:
     def __init__(self, client, controller, *, input=None, output=None,
-                 terminal_context=in_terminal, runner=subprocess.run, initial_notices=()):
+                 terminal_context=in_terminal, runner=subprocess.run, initial_notices=(),
+                 updater_factory=None, restored=None):
         self.client, self.controller = client, controller
         self.terminal_context, self.runner = terminal_context, runner
         self.state = TuiState()
         for text in initial_notices:
             self.state.notices.add(text)
+        if restored:
+            # Before ComposerActions binds the buffer to the current destination's draft.
+            for key, text, cursor in restored['drafts']:
+                self.state.drafts.set(key, text, cursor=cursor)
+            for text in restored['notices']:
+                self.state.notices.add(text)
         # One registry covers spawned workers and temporarily registered callers.
         self._tasks = {}
         self._loop = None
@@ -121,6 +129,92 @@ class TuiApplication:
             input=input, output=output, full_screen=True, color_depth=terminal_color_depth,
             mouse_support=Condition(lambda: not self.view.selecting_text),
             key_bindings=merge_key_bindings([self.view.global_key_bindings, bindings]), style=self.view.style)
+        self.relaunch_requested = False
+        self.updater = None
+        self._update_task = None
+        self._updater_factory = updater_factory
+        self.callbacks['update'] = self.update_now
+
+    # Roles whose presence means the user is mid-operation: never update then.
+    _BUSY_ROLES = frozenset(('action', 'navigation', 'dialog', 'startup', 'handoff',
+                             'foreground', 'quit', 'quit_waiter', 'signal'))
+
+    def update_safe(self):
+        """True only on the main screen: no dialog, help, attach, or pending work."""
+        return (self._admitted() and self.dialogs.future is None and not self.view.help_visible
+                and (self.handoff_task is None or self.handoff_task.done())
+                and not (self._BUSY_ROLES & set(self._tasks.values()))
+                and not self.controller.busy)
+
+    async def restart_server_for_update(self):
+        """Restart the connected server; return a problem description, or None."""
+        api = self.controller.api
+        try:
+            status = await asyncio.to_thread(api.server_status)
+            if not status.get('restart_supported'):
+                return status.get('reason') or 'This server cannot restart itself.'
+            if status.get('state') != 'ready':
+                return 'The server was busy ' + str(status.get('state')) + '.'
+            await asyncio.to_thread(api.restart_server, status['instance_id'])
+        except CLIError as error:
+            return str(error)
+        except (OSError, TimeoutError, KeyError, ValueError, AttributeError):
+            return 'Could not restart the server.'
+        return None
+
+    async def relaunch_for_update(self, version, restart_problem=None):
+        """Save drafts and selection, then quit so cli.main can exec the new version."""
+        notices = [f'Updated to yapp {version}.']
+        if restart_problem:
+            notices.append('Restart the server to finish the update (F4 → Restart server): '
+                           + restart_problem)
+        workspace = self.controller.workspace
+        plain = self.controller.plain_channel
+        try:
+            updates.save_relaunch_state(
+                self.controller.data_dir, drafts=list(self.state.drafts.entries()),
+                session_id=None if plain or workspace is None else workspace['id'],
+                channel=self.client.channel if plain else None, notices=notices)
+        except (OSError, TypeError, ValueError):
+            self.notice(f'Could not save drafts; yapp {version} is installed, restart yapp to use it.')
+            return
+        self.relaunch_requested = True
+        await self.request_quit(signal=True)
+
+    async def update_now(self):
+        if self.updater is None:
+            self.notice('Updates are not available in this window.')
+            return ActionOutcome('failed')
+        try:
+            return await self.updater.update_now()
+        except Exception as error:  # Update problems are notices, never a TUI failure.
+            message = f'Update failed ({type(error).__name__}).'
+            self.notice(message)
+            return ActionOutcome('failed', message)
+
+    def _pre_run(self):
+        self._spawn(self._startup(), 'startup')
+        if self._updater_factory is not None and self.controller.data_dir:
+            try:
+                self.updater = self._updater_factory(self)
+            except Exception:
+                self.notice('Automatic updates are unavailable in this window.')
+                return
+            self._update_task = self._spawn(self._run_updater(), 'update')
+
+    async def _run_updater(self):
+        try:
+            await self.updater.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # Never let update problems stop the TUI.
+            self.notice(f'Automatic updates stopped ({type(error).__name__}).')
+
+    async def _stop_updater(self):
+        task, self._update_task = self._update_task, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def _dialog_owner(self, task):
         # Quit owns a modal but can later drain navigation: never await it as owner.
@@ -492,7 +586,7 @@ class TuiApplication:
         try:
             with _signal_handlers(self._loop, self._schedule_signal, self.notice):
                 app_task = self._spawn(self.application.run_async(handle_sigint=False,
-                    pre_run=lambda: self._spawn(self._startup(), 'startup')), 'lifetime')
+                    pre_run=self._pre_run), 'lifetime')
                 try:
                     await asyncio.shield(app_task)
                 except asyncio.CancelledError:
@@ -505,6 +599,10 @@ class TuiApplication:
         except Exception as error:
             self._remember_failure(error)
         finally:
+            try:
+                await self._settle(self._stop_updater())
+            except asyncio.CancelledError:
+                cancelled = True  # The updater was already cancelled; keep restoring hooks.
             self._close_view()
             (self.client.output, self.client.on_view_change, self.client.on_workspace,
              self.client.on_settings, self.controller.presentation, self.controller.on_view_change) = old
@@ -515,5 +613,10 @@ class TuiApplication:
             raise asyncio.CancelledError
 
 
-async def interactive_tui(client, controller, *, initial_notices=()):
-    await TuiApplication(client, controller, initial_notices=initial_notices).run()
+async def interactive_tui(client, controller, *, initial_notices=(), restored=None,
+                          updater_factory=None):
+    """Run the TUI; return True when it exited to relaunch after an update."""
+    app = TuiApplication(client, controller, initial_notices=initial_notices,
+                         restored=restored, updater_factory=updater_factory)
+    await app.run()
+    return app.relaunch_requested

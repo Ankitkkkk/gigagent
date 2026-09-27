@@ -211,6 +211,36 @@ class MainEntryTests(EntryHarness):
         self.assertEqual(result["tui"].await_args.kwargs["initial_notices"],
                          ["Started[31m server", "Warning: mismatch"])
 
+    def test_update_relaunch_execs_same_command_after_tui_exits(self):
+        with patch.object(cli.os, "execv") as execv, patch.object(cli.sys, "argv", ["yapp", "chat"]):
+            result = self.run_main(("chat",), tui_effect=lambda *a, **k: True)
+        self.assertEqual(result["code"], 0, result["stderr"])
+        execv.assert_called_once_with(sys.executable, [sys.executable, "yapp", "chat"])
+        updater = result["tui"].await_args.kwargs["updater_factory"](Mock())
+        self.assertEqual(updater.data_dir, "/tmp/entry-data")
+        with patch.object(cli.os, "execv") as execv:
+            self.run_main(("chat",), tui_effect=lambda *a, **k: False)
+        execv.assert_not_called()
+
+    def test_saved_relaunch_state_restores_selection_and_drafts(self):
+        import tempfile
+        import updates
+        with tempfile.TemporaryDirectory() as data:
+            ensure = Mock(return_value={"paused": False, "data_dir": data})
+            updates.save_relaunch_state(data, drafts=[(("session", "w1"), "hi", 2)],
+                                        session_id="w1", channel=None, notices=["Updated to yapp 0.6.0."])
+            result = self.run_main(("chat",), ensure=ensure)
+            _, controller = result["tui"].await_args.args
+            self.assertEqual(controller.selector, "w1")
+            restored = result["tui"].await_args.kwargs["restored"]
+            self.assertEqual(restored["drafts"], [(("session", "w1"), "hi", 2)])
+            self.assertIsNone(updates.load_relaunch_state(data))
+            updates.save_relaunch_state(data, drafts=[], session_id=None, channel="ops", notices=[])
+            result = self.run_main(("chat", "--channel", "support"), ensure=ensure)
+            client, controller = result["tui"].await_args.args
+            self.assertEqual(client.channel, "ops")
+            self.assertIsNone(controller.selector)
+
     def test_startup_failure_keeps_automatic_fallback_before_error(self):
         result = self.run_main(stdout_tty=False,
             ensure=Mock(side_effect=CLIError("The local server is unavailable.\nStart it manually")))

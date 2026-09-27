@@ -1045,6 +1045,11 @@ class TuiWorkflows:
             self._active.discard(key)
 
     async def _run(self, action, target_id, scope):
+        if action == 'update':
+            callback = self.view.callbacks.get('update')
+            if callback is None:
+                return ActionOutcome('cancelled')
+            return await callback()
         if action == 'restart_server':
             return await self.restart_server(scope)
         elif action == 'stop_all':

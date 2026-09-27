@@ -1113,6 +1113,7 @@ class TuiView:
         agent = self._selected_agent()
         choices = [('help', 'Help', 'Keyboard and command help'),
                    ('restart_server', 'Restart server', 'Restart connected local server; keep agents and drafts'),
+                   ('update', 'Update yapp', 'Install the latest release and reopen yapp; keeps agents and drafts'),
                    ('loop_guard', 'Loop guard', 'Set the agent-to-agent hop limit for all sessions'),
                    ('stop_all', 'Stop all agents', 'Stop agents across every session; keep history for Resume'),
                    ('activity', 'Activity', 'Read diagnostics; F5 opens Activity, Esc returns'),

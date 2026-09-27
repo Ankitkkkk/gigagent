@@ -87,7 +87,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     @asynccontextmanager
     async def ui(self, *, rows=(), selector=None, selected=None, plain=False,
-                 no_resume=True, real_terminal=False, prior_hooks=None, **kwargs):
+                 no_resume=True, real_terminal=False, prior_hooks=None, data_dir=None, **kwargs):
         self.assertIsNotNone(importlib.util.find_spec('cli_tui'), 'TuiApplication missing')
         events = []
         records = {w['id']: copy.deepcopy(w) for w in rows}
@@ -108,7 +108,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         client = ChatClient('http://127.0.0.1:18300', output=lambda text: None)
         client.channels = ['general', 'other']
         controller = WorkspaceChatController(client, api, selector=selector,
-            plain_channel=plain, no_resume=no_resume, providers=['inert'])
+            plain_channel=plain, no_resume=no_resume, providers=['inert'], data_dir=data_dir)
         if selected:
             controller._select(copy.deepcopy(selected))
         if prior_hooks is not None:
@@ -161,6 +161,96 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                     yield ui
                 finally:
                     release_foreground.set()
+
+    async def test_update_host_saves_drafts_and_requests_relaunch(self):
+        import tempfile
+        import updates
+        with tempfile.TemporaryDirectory() as data:
+            async with self.ui(selected=workspace()) as ui:
+                await self.connected(ui)
+                ui.controller.data_dir = data
+                await ui.type_text('keep me')
+                self.assertTrue(ui.tui.update_safe())
+                await ui.tui.relaunch_for_update('0.6.0', 'restart failed')
+                await ui.wait_until(lambda: ui.task.done())
+                self.assertTrue(ui.tui.relaunch_requested)
+            state = updates.load_relaunch_state(data)
+            self.assertEqual(state['session_id'], workspace()['id'])
+            self.assertEqual([text for _, text, _ in state['drafts']], ['keep me'])
+            self.assertEqual(state['notices'][0], 'Updated to yapp 0.6.0.')
+            self.assertIn('restart failed', state['notices'][1])
+
+    async def test_update_not_safe_while_dialog_open(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            task = asyncio.create_task(ui.tui.confirm('Question? [y/N]'))
+            await ui.wait_until(lambda: 'Question?' in ui.screen_text())
+            self.assertFalse(ui.tui.update_safe())
+            await ui.key('Enter')
+            await task
+            await ui.wait_until(lambda: ui.tui.update_safe())
+
+    async def test_restored_drafts_and_notices_appear(self):
+        restored = {'session_id': workspace()['id'], 'channel': None,
+                    'drafts': [(('session', workspace()['id']), 'restored text', 3)],
+                    'notices': ['Updated to yapp 0.6.0.']}
+        async with self.ui(selected=workspace(), restored=restored) as ui:
+            await self.connected(ui)
+            await ui.wait_until(lambda: ui.view.composer.text == 'restored text')
+            self.assertIn('Updated to yapp 0.6.0.', ui.state.notices.lines)
+
+    async def test_updater_runs_in_background_and_is_cancelled_at_shutdown(self):
+        from cli_view_contracts import ActionOutcome
+        events = []
+        class Updater:
+            async def run(self):
+                events.append('run')
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    events.append('cancelled')
+            async def update_now(self):
+                events.append('update_now')
+                return ActionOutcome('completed')
+        async with self.ui(selected=workspace(), data_dir='/tmp/data',
+                           updater_factory=lambda host: Updater()) as ui:
+            await self.connected(ui)
+            await ui.wait_until(lambda: 'run' in events)
+            self.assertIn('update', ui.tui._tasks.values())
+            self.assertTrue(ui.tui.update_safe())
+            self.assertIn('update', [c['id'] for c in ui.view.action_choices()])
+            await ui.tui.run_action('update')
+            self.assertIn('update_now', events)
+        self.assertEqual(events[-1], 'cancelled')
+        self.assertFalse(ui.tui.relaunch_requested)
+
+    async def test_updater_failure_is_a_notice_not_a_tui_failure(self):
+        class Broken:
+            async def run(self):
+                raise RuntimeError('boom')
+            async def update_now(self):
+                raise RuntimeError('boom')
+        async with self.ui(selected=workspace(), data_dir='/tmp/data',
+                           updater_factory=lambda host: Broken()) as ui:
+            await self.connected(ui)
+            await ui.wait_until(lambda: any('Automatic updates stopped' in line
+                                            for line in ui.state.notices.lines))
+            outcome = await ui.tui.run_action('update')
+            self.assertEqual(outcome.status, 'failed')
+            self.assertFalse(ui.task.done())
+
+    async def test_update_not_safe_while_help_open_or_controller_busy(self):
+        async with self.ui(selected=workspace()) as ui:
+            await self.connected(ui)
+            self.assertTrue(ui.tui.update_safe())
+            ui.view.show_help('help text')
+            self.assertFalse(ui.tui.update_safe())
+            ui.view.hide_help()
+            self.assertTrue(ui.tui.update_safe())
+            ui.controller._pending_mutations.add(object())
+            self.assertFalse(ui.tui.update_safe())
+            ui.controller._pending_mutations.clear()
+            self.assertTrue(ui.tui.update_safe())
 
     async def modal(self, ui, text):
         await ui.wait_until(lambda: ui.dialogs.future is not None and text in ui.screen_text())

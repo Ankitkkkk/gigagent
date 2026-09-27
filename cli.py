@@ -600,22 +600,41 @@ def main(argv=None, *, prog=None):
 
             startup_status = ensure_server(url, explicit_url=args.url is not None, config=config,
                                            output=startup_output)
+            import updates
+            restored = None
+            if startup_status.get('data_dir'):
+                restored = updates.load_relaunch_state(startup_status['data_dir'])
+            selector = args.session
+            if restored and selector is None and args.channel is None:
+                selector = restored['session_id']
+            if restored and args.channel is not None and restored['channel']:
+                client.channel = restored['channel']
             controller = WorkspaceChatController(
-                client, WorkspaceAPI(url, timeout=args.timeout), selector=args.session,
+                client, WorkspaceAPI(url, timeout=args.timeout), selector=selector,
                 no_resume=args.no_resume, plain_channel=args.channel is not None,
                 data_dir=startup_status.get('data_dir'), providers=config.get('agents', {}))
+            relaunch = False
             if mode == "plain":
                 asyncio.run(interactive(client, controller))
             else:
                 try:
                     from cli_tui import interactive_tui
-                    asyncio.run(interactive_tui(
-                        client, controller, initial_notices=initial_notices))
+                    from cli_tui_update import AutoUpdater
+                    relaunch = asyncio.run(interactive_tui(
+                        client, controller, initial_notices=initial_notices, restored=restored,
+                        updater_factory=lambda host: AutoUpdater(
+                            host, data_dir=controller.data_dir, config=config)))
                 except (KeyboardInterrupt, ValueError):
                     raise
                 except Exception as error:
                     parser.exit(1, "Full-screen terminal stopped after an unexpected "
                                 f"local error ({type(error).__name__}); rerun with --plain.\n")
+            if relaunch is True:
+                try:
+                    os.execv(sys.executable, [sys.executable, *sys.argv])
+                except OSError as error:
+                    parser.exit(1, f"yapp was updated but could not reopen ({error.strerror}); "
+                                "run the same command again. Your drafts are saved.\n")
         elif args.command == 'attach':
             api = WorkspaceAPI(url, timeout=args.timeout)
 

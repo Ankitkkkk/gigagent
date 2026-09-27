@@ -774,6 +774,11 @@ class WorkspaceChatController:
         finally:
             self._pending_mutations.discard(task)
 
+    @property
+    def busy(self):
+        """True while a user action or server mutation is in flight."""
+        return bool(self._pending_actions or self._pending_mutations)
+
     async def wait_pending(self):
         """Drain owned operations/workers without replay; cancellation waits for them.
 
