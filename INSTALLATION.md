@@ -50,23 +50,39 @@ brew install python git tmux
 
 ## 2. Install the package (recommended)
 
-[pipx](https://pipx.pypa.io/) installs yapp into its own environment and puts
-the commands on `PATH`:
+Run the installer. It needs only Python 3.11+ with `venv` support and `curl`:
 
 ```sh
-pipx install git+https://github.com/Ankitkkkk/yapp.git
+curl -fsSL https://yapp.riggedcode.com/install.sh | sh
 yapp --help
 goon --help
 ```
 
-`yapp` and `goon` are the same application; use whichever name you prefer.
-Plain pip into an existing virtual environment works too:
-`python -m pip install git+https://github.com/Ankitkkkk/yapp.git`.
-Update later with `pipx upgrade yapp` (or `pipx reinstall yapp` for a new
-revision of the same version).
+If the website is unreachable, use the same script from GitHub:
+`curl -fsSL https://raw.githubusercontent.com/Ankitkkkk/yapp/main/install.sh | sh`.
 
-If `pipx` reports that `~/.local/bin` is not on `PATH`, run `pipx ensurepath`
-and open a new terminal.
+The installer creates a private virtual environment in `~/.local/share/yapp/venv`,
+installs the latest `main`, and links `yapp` and `goon` into `~/.local/bin`. It
+never overwrites an existing command with those names, and it prints the exact
+uninstall command. Run it again at any time to update. If it reports that
+`~/.local/bin` is not on `PATH`, add it as shown and open a new terminal.
+
+`yapp` and `goon` are the same application; use whichever name you prefer.
+
+### Alternative: pipx
+
+[pipx](https://pipx.pypa.io/) also works, but it must be installed first
+(`sudo apt install pipx` on Ubuntu/Debian, `brew install pipx` on macOS, then
+`pipx ensurepath`), and installing from a `git+` URL needs `git`:
+
+```sh
+pipx install git+https://github.com/Ankitkkkk/yapp.git
+```
+
+Update with `pipx upgrade yapp`, or `pipx reinstall yapp` when the version number
+has not changed. If the shell offers to correct `pipx` to `pip`, decline: plain
+`pip` on a system Python fails with `externally-managed-environment` (PEP 668).
+Never use `--break-system-packages` for yapp.
 
 An installed package keeps its runtime state outside the package, so upgrades
 do not touch it: `~/.local/share/yapp/data` and `~/.local/share/yapp/uploads`
@@ -202,8 +218,10 @@ Saving a higher limit does not unpause an already paused conversation. Send
 
 | Symptom | Check or action |
 | --- | --- |
-| `yapp` / `goon`: command not found | Run `pipx ensurepath` and open a new terminal, or use `.venv/bin/yapp` from a checkout. |
-| Missing Python modules | Reinstall the package (`pipx reinstall yapp`, or `pip install -e .` in a checkout) and run `pip check`. |
+| `yapp` / `goon`: command not found | Add `~/.local/bin` to `PATH` (or run `pipx ensurepath`) and open a new terminal, or use `.venv/bin/yapp` from a checkout. |
+| `error: externally-managed-environment` | Plain `pip` ran against system Python (often a `pipx` → `pip` shell correction). Use the installer or install pipx first; never `--break-system-packages`. |
+| Installer: could not create a virtual environment | Install venv support (`sudo apt install python3-venv`, or `python3.X-venv` for your version) and rerun. |
+| Missing Python modules | Rerun the installer (or `pipx reinstall yapp`, or `pip install -e .` in a checkout) and run `pip check`. |
 | Interactive chat requires a terminal | Launch in a real terminal; use `read`, `status`, or other shell commands for scripts. |
 | Full-screen unavailable | Check terminal size and TERM; try `yapp --plain` for the scrolling client. |
 | Could not connect | Start `run.py`, inspect its errors, and verify the URL/ports. Do not share token-bearing logs. |

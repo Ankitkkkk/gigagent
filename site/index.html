@@ -15,7 +15,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="yapp">
 <meta property="og:title" content="yapp: put your AI coding agents in one chat">
-<meta property="og:description" content="Claude Code, Codex, Gemini CLI and more share a chat room, mention each other, and hand off work. Open source, local-first, installs with pipx.">
+<meta property="og:description" content="Claude Code, Codex, Gemini CLI and more share a chat room, mention each other, and hand off work. Open source, local-first, installs with one command.">
 <meta property="og:url" content="https://yapp.riggedcode.com/">
 <meta property="og:image" content="https://yapp.riggedcode.com/og.png">
 <meta property="og:image:width" content="1200">
@@ -62,6 +62,8 @@
           "acceptedAnswer": { "@type": "Answer", "text": "Yes. yapp is MIT licensed and runs entirely on your machine. The server binds to localhost and chats stay in local files." } },
         { "@type": "Question", "name": "Does yapp work on Windows or macOS?",
           "acceptedAnswer": { "@type": "Answer", "text": "Linux and macOS are fully supported. On Windows, use WSL2 for the terminal UI; native Windows can use the browser chat and wrapper launchers." } },
+        { "@type": "Question", "name": "Why does installing yapp fail with externally-managed-environment?",
+          "acceptedAnswer": { "@type": "Answer", "text": "That error comes from running plain pip against the system Python on Ubuntu or Debian, often because the shell auto-corrected pipx to pip. Use the installer (curl -fsSL https://yapp.riggedcode.com/install.sh | sh) or install pipx first with sudo apt install pipx. Do not use --break-system-packages." } },
         { "@type": "Question", "name": "What is the goon command?",
           "acceptedAnswer": { "@type": "Answer", "text": "An alias. Installing yapp creates both the yapp and goon commands, and they run the same app." } }
       ]
@@ -150,7 +152,7 @@ h1 {
 }
 .install button:hover { background: var(--grape); }
 .after { margin: 12px 0 0; font-size: 1rem; color: var(--ink-soft); }
-.after code { color: var(--ink); font-size: .92em; }
+.after code { color: var(--ink); font-size: .92em; overflow-wrap: anywhere; }
 
 /* Terminal chat: the signature element */
 .term {
@@ -259,10 +261,10 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
       <h1>Put your AI coding agents in one chat.</h1>
       <p class="lede">yapp is a free, open-source terminal app where Claude Code, Codex, Gemini CLI and other coding agents share a chat room, @mention each other, and hand off work, while you steer and approve from one screen.</p>
       <div class="install">
-        <code id="cmd">pipx install git+https://github.com/Ankitkkkk/yapp.git</code>
+        <code id="cmd">curl -fsSL https://yapp.riggedcode.com/install.sh | sh</code>
         <button type="button" id="copy" aria-label="Copy install command">Copy</button>
       </div>
-      <p class="after">Then run <code>yapp</code>, or <code>goon</code> if you like that name better. Needs Python 3.11+ and tmux.</p>
+      <p class="after">Then run <code>yapp</code>, or <code>goon</code> if you like that name better. Needs Python 3.11+ and tmux. Run it again to update. Prefer pipx? <code>pipx install git+https://github.com/Ankitkkkk/yapp.git</code></p>
     </div>
 
     <figure class="term" aria-label="Example: Claude and Codex coordinating in the yapp terminal UI">
@@ -306,7 +308,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
       <h2>Get started</h2>
       <p class="intro">You need Python 3.11 or newer, tmux, and at least one agent CLI you are already logged in to.</p>
       <ol class="steps">
-        <li><h3>Install</h3><p><code>pipx install git+https://github.com/Ankitkkkk/yapp.git</code></p></li>
+        <li><h3>Install</h3><p><code>curl -fsSL https://yapp.riggedcode.com/install.sh | sh</code></p></li>
         <li><h3>Open yapp</h3><p>Run <code>yapp</code>. It starts the local server for you in tmux.</p></li>
         <li><h3>Add agents</h3><p>Create a session, choose Add agent, and pick a provider and project folder.</p></li>
         <li><h3>Start talking</h3><p>Type a message and @mention an agent. Press F1 for every shortcut.</p></li>
@@ -357,6 +359,8 @@ yapp spawn codex --session billing \
         <p>Yes. yapp is MIT licensed and runs entirely on your machine. The server binds to localhost and chats stay in local files.</p></details>
       <details><summary>Does yapp work on Windows or macOS?</summary>
         <p>Linux and macOS are fully supported. On Windows, use WSL2 for the terminal UI; native Windows can use the browser chat and wrapper launchers.</p></details>
+      <details><summary>Why does installing fail with externally-managed-environment?</summary>
+        <p>That error comes from running plain <code>pip</code> against the system Python on Ubuntu or Debian, often because the shell auto-corrected <code>pipx</code> to <code>pip</code>. Use the installer (<code>curl -fsSL https://yapp.riggedcode.com/install.sh | sh</code>) or install pipx first with <code>sudo apt install pipx</code>. Do not use <code>--break-system-packages</code>.</p></details>
       <details><summary>What is the goon command?</summary>
         <p>An alias. Installing yapp creates both the <code>yapp</code> and <code>goon</code> commands, and they run the same app.</p></details>
     </div>
