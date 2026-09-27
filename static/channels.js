@@ -198,7 +198,7 @@ function _showSidebarRenameDialog(oldName) {
             window.ws.send(JSON.stringify({ type: 'channel_rename', old_name: oldName, new_name: newName }));
             if (window.activeChannel === oldName) {
                 window._setActiveChannel(newName);
-                localStorage.setItem('agentchattr-channel', newName);
+                localStorage.setItem('yapp-channel', newName);
                 Store.set('activeChannel', newName);
             }
         }
@@ -292,7 +292,7 @@ function switchChannel(name) {
     // Swap the sticky @-mention toggles to this channel's remembered set
     if (window._onChannelSwitchMentions) window._onChannelSwitchMentions(prevChannel, name);
     window.channelUnread[name] = 0;
-    localStorage.setItem('agentchattr-channel', name);
+    localStorage.setItem('yapp-channel', name);
     filterMessagesByChannel();
     renderChannelTabs();
     Store.set('activeChannel', name);
@@ -433,7 +433,7 @@ function showChannelRenameDialog(oldName) {
             window.ws.send(JSON.stringify({ type: 'channel_rename', old_name: oldName, new_name: newName }));
             if (window.activeChannel === oldName) {
                 window._setActiveChannel(newName);
-                localStorage.setItem('agentchattr-channel', newName);
+                localStorage.setItem('yapp-channel', newName);
                 Store.set('activeChannel', newName);
             }
         }
@@ -535,8 +535,8 @@ function deleteChannel(name) {
 // Sidebar mode toggle + resize grip
 // ---------------------------------------------------------------------------
 
-const SIDEBAR_MODE_KEY = 'agentchattr-channel-sidebar-mode';
-const SIDEBAR_WIDTH_KEY = 'agentchattr-channel-sidebar-w';
+const SIDEBAR_MODE_KEY = 'yapp-channel-sidebar-mode';
+const SIDEBAR_WIDTH_KEY = 'yapp-channel-sidebar-w';
 
 function setChannelSidebarMode(mode, persist = true) {
     const sidebar = document.getElementById('channel-sidebar');

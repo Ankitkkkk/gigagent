@@ -102,7 +102,7 @@ class StartupTests(unittest.TestCase):
         with self.assertRaises(CLIError) as error:
             self.ensure(explicit=True)
         self.assert_manual(error)
-        self.assertNotIn('agentchattr-server', str(error.exception))
+        self.assertNotIn('yapp-server', str(error.exception))
         self.runner.assert_not_called()
 
     def test_windows_refuses_autostart(self):
@@ -118,16 +118,16 @@ class StartupTests(unittest.TestCase):
             with self.assertRaises(CLIError) as error:
                 self.ensure()
         self.assert_manual(error)
-        self.assertNotIn('agentchattr-server', str(error.exception))
+        self.assertNotIn('yapp-server', str(error.exception))
         self.runner.assert_not_called()
 
     def test_launch_quotes_all_resolved_config_flags(self):
         self.down()
         self.assertEqual(self.ensure(), self.status)
         calls = [call.args[0] for call in self.runner.call_args_list]
-        self.assertEqual(calls[0], ['tmux', 'has-session', '-t', '=agentchattr-server'])
+        self.assertEqual(calls[0], ['tmux', 'has-session', '-t', '=yapp-server'])
         self.assertEqual(calls[1][:7], ['tmux', 'new-session', '-d', '-s',
-                         'agentchattr-server', '-c', str(Path(chat.__file__).resolve().parent)])
+                         'yapp-server', '-c', str(Path(chat.__file__).resolve().parent)])
         args = shlex.split(calls[1][7])
         root = Path(chat.__file__).resolve().parent
         self.assertEqual(args[1], str(root / 'run.py'))
@@ -137,7 +137,7 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(args[args.index(flag) + 1], value)
         self.assertEqual(args[-3:], ['>>', str(self.data / 'logs/server.log'), '2>&1'])
         self.assertTrue((self.data / 'logs').is_dir())
-        self.assertIn('Started server in tmux session agentchattr-server.', self.output)
+        self.assertIn('Started server in tmux session yapp-server.', self.output)
 
     def test_relative_paths_resolve_against_module_root(self):
         self.down()
@@ -156,7 +156,7 @@ class StartupTests(unittest.TestCase):
         with self.assertRaises(CLIError) as error:
             self.ensure()
         self.assert_manual(error)
-        self.assertIn('agentchattr-server', str(error.exception))
+        self.assertIn('yapp-server', str(error.exception))
         self.assertEqual(len(self.runner.call_args_list), 1)
         self.assertEqual(len(self.requests), 1)
 
@@ -167,8 +167,8 @@ class StartupTests(unittest.TestCase):
         with self.assertRaises(CLIError) as error:
             self.ensure()
         self.assert_manual(error)
-        self.assertNotIn('agentchattr-server', str(error.exception))
-        self.assertNotIn('Started server in tmux session agentchattr-server.', self.output)
+        self.assertNotIn('yapp-server', str(error.exception))
+        self.assertNotIn('Started server in tmux session yapp-server.', self.output)
 
     def test_readiness_timeout_names_only_confirmed_remaining_tmux_session(self):
         self.opener.open.side_effect = URLError(ConnectionRefusedError())
@@ -180,9 +180,9 @@ class StartupTests(unittest.TestCase):
                 with self.assertRaises(CLIError) as error:
                     self.ensure()
                 self.assert_manual(error)
-                self.assertEqual('Tmux session: agentchattr-server' in str(error.exception), returncode == 0)
+                self.assertEqual('Tmux session: yapp-server' in str(error.exception), returncode == 0)
                 self.assertEqual(self.runner.call_args.args[0],
-                                 ['tmux', 'has-session', '-t', '=agentchattr-server'])
+                                 ['tmux', 'has-session', '-t', '=yapp-server'])
                 self.assertLessEqual(self.runner.call_args.kwargs['timeout'], 5)
 
     def test_fifteen_second_deadline_bounds_every_probe(self):
@@ -220,7 +220,7 @@ class StartupTests(unittest.TestCase):
         for status in [{}, {'data_dir': '/tmp'}, [], {'paused': False, 'data_dir': 3}]:
             with self.subTest(status=status):
                 self.status = status
-                with self.assertRaisesRegex(CLIError, 'agentchattr'):
+                with self.assertRaisesRegex(CLIError, 'yapp'):
                     self.ensure()
                 self.runner.assert_not_called()
 

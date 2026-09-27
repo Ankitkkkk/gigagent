@@ -1,4 +1,4 @@
-"""Interactive chat and shell commands for a running local agentchattr server."""
+"""Interactive chat and shell commands for a running local yapp server."""
 
 import argparse
 import asyncio
@@ -333,7 +333,7 @@ async def interactive(client, controller=None):
     with patch_stdout():
         if controller is not None and not await controller.initialize(prompt):
             return
-        client.show("gigagent terminal | /help for commands | /quit to exit")
+        client.show("yapp terminal | /help for commands | /quit to exit")
         receiver = asyncio.create_task(client.receive_forever())
         tasks = [receiver]
         try:
@@ -367,7 +367,7 @@ async def shell_command(client, args):
     try:
         token = await asyncio.to_thread(fetch_session_token, client.url)
     except (OSError, URLError):
-        raise CLIError("Could not connect to the local agentchattr server") from None
+        raise CLIError("Could not connect to the local yapp server") from None
     if args.command == "status":
         return await asyncio.to_thread(get_api, client.url, token, "/api/status")
     settings = await asyncio.to_thread(get_api, client.url, token, "/api/settings")
@@ -408,7 +408,7 @@ def choose_interactive_mode(*, plain, stdin_tty, stdout_tty, platform, term):
 
 
 def build_parser(*, prog=None):
-    parser = argparse.ArgumentParser(prog=prog, description="gigagent: terminal chat and shell commands for Agentchattr.")
+    parser = argparse.ArgumentParser(prog=prog, description="yapp: terminal chat and shell commands for a local yapp server.")
     parser.set_defaults(url=None, channel=None, session=None, name=None, history=30,
                         timeout=15, json=False, command="chat", agent_name=None,
                         history_mode="literal", cwd=None, fresh=False, archived=False,

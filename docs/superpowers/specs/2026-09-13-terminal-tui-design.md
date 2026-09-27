@@ -30,7 +30,7 @@ Use the terminal's normal background and foreground, one cyan accent for selecti
 Wide layout, at least 110 columns and 24 rows:
 
 ```text
- agentchattr    billing                         Connected
+ yapp    billing                         Connected
 ┌ Sessions ──────────┬ Conversation ──────────────────────┐
 │ Search sessions…   │ 10:42  you                          │
 │                    │ Review the payment retry behavior. │
@@ -162,8 +162,8 @@ Literal placement contract (`<...>` denotes the same substituted value as the ex
 | `Requires tmux (Linux/macOS). See wrapper_windows.py for manual launch.` | Disabled-action explanation or attempted-action notice; chat continues |
 | `Switch back: tmux switch-client -l` | Activity/notice sink after successful nested switch-client |
 | `summary history mode is not available in this version; use literal or none` | Invalid-history action notice or form error |
-| `Started server in tmux session agentchattr-server.` | Pre-screen stdout on auto-start, retained in activity |
-| `Start it manually: python run.py` | Pre-screen stderr and exit 1 from applicable `ensure_server` failures on full-screen entry; companion `Server log: <data_dir>/logs/server.log`, and `Tmux session: agentchattr-server` only when existing confirmation rules permit it. Existing shell failure hint remains unchanged. |
+| `Started server in tmux session yapp-server.` | Pre-screen stdout on auto-start, retained in activity |
+| `Start it manually: python run.py` | Pre-screen stderr and exit 1 from applicable `ensure_server` failures on full-screen entry; companion `Server log: <data_dir>/logs/server.log`, and `Tmux session: yapp-server` only when existing confirmation rules permit it. Existing shell failure hint remains unchanged. |
 | API refusal/checkpoint/startup failure text and log-path hints | Form/notice or pre-screen diagnostic, sanitized; no loss of recovery details |
 
 Rows can reuse `_agent_line`/`_agent_status` wording, but the TUI must sanitize their returned fragments itself: `_agent_status` appends raw cwd/error/history-note values and currently relies on plain `show()` sanitization. A known failed-start log hint remains available in the expanded inspector even when its row is clipped. The original 09-12 spec's §5 and decision section cross-reference D16+ here; implementation activates only the full-screen presentation amendment after written-design approval.

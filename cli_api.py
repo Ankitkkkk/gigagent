@@ -1,4 +1,4 @@
-"""Local authenticated HTTP helpers shared by agentchattr CLI commands."""
+"""Local authenticated HTTP helpers shared by yapp CLI commands."""
 
 from html.parser import HTMLParser
 import json
@@ -78,7 +78,7 @@ def fetch_session_token(url, timeout=5):
             raise ValueError("Unexpected redirect from the local server") from None
         raise
     if not parser.token:
-        raise ValueError("The server did not provide an agentchattr session token")
+        raise ValueError("The server did not provide an yapp session token")
     return parser.token
 
 
@@ -132,7 +132,7 @@ def request_json(url, token, method, path, body=None, timeout=5):
             raise CLIError("Unexpected redirect from the local server", error.code) from None
         raise CLIError(_error_message(error), error.code) from None
     except (URLError, OSError, TimeoutError):
-        raise CLIError("Could not connect to the local agentchattr server") from None
+        raise CLIError("Could not connect to the local yapp server") from None
     if not raw:
         return {}
     try:

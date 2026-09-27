@@ -26,7 +26,7 @@ import cli  # for fetch_session_token
 class WorkspaceApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory(prefix="agentchattr-ws-api-")
+        cls.temp = tempfile.TemporaryDirectory(prefix="yapp-ws-api-")
         cls.addClassCleanup(cls.temp.cleanup)
         cls.log = open(Path(cls.temp.name) / "server.log", "w+")
         cls.addClassCleanup(cls.log.close)
@@ -43,7 +43,7 @@ class WorkspaceApiTests(unittest.TestCase):
             "--mcp-sse-port", str(ports[2]), "--data-dir", str(cls.data_dir),
             "--upload-dir", cls.temp.name + "/uploads",
         ], cwd=ROOT, stdout=cls.log, stderr=cls.log,
-            env={k: v for k, v in os.environ.items() if not k.startswith("AGENTCHATTR_")})
+            env={k: v for k, v in os.environ.items() if not k.startswith("YAPP_")})
         cls.addClassCleanup(cls.stop_server)
         for _ in range(100):
             if cls.process.poll() is not None:
@@ -190,7 +190,7 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         from workspace_store import WorkspaceStore
 
         self.app = app_module
-        self.tmp = tempfile.mkdtemp(prefix="agentchattr-ws-history-")
+        self.tmp = tempfile.mkdtemp(prefix="yapp-ws-history-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         data = Path(self.tmp)
         self.ws_store = WorkspaceStore(data / "workspaces.json", data / "identity")
@@ -429,7 +429,7 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         view = self.app._ws_view(record)
 
         self.assertEqual(view["agents"][0]["unread_count"], 2)
-        self.assertEqual(view["agents"][0]["tmux_session"], f"agentchattr-{agent['agent_id']}")
+        self.assertEqual(view["agents"][0]["tmux_session"], f"yapp-{agent['agent_id']}")
         self.assertNotIn("routing", view)
         self.assertNotIn("routing_done", view)
         self.assertNotIn("routing_high_water", view)

@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# agentchattr - starts server (if not running) + CodeBuddy wrapper
+# yapp - starts server (if not running) + CodeBuddy wrapper
 # Usage: sh start_codebuddy.sh
 # Requires the codebuddy CLI on PATH. First launch prompts interactive login.
 cd "$(dirname "$0")/.."

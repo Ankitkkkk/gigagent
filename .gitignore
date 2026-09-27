@@ -23,6 +23,6 @@ docs/*
 !docs/superpowers/
 goals.py
 pr-reviews/
-agentchattr-*.zip
+yapp-*.zip
 .superpowers/
 adapters/

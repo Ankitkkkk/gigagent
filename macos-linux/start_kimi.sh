@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# agentchattr - starts server (if not running) + Kimi wrapper
+# yapp - starts server (if not running) + Kimi wrapper
 cd "$(dirname "$0")/.."
 
 PYTHON_BIN=""

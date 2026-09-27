@@ -1,4 +1,4 @@
-"""agentchattr — FastAPI web UI + agent auto-trigger."""
+"""yapp — FastAPI web UI + agent auto-trigger."""
 
 import asyncio
 import json
@@ -28,7 +28,7 @@ from session_engine import SessionEngine
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="agentchattr")
+app = FastAPI(title="yapp")
 
 # --- globals (set by configure()) ---
 store: MessageStore | None = None
@@ -50,7 +50,7 @@ session_token: str = ""
 
 # Room settings (persisted to data/settings.json)
 room_settings: dict = {
-    "title": "agentchattr",
+    "title": "yapp",
     # Shown beside the title, so several servers can be told apart without
     # renaming the product itself. "" hides it.
     "subtitle": "",
@@ -282,7 +282,7 @@ def configure(cfg: dict, session_token: str = "", *, lifecycle=None):
     cfg.setdefault("server", {})["data_dir"] = str(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    log_path = Path(data_dir) / "agentchattr_log.jsonl"
+    log_path = Path(data_dir) / "yapp_log.jsonl"
     legacy_log_path = Path(data_dir) / "room_log.jsonl"
     if not log_path.exists() and legacy_log_path.exists():
         # Backward compatibility for existing installs.
@@ -1676,7 +1676,7 @@ async def websocket_endpoint(websocket: WebSocket):
             elif event.get("type") == "update_settings":
                 new = event.get("data", {})
                 if "title" in new and isinstance(new["title"], str):
-                    room_settings["title"] = new["title"].strip() or "agentchattr"
+                    room_settings["title"] = new["title"].strip() or "yapp"
                 apply_room_subtitle(new)
                 if "username" in new and isinstance(new["username"], str):
                     room_settings["username"] = new["username"].strip() or "user"
@@ -1896,7 +1896,7 @@ async def export_history(request: Request):
         )
     except Exception as exc:
         return JSONResponse({"error": f"export failed: {exc}"}, status_code=500)
-    filename = f"agentchattr-export-{_time.strftime('%Y%m%d-%H%M%S')}.zip"
+    filename = f"yapp-export-{_time.strftime('%Y%m%d-%H%M%S')}.zip"
     return Response(
         content=zip_bytes,
         media_type="application/zip",
@@ -3086,7 +3086,7 @@ def _ws_view(ws: dict) -> dict:
     for a in out["agents"]:
         a["unread_count"] = len(workspace_launcher.unread_for(
             ws["id"], a["agent_id"], routing=routing)) if workspace_launcher else 0
-        a["tmux_session"] = f"agentchattr-{a['agent_id']}"
+        a["tmux_session"] = f"yapp-{a['agent_id']}"
         a['waiting_for_input'] = (a.get('last_state') in ('running', 'starting')
                                   and is_waiting_for_input(a.get('registry_name', '')))
     for key in ("routing", "routing_done", "routing_high_water", "routing_assignments"):
@@ -3460,7 +3460,7 @@ def _fetch_latest_release() -> dict | None:
     try:
         req = urllib.request.Request(
             "https://api.github.com/repos/bcurts/agentchattr/releases/latest",
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "agentchattr"},
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "yapp"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())

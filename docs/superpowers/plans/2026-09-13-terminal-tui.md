@@ -28,7 +28,7 @@
 - Preserve every literal in spec §7, including `Resume N stopped agents? [Y/n]`, `Unarchive it? [y/N]`, `Archive session? [y/N]`, `fresh`, `catching up…`, `id unknown`, `⚠ cwd missing — /resume <agent> --cwd PATH`, attach/log recovery hints, and `Switch back: tmux switch-client -l`.
 - Windows tmux refusal stays `Requires tmux (Linux/macOS). See wrapper_windows.py for manual launch.` Windows full-screen is not claimed tested end to end.
 - Tests use temporary ports/data/uploads, isolated TMUX_TMPDIR, no inherited TMUX, inert providers, registered cleanup, redacted logs. Never launch paid providers or kill a developer tmux socket.
-- Interpreter: `/tmp/agentchattr-cli-venv/bin/python`. Run focused tests while iterating, then required task checks; full suite for integrated entry/final verification. Each task commits explicit files only and supplies actual concise RED/GREEN evidence.
+- Interpreter: `/tmp/yapp-cli-venv/bin/python`. Run focused tests while iterating, then required task checks; full suite for integrated entry/final verification. Each task commits explicit files only and supplies actual concise RED/GREEN evidence.
 
 ## File boundaries and shared interfaces
 
@@ -102,7 +102,7 @@ def test_message_event_notifies_after_cache_update_without_printing(self):
     self.assertEqual(printed, [])
 ```
 
-- [ ] Run `/tmp/agentchattr-cli-venv/bin/python -m unittest tests.test_cli_view_contracts -v`; capture expected missing-hook/type failures before implementation.
+- [ ] Run `/tmp/yapp-cli-venv/bin/python -m unittest tests.test_cli_view_contracts -v`; capture expected missing-hook/type failures before implementation.
 - [ ] Implement one notification method per owner. Client increments its invalidation counter after mutations; controller emits its current `_state_revision` and `_selection_version`. Legacy output is unchanged when hook is None:
 
 ```python
@@ -229,8 +229,8 @@ TUI archive through execute_action checks confirmation, calls server archive onc
 def test_preflight_only_probes_exact_target(self):
     runner = Mock(return_value=subprocess.CompletedProcess([], 0))
     prepared = prepare_attach({'agent_id': 'ag_a', 'registry_name': 'claude-1'}, runner=runner)
-    self.assertEqual(prepared.target, 'agentchattr-ag_a')
-    runner.assert_called_once_with(['tmux', 'has-session', '-t', '=agentchattr-ag_a'],
+    self.assertEqual(prepared.target, 'yapp-ag_a')
+    runner.assert_called_once_with(['tmux', 'has-session', '-t', '=yapp-ag_a'],
                                    timeout=5, capture_output=True)
 ```
 
@@ -565,7 +565,7 @@ if mode == 'plain' and not args.plain:
 Run ensure_server before screen startup, collecting sanitized startup output into initial_notices while still printing it at its existing severity/destination. Preserve conditional tmux-session hint, explicit URL no-auto-start, data_dir warnings, Windows/refusal ordering. Then call legacy interactive or interactive_tui with the existing client/controller. Explicit selector missing/ambiguous errors and archived decline propagate as CLIError from interactive_tui to main’s existing except ValueError path and exit1; normal initial cancel exits normally.
 
 README shows default launch, --plain fallback, keymap, visible actions, draft limits and nonpersistent drafts, attach/detach, no summary, platform limits. AGENTS documents new module boundaries, headless screen capture and isolated PTY QA. Existing README parser guard remains. Keep shell examples unchanged. In `tests.test_cli_workspace_chat.MainIntegrationTests`, `test_default_chat_probes_status_and_passes_picker_controller`, `test_explicit_session_and_no_resume_are_carried_to_controller`, and `test_explicit_channel_is_plain_but_still_checks_server` keep their legacy interactive assertions under redirected non-tty stdout and now assert exactly one fallback stderr line. Add separate patched-tty/default-TUI coverage. Startup-failure tests retain their existing stderr hints plus the single automatic fallback notice when capability selection precedes startup; shell and non-tty-stdin tests get no fallback line (R-H).
-- [ ] Test both flag positions, shell rejection, tty/TERM/platform matrix, exact one stderr notice, existing shell JSON/stdout, startup failures, --channel and --session paths. Run full suite `/tmp/agentchattr-cli-venv/bin/python -m unittest discover -s tests -v`, diffcheck and isolated-child inspection.
+- [ ] Test both flag positions, shell rejection, tty/TERM/platform matrix, exact one stderr notice, existing shell JSON/stdout, startup failures, --channel and --session paths. Run full suite `/tmp/yapp-cli-venv/bin/python -m unittest discover -s tests -v`, diffcheck and isolated-child inspection.
 - [ ] Commit explicit entry/docs/tests. This is the first default-entry integration; no release-builder change.
 
 ## Task 12: End-to-end terminal UX and final acceptance

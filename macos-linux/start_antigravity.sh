@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# agentchattr - starts server (if not running) + Antigravity (agy) wrapper
+# yapp - starts server (if not running) + Antigravity (agy) wrapper
 cd "$(dirname "$0")/.."
 
 # Pin agy's version - it self-updates and will otherwise drift out from under you

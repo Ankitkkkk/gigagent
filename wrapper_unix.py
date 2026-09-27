@@ -94,7 +94,7 @@ def inject(text: str, *, tmux_session: str, delay: float = 0.3) -> bool:
     time limit so a stuck tmux cannot block the queue watcher indefinitely.
     Failure does not imply that retrying is safe: a paste may have arrived.
     """
-    buffer_name = f"agentchattr-inject-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    buffer_name = f"yapp-inject-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     try:
         return _deliver(text, tmux_session, buffer_name, delay)
     except Exception as exc:  # launching tmux itself failed, not a non-zero exit
@@ -224,7 +224,7 @@ def run_agent(
     """Run agent inside a tmux session, inject via tmux send-keys."""
     _check_tmux()
 
-    session_name = session_name or f"agentchattr-{agent}"
+    session_name = session_name or f"yapp-{agent}"
     agent_cmd = " ".join(
         [shlex.quote(command)] + [shlex.quote(a) for a in extra_args]
     )

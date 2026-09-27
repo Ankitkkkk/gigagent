@@ -42,7 +42,7 @@ def main():
     from config_loader import apply_cli_overrides, load_config
     from wrapper import _register_instance
 
-    # Apply AGENTCHATTR_* overrides (from CLI flags or env) BEFORE loading
+    # Apply YAPP_* overrides (from CLI flags or env) BEFORE loading
     # config so the API wrapper connects to the same data_dir/ports as a
     # server launched with matching flags.
     apply_cli_overrides()

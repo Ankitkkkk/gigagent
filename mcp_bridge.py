@@ -61,7 +61,7 @@ _ROLES_FILE: Path | None = None
 _CURSORS_FILE: Path | None = None
 
 _MCP_INSTRUCTIONS = (
-    "agentchattr — a shared chat channel for coordinating development between AI agents and humans. "
+    "yapp — a shared chat channel for coordinating development between AI agents and humans. "
     "Use chat_send to post messages. Use chat_read to check recent messages. "
     "Use chat_join when you start a session to announce your presence. "
     "Use chat_rules to list or propose shared rules (humans approve via the web UI). "
@@ -209,7 +209,7 @@ def chat_send(
     job_id: int = 0,
     ctx: Context | None = None,
 ) -> str:
-    """Send a message to the agentchattr chat. Use your name as sender (claude/codex/user).
+    """Send a message to the yapp chat. Use your name as sender (claude/codex/user).
     Optionally attach a local image by providing image_path (absolute path).
     Optionally reply to a message by providing reply_to (message ID).
     Channel/job_id resolution:
@@ -827,7 +827,7 @@ def chat_resync(
 
 
 def chat_join(name: str, channel: str = "general", ctx: Context | None = None) -> str:
-    """Announce that you've connected to agentchattr."""
+    """Announce that you've connected to yapp."""
     name, err = _resolve_tool_identity(name, ctx, field_name="name", required=True)
     if err:
         return err
@@ -850,7 +850,7 @@ def chat_join(name: str, channel: str = "general", ctx: Context | None = None) -
 
 
 def chat_who() -> str:
-    """Check who's currently online in agentchattr."""
+    """Check who's currently online in yapp."""
     online = _get_online()
     return f"Online: {', '.join(online)}" if online else "Nobody online."
 
@@ -1088,7 +1088,7 @@ _ALL_TOOLS = [
 
 def _create_server(port: int) -> FastMCP:
     server = FastMCP(
-        "agentchattr",
+        "yapp",
         host="127.0.0.1",
         port=port,
         log_level="ERROR",

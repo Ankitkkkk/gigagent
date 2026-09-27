@@ -21,7 +21,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.agent = {
             'agent_id': 'ag_b', 'provider': 'codex', 'registry_name': 'codex-2',
             'cwd': self.directory.name, 'native_session_id': 'native-b',
-            'tmux_session': 'agentchattr-ag_b', 'last_state': 'exited',
+            'tmux_session': 'yapp-ag_b', 'last_state': 'exited',
             'last_error': None, 'last_launch': None, 'unread_count': 0,
             'history_mode': 'literal', 'history_state': 'done', 'history_note': None,
             'previous_native_ids': [], 'previous_cwds': [], 'floor_id': 0,

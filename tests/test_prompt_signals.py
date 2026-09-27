@@ -14,9 +14,9 @@ from prompt_signals import PromptMonitor
 from waiting_hooks import configure_stream, emit, install
 
 
-MCP_PROMPT = b'''Calling agentchattr.chat_send
+MCP_PROMPT = b'''Calling yapp.chat_send
 Field 1/1
-Allow the agentchattr MCP server to run tool "chat_send"?
+Allow the yapp MCP server to run tool "chat_send"?
 channel: example
 message: hello
 > 1. Allow                     Run the tool and continue.
@@ -27,7 +27,7 @@ enter to submit | esc to cancel
 '''
 
 
-def payload(event='PermissionRequest', tool='mcp__agentchattr__chat_send', turn='t1'):
+def payload(event='PermissionRequest', tool='mcp__yapp__chat_send', turn='t1'):
     return dict(hook_event_name=event, session_id='s1', turn_id=turn,
                 tool_name=tool, tool_input={'secret': 'DO-NOT-RECORD'}, transcript_path='/private')
 
@@ -47,7 +47,7 @@ class Custom(ProviderAdapter):
             return PromptEvent('requested', 's1', 't1', 'CustomTool')
 ''')
             configure_stream(events, 'codex', {'adapter': 'custom_prompt_adapter:Custom'})
-            env = dict(os.environ, AGENTCHATTR_PROMPT_EVENTS=str(events), PYTHONPATH=str(root))
+            env = dict(os.environ, YAPP_PROMPT_EVENTS=str(events), PYTHONPATH=str(root))
             script = Path(__file__).resolve().parents[1] / 'waiting_hooks.py'
             result = subprocess.run([sys.executable, str(script), 'emit', '--provider', 'codex'],
                 input=json.dumps({'hook_event_name': 'CustomPermission'}), text=True,
@@ -143,12 +143,12 @@ class Custom(ProviderAdapter):
     def test_hook_command_is_silent_and_inert_outside_wrapper(self):
         script = Path(__file__).resolve().parents[1] / 'waiting_hooks.py'
         with tempfile.TemporaryDirectory() as directory:
-            env = dict(os.environ, AGENTCHATTR_PROMPT_EVENTS=directory)
+            env = dict(os.environ, YAPP_PROMPT_EVENTS=directory)
             result = subprocess.run([sys.executable, str(script), 'emit', '--provider', 'codex'],
                 input=json.dumps(payload()), text=True, capture_output=True, env=env, timeout=5)
             self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
             self.assertTrue(list(Path(directory).glob('*.json')))
-            env.pop('AGENTCHATTR_PROMPT_EVENTS')
+            env.pop('YAPP_PROMPT_EVENTS')
             result = subprocess.run([sys.executable, str(script), 'emit', '--provider', 'codex'],
                 input='not-json', text=True, capture_output=True, env=env, timeout=5)
             self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))

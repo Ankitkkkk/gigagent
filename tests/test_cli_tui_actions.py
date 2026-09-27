@@ -21,7 +21,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.agent = {
             'agent_id': 'ag_a', 'provider': 'codex', 'registry_name': 'codex-1',
             'cwd': '/tmp/project', 'native_session_id': 'native-a',
-            'tmux_session': 'agentchattr-ag_a', 'last_state': 'exited',
+            'tmux_session': 'yapp-ag_a', 'last_state': 'exited',
             'last_error': None, 'last_launch': None, 'unread_count': 0,
             'history_mode': 'literal', 'history_state': 'done', 'history_note': None,
             'previous_native_ids': [], 'previous_cwds': [],
@@ -55,7 +55,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.api.action.side_effect = CLIError('Not Found', 404)
         outcome = await ctl.execute_action('remove', {'agent_id': 'ag_a'})
         self.assertEqual(outcome.status, 'failed')
-        self.assertIn('Restart the agentchattr server', outcome.message)
+        self.assertIn('Restart the yapp server', outcome.message)
         self.assertIn('not removed', outcome.message)
         self.assertEqual(ctl.workspace['agents'][0]['agent_id'], 'ag_a')
         self.presenter.notice.assert_called_with(outcome.message)

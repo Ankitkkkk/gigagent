@@ -7,14 +7,14 @@ Per-invocation overrides: the following environment variables, if set,
 override values from config.toml. This lets dotfiles/launcher layers run
 isolated instances per project without editing the repo's config file.
 
-  AGENTCHATTR_DATA_DIR        → server.data_dir
-  AGENTCHATTR_PORT            → server.port           (int)
-  AGENTCHATTR_MCP_HTTP_PORT   → mcp.http_port         (int)
-  AGENTCHATTR_MCP_SSE_PORT    → mcp.sse_port          (int)
-  AGENTCHATTR_UPLOAD_DIR      → images.upload_dir
+  YAPP_DATA_DIR        → server.data_dir
+  YAPP_PORT            → server.port           (int)
+  YAPP_MCP_HTTP_PORT   → mcp.http_port         (int)
+  YAPP_MCP_SSE_PORT    → mcp.sse_port          (int)
+  YAPP_UPLOAD_DIR      → images.upload_dir
 
 Relative paths in env var overrides resolve against the current working
-directory (where the user invoked the command from), not agentchattr's
+directory (where the user invoked the command from), not yapp's
 install directory.
 """
 
@@ -28,20 +28,20 @@ ROOT = Path(__file__).parent
 
 # Mapping: env var name → (config section, key, is_int)
 _ENV_OVERRIDES = [
-    ("AGENTCHATTR_DATA_DIR",      "server", "data_dir",   False),
-    ("AGENTCHATTR_PORT",          "server", "port",       True),
-    ("AGENTCHATTR_MCP_HTTP_PORT", "mcp",    "http_port",  True),
-    ("AGENTCHATTR_MCP_SSE_PORT",  "mcp",    "sse_port",   True),
-    ("AGENTCHATTR_UPLOAD_DIR",    "images", "upload_dir", False),
+    ("YAPP_DATA_DIR",      "server", "data_dir",   False),
+    ("YAPP_PORT",          "server", "port",       True),
+    ("YAPP_MCP_HTTP_PORT", "mcp",    "http_port",  True),
+    ("YAPP_MCP_SSE_PORT",  "mcp",    "sse_port",   True),
+    ("YAPP_UPLOAD_DIR",    "images", "upload_dir", False),
 ]
 
 # Mapping: CLI flag → env var (for apply_cli_overrides)
 CLI_OVERRIDE_FLAGS = [
-    ("--data-dir",      "AGENTCHATTR_DATA_DIR"),
-    ("--port",          "AGENTCHATTR_PORT"),
-    ("--mcp-http-port", "AGENTCHATTR_MCP_HTTP_PORT"),
-    ("--mcp-sse-port",  "AGENTCHATTR_MCP_SSE_PORT"),
-    ("--upload-dir",    "AGENTCHATTR_UPLOAD_DIR"),
+    ("--data-dir",      "YAPP_DATA_DIR"),
+    ("--port",          "YAPP_PORT"),
+    ("--mcp-http-port", "YAPP_MCP_HTTP_PORT"),
+    ("--mcp-sse-port",  "YAPP_MCP_SSE_PORT"),
+    ("--upload-dir",    "YAPP_UPLOAD_DIR"),
 ]
 
 
@@ -55,7 +55,7 @@ def apply_cli_overrides(argv: list[str] | None = None) -> None:
 
     Arguments after a literal `--` are treated as pass-through (e.g. for the
     agent CLI in wrapper.py) and are NOT scanned — `python wrapper.py claude
-    -- --port 9999` sets `--port 9999` on the agent, not on agentchattr.
+    -- --port 9999` sets `--port 9999` on the agent, not on yapp.
     """
     if argv is None:
         argv = sys.argv
@@ -79,7 +79,7 @@ def apply_cli_overrides(argv: list[str] | None = None) -> None:
 
 
 def _apply_env_overrides(config: dict) -> None:
-    """Apply AGENTCHATTR_* env vars to the config dict in-place."""
+    """Apply YAPP_* env vars to the config dict in-place."""
     for env_var, section, key, is_int in _ENV_OVERRIDES:
         raw = os.environ.get(env_var)
         if raw is None or raw == "":
@@ -92,7 +92,7 @@ def _apply_env_overrides(config: dict) -> None:
                 continue
         else:
             # Path values: resolve relative paths against current working dir,
-            # not against agentchattr's install directory.
+            # not against yapp's install directory.
             p = Path(raw)
             if not p.is_absolute():
                 p = (Path.cwd() / p).resolve()
@@ -108,7 +108,7 @@ def load_config(root: Path | None = None) -> dict:
     Only the [agents] section is merged — local entries are added alongside
     (not replacing) the agents defined in config.toml.
 
-    AGENTCHATTR_* environment variables override values from config.toml
+    YAPP_* environment variables override values from config.toml
     (see module docstring for the list).
     """
     root = root or ROOT

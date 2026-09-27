@@ -1,13 +1,12 @@
-# Install gigagent
+# Install yapp
 
-gigagent is the terminal UI and shell client for Agentchattr. It connects to a
-local Agentchattr server and manages chat sessions and terminal agents through
-that server. The server, API routes, configuration, and data directories keep
-their Agentchattr names.
+yapp is a terminal UI and shell client for AI coding agents. It connects to a
+local yapp server and manages chat sessions and terminal agents through that
+server.
 
 This guide is intended for both people and AI agents helping with installation.
 Installation currently uses a **source checkout**. There is no published
-`pip install gigagent` package provided by this repository. The older release ZIP
+`pip install yapp` package provided by this repository. The older release ZIP
 builder does not include all CLI modules; use the checkout containing this guide.
 
 ## 1. Check the system and choose a checkout
@@ -20,7 +19,7 @@ For the full experience, use Linux or macOS with:
 - An interactive terminal at least **80 columns × 18 rows**. A wider terminal
   shows the session sidebar. Set a valid `TERM` through your terminal application.
 - At least one supported provider CLI if the user wants to add agents. Installing
-  gigagent alone does not install or authenticate those CLIs.
+  yapp alone does not install or authenticate those CLIs.
 
 On Windows, use **WSL2 with a Linux distribution** for terminal-agent management
 and follow the Linux instructions inside WSL. Native Windows can use chat with a
@@ -55,7 +54,7 @@ If a checkout already exists, inspect it and preserve local changes instead of
 cloning over it or resetting it. Locate the directory containing **all** of:
 
 ```text
-gigagent.py
+yapp.py
 cli.py
 run.py
 config.toml
@@ -73,7 +72,7 @@ From the repository root:
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-cli.txt
 .venv/bin/python -m pip check
-.venv/bin/python gigagent.py --help
+.venv/bin/python yapp.py --help
 ```
 
 If `.venv` already exists, check its Python version and reuse it when compatible.
@@ -84,42 +83,28 @@ constraint: the server uses `mcp.server.fastmcp`.
 No activation is required when using `.venv/bin/python` explicitly. The existing
 `python cli.py` entry point remains compatible with the same arguments.
 
-## 3. Make a `gigagent` command (Linux, macOS, WSL)
+## 3. Make a `yapp` or `goon` command (Linux, macOS, WSL)
 
-This optional launcher uses the checkout's virtual environment, so users do not
-need to activate it in every terminal. Run this from the repository root:
+The application is called **yapp**; the shell command can be named either `yapp`
+or `goon`. Run the installer from the repository root:
 
 ```sh
-.venv/bin/python - <<'PY'
-from pathlib import Path
-import shlex
-
-root = Path.cwd().resolve()
-python = root / '.venv' / 'bin' / 'python'
-entry = root / 'gigagent.py'
-if not python.is_file() or not entry.is_file():
-    raise SystemExit('Run this from the installed gigagent repository root.')
-target = Path.home() / '.local' / 'bin' / 'gigagent'
-target.parent.mkdir(parents=True, exist_ok=True)
-script = ('#!/bin/sh\n'
-          + 'cd ' + shlex.quote(str(root)) + ' || exit 1\n'
-          + 'exec ' + shlex.join([str(python), str(entry)]) + ' "$@"\n')
-# Do not overwrite an existing command or symlink.
-with target.open('x', encoding='utf-8') as handle:
-    handle.write(script)
-target.chmod(0o755)
-print('Created', target)
-PY
+./install.sh                # asks which name to use (default: yapp)
+./install.sh --name goon    # or choose non-interactively
 ```
 
-If the command already exists, inspect it and use the existing installation or
-choose another location. Do not overwrite an unrelated executable.
+It creates `.venv` if needed, installs `requirements-cli.txt`, and writes a
+launcher to `~/.local/bin/<name>` (override with `YAPP_BIN_DIR`) that uses the
+checkout's virtual environment, so users do not need to activate it. Help text
+shows the chosen name. The installer only replaces launchers it created itself;
+if an unrelated command already exists at that path, it stops without
+overwriting it. Run it again with the other name to install both commands.
 
 Ensure `~/.local/bin` is on `PATH`:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-gigagent --help
+yapp --help
 ```
 
 Add that export once to the user's shell startup file if needed (`~/.bashrc` for
@@ -150,19 +135,19 @@ Default listeners:
 Keep the server running and check it from another terminal:
 
 ```sh
-gigagent status --json
-gigagent sessions --json
+yapp status --json
+yapp sessions --json
 ```
 
 Without the optional launcher, run the same commands as
-`.venv/bin/python gigagent.py status --json` from the repository root.
+`.venv/bin/python yapp.py status --json` from the repository root.
 These checks read state; they do not send messages or start provider agents.
 An empty session list on a new installation is normal.
 
 Then open the TUI from an interactive terminal:
 
 ```sh
-gigagent
+yapp
 ```
 
 On Linux/macOS, interactive startup can automatically start a missing local
@@ -173,7 +158,7 @@ the shared server/MCP initialization.
 
 If ports are occupied, identify the existing service first. Do not kill another
 installation. Custom ports and data locations use `config.toml` or matching
-`AGENTCHATTR_*` environment overrides; `config.local.toml` adds agent definitions
+`YAPP_*` environment overrides; `config.local.toml` adds agent definitions
 only and does not override server settings. See `config_loader.py` for the exact
 supported overrides. Never expose the server publicly as an installation shortcut.
 
@@ -182,9 +167,9 @@ supported overrides. Never expose the server publicly as an installation shortcu
 Install and authenticate only the provider CLI the user chooses, following that
 provider's own instructions. Check it is on the server's `PATH` and can run in
 an ordinary terminal. Provider accounts and credentials are separate from
-gigagent; login should use the provider's normal interactive flow.
+yapp; login should use the provider's normal interactive flow.
 
-In gigagent:
+In yapp:
 
 1. Create or select a session.
 2. Use **Add agent**, or **F3 → Add agent**.
@@ -200,7 +185,7 @@ Provider flags are passed as arguments, not evaluated as shell commands. For
 shell usage, quoting a value with leading dashes is simplest with `=`:
 
 ```sh
-gigagent spawn codex --session work --agent-name reviewer \
+yapp spawn codex --session work --agent-name reviewer \
   --cwd /absolute/path/to/project --provider-flags='--model MODEL_NAME'
 ```
 
@@ -240,14 +225,14 @@ Saving a higher limit does not unpause an already paused conversation. Send
 
 | Symptom | Check or action |
 | --- | --- |
-| `gigagent: command not found` | Check the launcher and `~/.local/bin` in PATH, or use `.venv/bin/python gigagent.py` directly. |
-| Missing Python modules | Install `requirements-cli.txt` using the exact virtual environment that launches gigagent; run `pip check`. |
+| `yapp` / `goon`: command not found | Check the launcher and `~/.local/bin` in PATH, or use `.venv/bin/python yapp.py` directly. |
+| Missing Python modules | Install `requirements-cli.txt` using the exact virtual environment that launches yapp; run `pip check`. |
 | Interactive chat requires a terminal | Launch in a real terminal; use `read`, `status`, or other shell commands for scripts. |
-| Full-screen unavailable | Check terminal size and TERM; try `gigagent --plain` for the scrolling client. |
+| Full-screen unavailable | Check terminal size and TERM; try `yapp --plain` for the scrolling client. |
 | Could not connect | Start `run.py`, inspect its errors, and verify the URL/ports. Do not share token-bearing logs. |
 | tmux not found / unsupported lifecycle | Install tmux on Linux/macOS, or run inside WSL on Windows. |
 | Agent missing or stuck | Check the provider executable/login, agent cwd, Activity (F5), and Attach (F6) for approval prompts. |
-| UI looks unchanged after an update | Exit and reopen gigagent. Reload the server for backend changes after accounting for active work. |
+| UI looks unchanged after an update | Exit and reopen yapp. Reload the server for backend changes after accounting for active work. |
 
 Runtime state normally lives in `data/` and `uploads/`; preserve these when
 updating. Also preserve `config.local.toml`, provider login files, and existing

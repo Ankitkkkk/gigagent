@@ -22,7 +22,7 @@ import cli
 class TmuxIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory(prefix="agentchattr-tmux-")
+        cls.temp = tempfile.TemporaryDirectory(prefix="yapp-tmux-")
         cls.addClassCleanup(cls.temp.cleanup)
         root = Path(cls.temp.name)
         cls.shim = root / "bin"
@@ -45,7 +45,7 @@ class TmuxIntegrationTests(unittest.TestCase):
 
         cls.url = f"http://127.0.0.1:{ports[0]}"
         env = {key: value for key, value in os.environ.items()
-               if not key.startswith("AGENTCHATTR_")}
+               if not key.startswith("YAPP_")}
         env["PATH"] = str(cls.shim) + os.pathsep + env.get("PATH", "")
         # All server, wrapper, and test tmux clients use this private socket tree.
         cls.tmux_dir = root / "tmux"
@@ -125,7 +125,7 @@ class TmuxIntegrationTests(unittest.TestCase):
         self.assertEqual(agent["registry_name"], "kilo-1")
 
         running = self.wait_state(workspace["id"], agent["agent_id"], "running")
-        tmux_name = f"agentchattr-{agent['agent_id']}"
+        tmux_name = f"yapp-{agent['agent_id']}"
         self.assertTrue(self.tmux_alive(tmux_name))
         self.assertIsNotNone(running["last_launch"]["pid"])
 

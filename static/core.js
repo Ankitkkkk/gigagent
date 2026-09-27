@@ -1,5 +1,5 @@
 /**
- * core.js -- EventHub for agentchattr
+ * core.js -- EventHub for yapp
  *
  * Tiny pub/sub hub. WebSocket events are emitted here so modules can
  * subscribe without touching the legacy switch statement in chat.js.

@@ -1,4 +1,4 @@
-/* agentchattr — WebSocket client */
+/* yapp — WebSocket client */
 
 // Session token injected by the server into the HTML page.
 // Sent with every API call and WebSocket connection to authenticate.
@@ -20,12 +20,12 @@ let unreadCount = 0;    // messages received while scrolled up
 let lastMessageDate = null;  // track date for dividers (general channel)
 let lastMessageDates = {};  // { channel: dateString } for per-channel dividers
 let soundEnabled = false;  // suppress sounds during initial history load
-let activeChannel = localStorage.getItem('agentchattr-channel') || 'general';
+let activeChannel = localStorage.getItem('yapp-channel') || 'general';
 let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
 let agentHats = {};  // { agent_name: svg_string }
 window.customRoles = [];  // saved custom roles from settings
-let colorOverrides = JSON.parse(localStorage.getItem('agentchattr-color-overrides') || '{}');
+let colorOverrides = JSON.parse(localStorage.getItem('yapp-color-overrides') || '{}');
 let schedulesList = [];  // array of schedule objects from server
 
 // Expose globals that extracted modules (sessions.js, jobs.js) read via window.*
@@ -78,7 +78,7 @@ const SOUND_OPTIONS = [
 ];
 const DEFAULT_SOUND = 'soft-chime';
 const CROSS_CHANNEL_SOUND = 'pluck';
-let soundPrefs = JSON.parse(localStorage.getItem('agentchattr-sounds') || '{}');
+let soundPrefs = JSON.parse(localStorage.getItem('yapp-sounds') || '{}');
 const soundCache = {};
 
 function playNotificationSound(sender) {
@@ -144,7 +144,7 @@ function buildSoundSettings() {
         select.addEventListener('change', () => {
             const val = select.value;
             soundPrefs[name] = val;
-            localStorage.setItem('agentchattr-sounds', JSON.stringify(soundPrefs));
+            localStorage.setItem('yapp-sounds', JSON.stringify(soundPrefs));
             if (val && val !== 'none') {
                 if (!soundCache[val]) soundCache[val] = new Audio(`/static/sounds/${val}.mp3`);
                 soundCache[val].currentTime = 0;
@@ -202,7 +202,7 @@ async function checkForUpdate() {
         const pill = document.getElementById('update-pill');
         if (!pill) return;
 
-        const dismissed = localStorage.getItem('agentchattr-dismissed-version');
+        const dismissed = localStorage.getItem('yapp-dismissed-version');
         if (data.state === 'current' || data.state === 'unknown' || dismissed === data.latest) {
             pill.classList.add('hidden');
             return;
@@ -220,7 +220,7 @@ async function checkForUpdate() {
 function dismissUpdate(e, version) {
     e.preventDefault();
     e.stopPropagation();
-    localStorage.setItem('agentchattr-dismissed-version', version);
+    localStorage.setItem('yapp-dismissed-version', version);
     const pill = document.getElementById('update-pill');
     if (pill) pill.classList.add('hidden');
 }
@@ -605,7 +605,7 @@ function handleServerEvent(event) {
         // Update active channel if we were on the renamed one
         if (activeChannel === event.old_name) {
             activeChannel = event.new_name;
-            localStorage.setItem('agentchattr-channel', event.new_name);
+            localStorage.setItem('yapp-channel', event.new_name);
             Store.set('activeChannel', event.new_name);
         }
         filterMessagesByChannel();
@@ -1603,7 +1603,7 @@ function showPillPopover(pillEl, opts) {
     // --- Color picker handlers ---
     const applyColorOverride = (color) => {
         colorOverrides[opts.name] = color;
-        localStorage.setItem('agentchattr-color-overrides', JSON.stringify(colorOverrides));
+        localStorage.setItem('yapp-color-overrides', JSON.stringify(colorOverrides));
         // Update pill color
         const pillToUpdate = document.getElementById(`status-${opts.name}`);
         if (pillToUpdate) pillToUpdate.style.setProperty('--agent-color', color);
@@ -1646,7 +1646,7 @@ function showPillPopover(pillEl, opts) {
         resetBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             delete colorOverrides[opts.name];
-            localStorage.setItem('agentchattr-color-overrides', JSON.stringify(colorOverrides));
+            localStorage.setItem('yapp-color-overrides', JSON.stringify(colorOverrides));
             const defaultColor = opts.color || '#888';
             const pillToUpdate = document.getElementById(`status-${opts.name}`);
             if (pillToUpdate) pillToUpdate.style.setProperty('--agent-color', defaultColor);
@@ -1968,7 +1968,7 @@ function applySettings(data) {
         // If active channel was deleted, switch to general
         if (!channelList.includes(activeChannel)) {
             activeChannel = 'general';
-            localStorage.setItem('agentchattr-channel', 'general');
+            localStorage.setItem('yapp-channel', 'general');
             Store.set('activeChannel', 'general');
             filterMessagesByChannel();
         }
@@ -2147,7 +2147,7 @@ async function exportHistory() {
         const blob = await resp.blob();
         const disposition = resp.headers.get('Content-Disposition') || '';
         const match = disposition.match(/filename="(.+?)"/);
-        const filename = match ? match[1] : 'agentchattr-export.zip';
+        const filename = match ? match[1] : 'yapp-export.zip';
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = filename;

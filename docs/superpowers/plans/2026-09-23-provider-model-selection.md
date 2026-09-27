@@ -16,11 +16,11 @@
 
 - Python 3.11 or newer; keep `mcp<2.0`.
 - Discovery: 10-second total deadline, 1 MiB combined output, 1000 models, 20 pages, two concurrent helper processes.
-- Cache: memory only, 60 seconds, maximum 64 contexts; Refresh bypasses agentchattr's cache.
+- Cache: memory only, 60 seconds, maximum 64 contexts; Refresh bypasses yapp's cache.
 - No inference requests, automatic agent launches, project hooks or MCP startup during discovery.
 - Preserve config.local.toml's add-only agent-entry semantics.
 - Model values are provider-native opaque strings; no hardcoded model catalog or cross-provider alias map.
-- Provider settings means no agentchattr typed override; saved raw flags/native resume behavior remain effective.
+- Provider settings means no yapp typed override; saved raw flags/native resume behavior remain effective.
 - A model is configurable on creation or while stopped, separately from the immutable role/personality profile.
 - No live user history, provider configuration mutation or paid sessions in automated validation.
 - Full-suite/PTY tests use temporary ports/data/uploads, removed inherited TMUX and a private TMUX_TMPDIR with registered cleanup.

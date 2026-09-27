@@ -6,7 +6,7 @@ import secrets
 import threading
 
 log = logging.getLogger(__name__)
-_RESTART_PARENT = '_AGENTCHATTR_RESTART_PARENT'
+_RESTART_PARENT = '_YAPP_RESTART_PARENT'
 
 
 class RestartError(ValueError):
@@ -100,7 +100,7 @@ class ServerLifecycle:
 
     def replace_process(self):
         if self.restart_requested:
-            log.info('Restarting agentchattr in place')
+            log.info('Restarting yapp in place')
             overrides = dict(self.restart_environment, **{_RESTART_PARENT: self.instance_id})
             previous = {key: os.environ.get(key) for key in overrides}
             os.environ.update(overrides)

@@ -288,7 +288,7 @@ class LauncherTests(unittest.TestCase):
         for flag in ("--no-attach", "--no-restart", "--cwd", "--identity-file", "--tmux-name",
                      "--data-dir", "--port", "--mcp-http-port", "--mcp-sse-port"):
             self.assertIn(flag, cmd)
-        self.assertEqual(cmd[cmd.index("--tmux-name") + 1], f"agentchattr-{ag['agent_id']}")
+        self.assertEqual(cmd[cmd.index("--tmux-name") + 1], f"yapp-{ag['agent_id']}")
         self.assertEqual(cmd[cmd.index("--session-id") + 1], ag["native_session_id"])
         self.assertTrue(kw["start_new_session"])
         ident = self.store.identity_path(ag["agent_id"])
@@ -364,7 +364,7 @@ class LauncherTests(unittest.TestCase):
         cmd, _ = self.popen_calls[0]
         env_items = [cmd[i + 1] for i, token in enumerate(cmd) if token == "--provider-env"]
         self.assertEqual(len(env_items), 1)
-        self.assertTrue(env_items[0].startswith("CODEX_INTERNAL_ORIGINATOR_OVERRIDE=agentchattr:" + ag["agent_id"] + ":"))
+        self.assertTrue(env_items[0].startswith("CODEX_INTERNAL_ORIGINATOR_OVERRIDE=yapp:" + ag["agent_id"] + ":"))
 
     def test_custom_name_and_name_in_use(self):
         ag = self.launcher.spawn(
@@ -377,7 +377,7 @@ class LauncherTests(unittest.TestCase):
 
     def test_stopped_agent_name_is_never_reused_by_a_new_spawn(self):
         ag = self.launcher.spawn(self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="none")
-        self.tmux.sessions.add(f"agentchattr-{ag['agent_id']}")
+        self.tmux.sessions.add(f"yapp-{ag['agent_id']}")
         self.launcher.on_heartbeat("claude-1", ready=True, pid=1)
         self.launcher.stop(self.ws["id"], ag["agent_id"])
         other = self.store.create("other")
@@ -527,14 +527,14 @@ class LauncherTests(unittest.TestCase):
     def test_tmux_presence_requires_exact_session_name(self):
         def run(command, **kwargs):
             target = command[-1]
-            names = {'agentchattr-ag_one-extra'}
+            names = {'yapp-ag_one-extra'}
             found = (target[1:] in names if target.startswith('=') else
                      any(name.startswith(target) for name in names))
             return subprocess.CompletedProcess(command, 0 if found else 1)
 
         with patch('workspace_launcher.subprocess.run', side_effect=run):
-            self.assertFalse(TmuxOps().has_session('agentchattr-ag_one'))
-            self.assertTrue(TmuxOps().has_session('agentchattr-ag_one-extra'))
+            self.assertFalse(TmuxOps().has_session('yapp-ag_one'))
+            self.assertTrue(TmuxOps().has_session('yapp-ag_one-extra'))
 
     def test_stale_literal_catchup_cas_never_enqueues(self):
         ag = self.launcher.spawn(
@@ -565,7 +565,7 @@ class LauncherTests(unittest.TestCase):
 
     def test_no_ready_within_timeout_terminates_launch(self):
         ag = self.launcher.spawn(self.ws["id"], provider="claude", cwd=str(self.proj), history_mode="none")
-        self.tmux.sessions.add(f"agentchattr-{ag['agent_id']}")
+        self.tmux.sessions.add(f"yapp-{ag['agent_id']}")
         ident = self.store.identity_path(ag["agent_id"])
         last_launch = dict(self.agent(ag)["last_launch"])
         last_launch["wrapper_pid"] = 555
@@ -575,7 +575,7 @@ class LauncherTests(unittest.TestCase):
         got = self.agent(ag)
         self.assertEqual(got["last_state"], "exited")
         self.assertIn("ready", got["last_error"])
-        self.assertIn(f"agentchattr-{ag['agent_id']}", self.tmux.killed)
+        self.assertIn(f"yapp-{ag['agent_id']}", self.tmux.killed)
         self.assertIn((555, 15), self.kills)
         self.assertIsNone(self.registry.get_instance("claude-1"))
         self.assertTrue(ident.exists())
@@ -585,7 +585,7 @@ class LauncherTests(unittest.TestCase):
         old_nonce = self.agent(ag)["last_launch"]["nonce"]
         old_launch = self.launcher.launch_context_for(self.agent(ag))
         write_rollout(self.home, "11111111-1111-4111-8111-111111111111", originator_for(old_launch), str(self.proj))
-        self.tmux.sessions.add(f"agentchattr-{ag['agent_id']}")
+        self.tmux.sessions.add(f"yapp-{ag['agent_id']}")
         self.launcher.stop(self.ws["id"], ag["agent_id"])
         self.launcher.resume(self.ws["id"], ag["agent_id"], fresh=True)
         self.launcher._after_ready(self.ws["id"], ag["agent_id"], old_nonce)
@@ -602,7 +602,7 @@ class LauncherTests(unittest.TestCase):
 
     def _running_claude(self, mode="none"):
         ag = self.launcher.spawn(self.ws["id"], provider="claude", cwd=str(self.proj), history_mode=mode)
-        self.tmux.sessions.add(f"agentchattr-{ag['agent_id']}")
+        self.tmux.sessions.add(f"yapp-{ag['agent_id']}")
         self.launcher.on_heartbeat("claude-1", ready=True, pid=1)
         return self.agent(ag)
 
@@ -612,7 +612,7 @@ class LauncherTests(unittest.TestCase):
         got = self.agent(ag)
         self.assertEqual(got["last_state"], "exited")
         self.assertEqual(got["native_session_id"], ag["native_session_id"])
-        self.assertIn(f"agentchattr-{ag['agent_id']}", self.tmux.killed)
+        self.assertIn(f"yapp-{ag['agent_id']}", self.tmux.killed)
         self.assertTrue(self.store.identity_path(ag["agent_id"]).exists())
 
     def test_resume_refusals(self):

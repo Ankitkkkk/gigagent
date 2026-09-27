@@ -29,8 +29,8 @@ class PrepareAttachTests(unittest.TestCase):
     def test_preflight_only_probes_exact_target(self):
         runner = Mock(return_value=subprocess.CompletedProcess([], 0))
         prepared = prepare_attach({'agent_id': 'ag_a', 'registry_name': 'claude-1'}, runner=runner)
-        self.assertEqual(prepared.target, 'agentchattr-ag_a')
-        runner.assert_called_once_with(['tmux', 'has-session', '-t', '=agentchattr-ag_a'],
+        self.assertEqual(prepared.target, 'yapp-ag_a')
+        runner.assert_called_once_with(['tmux', 'has-session', '-t', '=yapp-ag_a'],
                                        timeout=5, capture_output=True)
 
     def test_preflight_prepares_shell_hint_and_nested_mode(self):
@@ -54,7 +54,7 @@ class PrepareAttachTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 CLIError, r'^not running; resume with /resume claude-1$'):
             attach_agent({'agent_id': 'ag_a', 'registry_name': 'claude-1'}, runner=runner)
-        runner.assert_called_once_with(['tmux', 'has-session', '-t', '=agentchattr-ag_a'],
+        runner.assert_called_once_with(['tmux', 'has-session', '-t', '=yapp-ag_a'],
                                        timeout=5, capture_output=True)
 
     def test_preflight_rejects_non_tty_shell_before_probe(self):
@@ -76,7 +76,7 @@ class PrepareAttachTests(unittest.TestCase):
 class RunAttachTests(unittest.TestCase):
     def prepared(self, *, nested=False):
         return cli_workspaces.AttachTarget(
-            target='agentchattr-ag_a',
+            target='yapp-ag_a',
             label='claude-1',
             hint='/resume claude-1',
             nested=nested,
@@ -87,7 +87,7 @@ class RunAttachTests(unittest.TestCase):
         output = Mock()
         code = run_attach(self.prepared(), runner=runner, output=output)
         self.assertEqual(code, 7)
-        runner.assert_called_once_with(['tmux', 'attach', '-t', 'agentchattr-ag_a'])
+        runner.assert_called_once_with(['tmux', 'attach', '-t', 'yapp-ag_a'])
         output.assert_not_called()
 
     def test_nested_switch_emits_existing_switch_back_hint_after_success(self):
@@ -96,7 +96,7 @@ class RunAttachTests(unittest.TestCase):
         code = run_attach(self.prepared(nested=True), runner=runner, output=output)
         self.assertEqual(code, 0)
         runner.assert_called_once_with(
-            ['tmux', 'switch-client', '-t', 'agentchattr-ag_a'])
+            ['tmux', 'switch-client', '-t', 'yapp-ag_a'])
         output.assert_called_once_with('Switch back: tmux switch-client -l')
 
     def test_nested_switch_failure_preserves_return_code_without_hint(self):
@@ -105,7 +105,7 @@ class RunAttachTests(unittest.TestCase):
         code = run_attach(self.prepared(nested=True), runner=runner, output=output)
         self.assertEqual(code, 9)
         runner.assert_called_once_with(
-            ['tmux', 'switch-client', '-t', 'agentchattr-ag_a'])
+            ['tmux', 'switch-client', '-t', 'yapp-ag_a'])
         output.assert_not_called()
 
     def test_foreground_runner_errors_use_fixed_message(self):
@@ -128,11 +128,11 @@ class AttachFacadeTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 2)
         self.assertEqual(
             runner.call_args_list[0].args,
-            (['tmux', 'has-session', '-t', '=agentchattr-ag_a'],),
+            (['tmux', 'has-session', '-t', '=yapp-ag_a'],),
         )
         self.assertEqual(
             runner.call_args_list[1].args,
-            (['tmux', 'attach', '-t', 'agentchattr-ag_a'],),
+            (['tmux', 'attach', '-t', 'yapp-ag_a'],),
         )
 
 
