@@ -415,7 +415,7 @@ def build_parser(*, prog=None):
                         yes=False, agent=None, no_resume=False, provider=None,
                         session_name=None, target_session=None, plain=False,
                         role=None, personality=None,
-                        orchestrator_provider=None, provider_flags=None)
+                        orchestrator_provider=None, provider_flags=None, check=False)
 
     def options(target):
         target.add_argument("--url", default=argparse.SUPPRESS, help="Local server URL")
@@ -450,7 +450,8 @@ def build_parser(*, prog=None):
                     ("unread", "Show unread messages for session agents"),
                     ("retry", "Retry unread delivery for an agent"),
                     ("history", "Change an agent history mode"),
-                    ("archive", "Archive a terminal session")]
+                    ("archive", "Archive a terminal session"),
+                    ("update", "Check for and install yapp updates")]
     parser.json_commands = tuple(command for command, _ in command_help
                                  if command not in ("chat", "attach"))
     for command, help_text in command_help:
@@ -504,6 +505,11 @@ def build_parser(*, prog=None):
             subparser.add_argument("target_session", metavar="SESSION")
             subparser.add_argument("--yes", action="store_true",
                                    default=argparse.SUPPRESS)
+        elif command == "update":
+            subparser.add_argument("--check", action="store_true", default=argparse.SUPPRESS,
+                                   help="Only report whether an update is available")
+            subparser.add_argument("--yes", action="store_true", default=argparse.SUPPRESS,
+                                   help="Install without asking")
     return parser
 
 
@@ -513,6 +519,14 @@ def main(argv=None, *, prog=None):
     args.command = args.command or "chat"
     if args.plain and args.command != "chat":
         parser.error("--plain is only available for chat")
+    if args.command == "update":
+        from cli_update import run_update
+        with redirect_stdout(sys.stderr):
+            config = load_config()
+        code = run_update(args, config)
+        if code:
+            parser.exit(code)
+        return
     json_unavailable = (f"--json is not available for {args.command}; available for "
                         + ", ".join(parser.json_commands))
     if not 1 <= args.history <= 10000:
