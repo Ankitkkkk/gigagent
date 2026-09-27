@@ -46,22 +46,22 @@ python3 -m venv .venv
 .venv/bin/python yapp.py
 ```
 
-Or run `./install.sh` to set up `.venv` and a `yapp` (or `goon`) command.
+Or run `./install.sh` to set up `.venv` and a shell command with a name you choose (e.g. `yapp` or `goon`).
 
 Interactive startup can start the local server automatically when tmux is
 available. Select or create a session, choose **Add agent**, and enter the
 provider, name, and project directory. Use **F1** for Help.
 
-See [INSTALLATION.md](INSTALLATION.md) for system dependencies, a `yapp`
-(or `goon`) shell command, manual server startup, Windows limitations, and instructions an
+See [INSTALLATION.md](INSTALLATION.md) for system dependencies, a shell
+command named as you choose (e.g. `yapp` or `goon`), manual server startup, Windows limitations, and instructions an
 AI agent can follow to install and verify the application. Installation uses
 this source checkout; release ZIPs from `build_release.py` do not include the TUI.
 
 ## TUI guide
 
 **yapp** includes a full-screen terminal UI and shell client.
-See [INSTALLATION.md](INSTALLATION.md) for installation steps, a `yapp` or `goon`
-command, and a checklist an AI agent can follow on a new system.
+See [INSTALLATION.md](INSTALLATION.md) for installation steps, a shell command
+named as you choose, and a checklist an AI agent can follow on a new system.
 
 Yapp also works from a terminal without opening a browser. After setting
 up the Python environment, run these commands from the source repository:

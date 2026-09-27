@@ -83,14 +83,15 @@ constraint: the server uses `mcp.server.fastmcp`.
 No activation is required when using `.venv/bin/python` explicitly. The existing
 `python cli.py` entry point remains compatible with the same arguments.
 
-## 3. Make a `yapp` or `goon` command (Linux, macOS, WSL)
+## 3. Make a shell command (Linux, macOS, WSL)
 
-The application is called **yapp**; the shell command can be named either `yapp`
-or `goon`. Run the installer from the repository root:
+The application is called **yapp**; you choose the shell command's name during
+installation (for example `yapp` or `goon`). Run the installer from the
+repository root:
 
 ```sh
-./install.sh                # asks which name to use (default: yapp)
-./install.sh --name goon    # or choose non-interactively
+./install.sh                # asks for the command name (default: yapp)
+./install.sh --name goon    # or pass any name non-interactively
 ```
 
 It creates `.venv` if needed, installs `requirements-cli.txt`, and writes a
@@ -98,7 +99,7 @@ launcher to `~/.local/bin/<name>` (override with `YAPP_BIN_DIR`) that uses the
 checkout's virtual environment, so users do not need to activate it. Help text
 shows the chosen name. The installer only replaces launchers it created itself;
 if an unrelated command already exists at that path, it stops without
-overwriting it. Run it again with the other name to install both commands.
+overwriting it. Run it again with another name to add a second command.
 
 Ensure `~/.local/bin` is on `PATH`:
 
@@ -225,7 +226,7 @@ Saving a higher limit does not unpause an already paused conversation. Send
 
 | Symptom | Check or action |
 | --- | --- |
-| `yapp` / `goon`: command not found | Check the launcher and `~/.local/bin` in PATH, or use `.venv/bin/python yapp.py` directly. |
+| `<name>`: command not found | Check the launcher and `~/.local/bin` in PATH, or use `.venv/bin/python yapp.py` directly. |
 | Missing Python modules | Install `requirements-cli.txt` using the exact virtual environment that launches yapp; run `pip check`. |
 | Interactive chat requires a terminal | Launch in a real terminal; use `read`, `status`, or other shell commands for scripts. |
 | Full-screen unavailable | Check terminal size and TERM; try `yapp --plain` for the scrolling client. |

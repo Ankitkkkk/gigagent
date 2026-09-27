@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# yapp installer: sets up .venv and a shell command named "yapp" or "goon".
+# yapp installer: sets up .venv and a shell command with a name you choose.
 #
 #   ./install.sh                 # asks for the command name (default: yapp)
-#   ./install.sh --name goon     # non-interactive
+#   ./install.sh --name goon     # non-interactive; any valid command name works
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,7 +10,7 @@ BIN_DIR="${YAPP_BIN_DIR:-$HOME/.local/bin}"
 MARKER="# yapp launcher"
 NAME=""
 
-usage() { echo "usage: ./install.sh [--name yapp|goon]"; }
+usage() { echo "usage: ./install.sh [--name NAME]   (e.g. yapp, goon)"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -23,14 +23,14 @@ done
 
 if [ -z "$NAME" ]; then
     if [ -t 0 ]; then
-        read -r -p "Command name to install [yapp/goon] (default: yapp): " NAME
+        read -r -p "Command name to install, e.g. yapp or goon (default: yapp): " NAME
     fi
     NAME="${NAME:-yapp}"
 fi
-case "$NAME" in
-    yapp|goon) ;;
-    *) echo "Command name must be 'yapp' or 'goon', got '$NAME'." >&2; exit 2 ;;
-esac
+if ! [[ "$NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid command name '$NAME': use letters, digits, '.', '_' or '-' (not starting with '-' or '.')." >&2
+    exit 2
+fi
 
 PYTHON="${PYTHON:-python3}"
 if ! "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then

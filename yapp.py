@@ -7,5 +7,5 @@ from cli import main
 
 
 if __name__ == '__main__':
-    # install.sh sets YAPP_COMMAND so help text matches the chosen command (yapp or goon).
+    # install.sh sets YAPP_COMMAND so help text matches the chosen command (e.g. yapp or goon).
     main(prog=os.environ.get('YAPP_COMMAND') or 'yapp')
