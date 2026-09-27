@@ -142,3 +142,91 @@ def check(*, data_dir, config=None, force=False, explicit=False, current=None,
         result[key] = str(record.get(key, ''))
     result['state'] = compare(current, result['latest'])
     return result
+
+
+_VERSION_PROBE = 'from importlib.metadata import version; print(version("yapp"))'
+
+
+def install_method(*, prefix=sys.prefix, root=ROOT, which=shutil.which):
+    if (Path(root) / 'pyproject.toml').exists():
+        return 'checkout'
+    prefix = Path(prefix)
+    if (prefix / MARKER).is_file():
+        return 'installer'
+    if prefix.resolve().parts[-3:] == ('pipx', 'venvs', 'yapp') and which('pipx'):
+        return 'pipx'
+    return 'unknown'
+
+
+def manual_instructions(method):
+    if method == 'checkout':
+        return 'This is a source checkout: run git pull, then restart yapp.'
+    if method == 'unknown':
+        return f'Update with: {INSTALLER_COMMAND}'
+    return ''
+
+
+def _acquire_lock(path, now):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                if now() - path.stat().st_mtime > APPLY_TIMEOUT + 60:
+                    path.unlink()  # A crashed update left it behind.
+                    continue
+            except OSError:
+                pass
+            return None
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(str(os.getpid()))
+        return path
+    return None
+
+
+def _tail(text, lines=3):
+    return ' '.join(line.strip() for line in str(text or '').strip().splitlines()[-lines:])
+
+
+def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess.run,
+          which=shutil.which, environ=os.environ, now=time.time):
+    """Install `release` for this install method. Never raises for expected failures."""
+    if method not in ('installer', 'pipx'):
+        return {'ok': False, 'state': 'unsupported', 'version': '',
+                'message': manual_instructions(method)}
+    archive = environ.get('YAPP_UPDATE_ARCHIVE') or release['archive_url']
+    if method == 'installer':
+        commands = [[python, '-m', 'pip', 'install', '-q', '--upgrade', archive],
+                    [python, '-m', 'pip', 'install', '-q', '--force-reinstall', '--no-deps', archive]]
+        manual = f'Update manually with: {INSTALLER_COMMAND}'
+    else:
+        commands = [[which('pipx') or 'pipx', 'install', '--force', archive]]
+        manual = f'Update manually with: pipx install --force {archive}'
+
+    def failed(message):
+        return {'ok': False, 'state': 'failed', 'version': '', 'message': f'{message} {manual}'}
+
+    lock = _acquire_lock(Path(data_dir) / LOCK_FILE, now)
+    if lock is None:
+        return {'ok': False, 'state': 'locked', 'version': '',
+                'message': 'Another yapp update is already running.'}
+    try:
+        for command in commands:
+            try:
+                result = runner(command, capture_output=True, text=True, timeout=APPLY_TIMEOUT)
+            except (OSError, subprocess.SubprocessError) as error:
+                return failed(f'{type(error).__name__} while installing yapp {release["latest"]}.')
+            if result.returncode:
+                return failed(f'Install failed: {_tail(result.stderr or result.stdout)}.')
+        try:
+            probe = runner([python, '-c', _VERSION_PROBE], capture_output=True, text=True, timeout=60)
+            version = probe.stdout.strip() if probe.returncode == 0 else ''
+        except (OSError, subprocess.SubprocessError):
+            version = ''
+        if compare(version, release['latest']) != 'current' or compare(release['latest'], version) != 'current':
+            return failed(f'Installed version is {version or "unknown"}, expected {release["latest"]}.')
+        return {'ok': True, 'state': 'installed', 'version': version,
+                'message': f'Installed yapp {version}.'}
+    finally:
+        lock.unlink(missing_ok=True)

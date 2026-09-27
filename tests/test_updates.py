@@ -2,10 +2,12 @@
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import updates
 
@@ -159,6 +161,111 @@ class ConfigMergeTests(unittest.TestCase):
             Path(root, 'config.toml').write_text('[server]\nport = 1\n')
             Path(root, 'config.local.toml').write_text('[updates]\nauto = false\n')
             self.assertEqual(load_config(Path(root))['updates'], {'auto': False})
+
+
+CHECKED = {'tag': 'v0.6.0', 'latest': '0.6.0',
+           'archive_url': 'https://github.com/Ankitkkkk/yapp/archive/refs/tags/v0.6.0.zip'}
+
+
+class InstallMethodTests(unittest.TestCase):
+    def test_methods(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            code, venv = tmp / 'code', tmp / 'venv'
+            code.mkdir(); venv.mkdir()
+            self.assertEqual(updates.install_method(prefix=venv, root=code, which=lambda _: None), 'unknown')
+            (venv / updates.MARKER).write_text('{}')
+            self.assertEqual(updates.install_method(prefix=venv, root=code, which=lambda _: None), 'installer')
+            (code / 'pyproject.toml').write_text('')
+            self.assertEqual(updates.install_method(prefix=venv, root=code, which=lambda _: None), 'checkout')
+            pipx = tmp / 'share' / 'pipx' / 'venvs' / 'yapp'
+            pipx.mkdir(parents=True)
+            code2 = tmp / 'code2'; code2.mkdir()
+            self.assertEqual(updates.install_method(prefix=pipx, root=code2, which=lambda _: '/bin/pipx'), 'pipx')
+            self.assertEqual(updates.install_method(prefix=pipx, root=code2, which=lambda _: None), 'unknown')
+
+    def test_manual_instructions(self):
+        self.assertIn('git pull', updates.manual_instructions('checkout'))
+        self.assertIn(updates.INSTALLER_COMMAND, updates.manual_instructions('unknown'))
+
+
+class ApplyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name)
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def runner(self, version='0.6.0', fail_at=None):
+        def run(command, **kwargs):
+            self.calls.append(command)
+            self.assertNotIn('shell', kwargs)
+            if fail_at is not None and len(self.calls) - 1 == fail_at:
+                return SimpleNamespace(returncode=1, stdout='', stderr='line1\nERROR: no space left')
+            out = version + '\n' if command[1:3] == ['-c', updates._VERSION_PROBE] else ''
+            return SimpleNamespace(returncode=0, stdout=out, stderr='')
+        return run
+
+    def test_installer_commands_and_verification(self):
+        result = updates.apply(CHECKED, method='installer', data_dir=self.data,
+                               python='/venv/bin/python', runner=self.runner(), environ={})
+        self.assertEqual(result['state'], 'installed')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['version'], '0.6.0')
+        archive = CHECKED['archive_url']
+        self.assertEqual(self.calls[:2], [
+            ['/venv/bin/python', '-m', 'pip', 'install', '-q', '--upgrade', archive],
+            ['/venv/bin/python', '-m', 'pip', 'install', '-q', '--force-reinstall', '--no-deps', archive]])
+        self.assertFalse((self.data / updates.LOCK_FILE).exists())
+
+    def test_pipx_command_and_archive_override(self):
+        result = updates.apply(CHECKED, method='pipx', data_dir=self.data, python='/p/bin/python',
+                               runner=self.runner(), which=lambda _: '/usr/bin/pipx',
+                               environ={'YAPP_UPDATE_ARCHIVE': '/tmp/yapp.zip'})
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.calls[0], ['/usr/bin/pipx', 'install', '--force', '/tmp/yapp.zip'])
+
+    def test_failure_reports_tail_and_manual_command(self):
+        result = updates.apply(CHECKED, method='installer', data_dir=self.data,
+                               runner=self.runner(fail_at=0), environ={})
+        self.assertEqual(result['state'], 'failed')
+        self.assertIn('no space left', result['message'])
+        self.assertIn(updates.INSTALLER_COMMAND, result['message'])
+        self.assertFalse((self.data / updates.LOCK_FILE).exists())
+
+    def test_version_mismatch_is_failure(self):
+        result = updates.apply(CHECKED, method='installer', data_dir=self.data,
+                               runner=self.runner(version='0.5.0'), environ={})
+        self.assertEqual(result['state'], 'failed')
+        self.assertIn('0.5.0', result['message'])
+
+    def test_runner_exception_is_failure(self):
+        def boom(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, 600)
+        result = updates.apply(CHECKED, method='installer', data_dir=self.data, runner=boom, environ={})
+        self.assertEqual(result['state'], 'failed')
+        self.assertIn('TimeoutExpired', result['message'])
+
+    def test_unsupported_methods(self):
+        for method in ('checkout', 'unknown'):
+            result = updates.apply(CHECKED, method=method, data_dir=self.data, runner=self.runner())
+            self.assertEqual(result['state'], 'unsupported')
+        self.assertEqual(self.calls, [])
+
+    def test_lock_prevents_second_update_and_stale_lock_is_replaced(self):
+        lock = self.data / updates.LOCK_FILE
+        lock.write_text('123')
+        result = updates.apply(CHECKED, method='installer', data_dir=self.data,
+                               runner=self.runner(), environ={})
+        self.assertEqual(result['state'], 'locked')
+        self.assertEqual(self.calls, [])
+        old = lock.stat().st_mtime - updates.APPLY_TIMEOUT - 120
+        os.utime(lock, (old, old))
+        result = updates.apply(CHECKED, method='installer', data_dir=self.data,
+                               runner=self.runner(), environ={})
+        self.assertEqual(result['state'], 'installed')
 
 
 if __name__ == '__main__':
