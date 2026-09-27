@@ -207,7 +207,10 @@ def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess
     def failed(message):
         return {'ok': False, 'state': 'failed', 'version': '', 'message': f'{message} {manual}'}
 
-    lock = _acquire_lock(Path(data_dir) / LOCK_FILE, now)
+    try:
+        lock = _acquire_lock(Path(data_dir) / LOCK_FILE, now)
+    except OSError as error:
+        return failed(f'Could not create the update lock in {data_dir}: {error.strerror or error}.')
     if lock is None:
         return {'ok': False, 'state': 'locked', 'version': '',
                 'message': 'Another yapp update is already running.'}

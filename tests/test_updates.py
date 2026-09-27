@@ -267,6 +267,18 @@ class ApplyTests(unittest.TestCase):
                                runner=self.runner(), environ={})
         self.assertEqual(result['state'], 'installed')
 
+    def test_unwritable_data_dir_is_failure(self):
+        # Make data_dir a path under a regular file, so mkdir raises NotADirectoryError
+        fake_file = self.data / 'fakefile'
+        fake_file.write_text('x')
+        unwritable_data_dir = fake_file / 'subdir'
+        result = updates.apply(CHECKED, method='installer', data_dir=unwritable_data_dir,
+                               runner=self.runner(), environ={})
+        self.assertEqual(result['state'], 'failed')
+        self.assertIn('Could not create the update lock', result['message'])
+        self.assertIn(updates.INSTALLER_COMMAND, result['message'])
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == '__main__':
     unittest.main()
