@@ -106,8 +106,8 @@ class InjectTransportTests(unittest.TestCase):
     """Real tmux, real pty, raw-mode reader pane."""
 
     def _run(self, mode: str, payload: str, delay: float = 1.0):
-        session = f"agentchattr-test-inject-{os.getpid()}-{mode}"
-        tmp = tempfile.mkdtemp(prefix="agentchattr-inject-")
+        session = f"yapp-test-inject-{os.getpid()}-{mode}"
+        tmp = tempfile.mkdtemp(prefix="yapp-inject-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         reader = os.path.join(tmp, "reader.py")
         with open(reader, "w", encoding="utf-8") as f:
@@ -153,12 +153,12 @@ class InjectTransportTests(unittest.TestCase):
         self.assertIs(ok, True, "inject must report delivery")
 
     def test_missing_target_returns_false_and_leaves_no_buffer(self):
-        ok = wrapper_unix.inject("hello", tmux_session="agentchattr-test-no-such-session",
+        ok = wrapper_unix.inject("hello", tmux_session="yapp-test-no-such-session",
                                  delay=0.1)
         self.assertIs(ok, False)
         result = subprocess.run(["tmux", "list-buffers", "-F", "#{buffer_name}"],
                                 capture_output=True, text=True)
-        leftovers = [b for b in result.stdout.split() if b.startswith("agentchattr-inject-")]
+        leftovers = [b for b in result.stdout.split() if b.startswith("yapp-inject-")]
         self.assertEqual(leftovers, [], "a failed injection must not leak its paste buffer")
 
 

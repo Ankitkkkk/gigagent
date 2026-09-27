@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Start agentchattr (web UI + MCP server).",
+        description="Start yapp (web UI + MCP server).",
         epilog="Flags override config.toml for this invocation. The same flags "
                "are also accepted by wrapper.py and wrapper_api.py so a launcher "
                "can isolate per-project instances by passing matching values to "
@@ -74,11 +74,11 @@ def main():
     # Keep this instance's endpoints and storage on reload, including values
     # originally supplied by config.toml rather than command-line overrides.
     lifecycle.restart_environment = {
-        'AGENTCHATTR_PORT': str(config.get('server', {}).get('port', 8300)),
-        'AGENTCHATTR_MCP_HTTP_PORT': str(config.get('mcp', {}).get('http_port', 8200)),
-        'AGENTCHATTR_MCP_SSE_PORT': str(config.get('mcp', {}).get('sse_port', 8201)),
-        'AGENTCHATTR_DATA_DIR': config['server']['data_dir'],
-        'AGENTCHATTR_UPLOAD_DIR': str(Path(config.get('images', {}).get('upload_dir', './uploads')).resolve()),
+        'YAPP_PORT': str(config.get('server', {}).get('port', 8300)),
+        'YAPP_MCP_HTTP_PORT': str(config.get('mcp', {}).get('http_port', 8200)),
+        'YAPP_MCP_SSE_PORT': str(config.get('mcp', {}).get('sse_port', 8201)),
+        'YAPP_DATA_DIR': config['server']['data_dir'],
+        'YAPP_UPLOAD_DIR': str(Path(config.get('images', {}).get('upload_dir', './uploads')).resolve()),
     }
 
     # Share stores with the MCP bridge
@@ -181,7 +181,7 @@ def main():
     # --- Security: warn if binding to a non-localhost address ---
     if host not in ("127.0.0.1", "localhost", "::1"):
         print(f"\n  !! SECURITY WARNING — binding to {host} !!")
-        print("  This exposes agentchattr to your local network.")
+        print("  This exposes yapp to your local network.")
         print()
         print("  Risks:")
         print("  - No TLS: traffic (including session token) is plaintext")
@@ -203,7 +203,7 @@ def main():
                 print("  Aborted.\n")
                 sys.exit(1)
 
-    print(f"\n  agentchattr")
+    print(f"\n  yapp")
     print(f"  Web UI:  http://{host}:{port}")
     print(f"  MCP HTTP: http://{host}:{http_port}/mcp  (Claude, Codex)")
     print(f"  MCP SSE:  http://{host}:{sse_port}/sse   (Gemini)")

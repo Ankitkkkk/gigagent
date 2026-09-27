@@ -195,7 +195,7 @@ class WorkspaceTmuxIntegrationTests(IsolatedCliServer):
         def current():
             return next(item for item in self.api.get(ws['id'])['agents'] if item['agent_id'] == agent_id)
         self.poll(lambda: current()['last_state'] == 'running')
-        target = current().get('tmux_session') or 'agentchattr-' + agent_id
+        target = current().get('tmux_session') or 'yapp-' + agent_id
         self.assertTrue(self.tmux_exists(target))
         no_unread = self.command('retry', 'stub-reviewer', '--session', ws['id'], '--json')
         self.assertEqual(no_unread.returncode, 1)
@@ -240,7 +240,7 @@ class LogExcerptTests(unittest.TestCase):
 
 class ServerStartupIntegrationTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='agentchattr-cli-start-')
+        self.temp = tempfile.TemporaryDirectory(prefix='yapp-cli-start-')
         self.addCleanup(self.temp.cleanup)
         self.env = isolated_environment(self.temp.name)
         self.ports = temporary_ports()
@@ -279,28 +279,28 @@ class ServerStartupIntegrationTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('tmux') and sys.platform != 'win32', 'Requires Unix tmux')
     def test_autostart_uses_five_flags_with_preexisting_tmux_environment(self):
         stale_ports = temporary_ports()
-        stale = dict(self.env, AGENTCHATTR_PORT=str(stale_ports[0]),
-                     AGENTCHATTR_MCP_HTTP_PORT=str(stale_ports[1]),
-                     AGENTCHATTR_MCP_SSE_PORT=str(stale_ports[2]),
-                     AGENTCHATTR_DATA_DIR=str(Path(self.temp.name) / 'stale data'),
-                     AGENTCHATTR_UPLOAD_DIR=str(Path(self.temp.name) / 'stale uploads'))
+        stale = dict(self.env, YAPP_PORT=str(stale_ports[0]),
+                     YAPP_MCP_HTTP_PORT=str(stale_ports[1]),
+                     YAPP_MCP_SSE_PORT=str(stale_ports[2]),
+                     YAPP_DATA_DIR=str(Path(self.temp.name) / 'stale data'),
+                     YAPP_UPLOAD_DIR=str(Path(self.temp.name) / 'stale uploads'))
         # Register cleanup before launching or waiting. TMUX was removed above.
         self.addCleanup(subprocess.run, ['tmux', 'kill-server'], env=stale,
                         capture_output=True, timeout=5)
         result = subprocess.run(['tmux', 'new-session', '-d', '-s', 'fixture-keeper',
                                  'exec /bin/sleep 120'], env=stale, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        changed = dict(self.env, AGENTCHATTR_PORT=str(self.ports[0]),
-                       AGENTCHATTR_MCP_HTTP_PORT=str(self.ports[1]),
-                       AGENTCHATTR_MCP_SSE_PORT=str(self.ports[2]),
-                       AGENTCHATTR_DATA_DIR=str(self.data), AGENTCHATTR_UPLOAD_DIR=str(self.uploads))
+        changed = dict(self.env, YAPP_PORT=str(self.ports[0]),
+                       YAPP_MCP_HTTP_PORT=str(self.ports[1]),
+                       YAPP_MCP_SSE_PORT=str(self.ports[2]),
+                       YAPP_DATA_DIR=str(self.data), YAPP_UPLOAD_DIR=str(self.uploads))
         output = []
         with patch.dict(os.environ, changed, clear=True):
             config = load_config()
             with patch('cli_workspace_chat.subprocess.run', wraps=subprocess.run) as run:
                 status = ensure_server(self.url, explicit_url=False, config=config, output=output.append)
             self.assertEqual(Path(status['data_dir']), self.data)
-            self.assertIn('Started server in tmux session agentchattr-server.', output)
+            self.assertIn('Started server in tmux session yapp-server.', output)
             launches = [call.args[0] for call in run.call_args_list
                         if call.args[0][:2] == ['tmux', 'new-session']]
             self.assertEqual(len(launches), 1)

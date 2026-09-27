@@ -1,5 +1,5 @@
 @echo off
-REM agentchattr - starts server (if not running) + CodeBuddy wrapper
+REM yapp - starts server (if not running) + CodeBuddy wrapper
 REM Usage: start_codebuddy.bat
 REM Requires the codebuddy CLI on PATH. First launch prompts interactive login.
 cd /d "%~dp0.."
@@ -25,7 +25,7 @@ if %errorlevel% neq 0 (
 REM Start server if not already running, then wait for it
 netstat -ano | findstr :8300 | findstr LISTENING >nul 2>&1
 if %errorlevel% neq 0 (
-    start "agentchattr server" cmd /c "python run.py"
+    start "yapp server" cmd /c "python run.py"
 )
 :wait_server
 netstat -ano | findstr :8300 | findstr LISTENING >nul 2>&1

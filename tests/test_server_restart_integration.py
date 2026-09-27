@@ -36,7 +36,7 @@ from tests._tui_harness import application_harness
 class ServerRestartIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory(prefix="agentchattr-restart-test-")
+        cls.temp = tempfile.TemporaryDirectory(prefix="yapp-restart-test-")
         cls.addClassCleanup(cls.temp.cleanup)
         root = Path(cls.temp.name)
         cls.log_path = root / "server.log"
@@ -154,7 +154,7 @@ class ServerRestartIntegrationTests(unittest.TestCase):
                            (row.get("last_launch") or {}).get("startup_delivery_done")) else None
 
         ready_agent = self.poll(ready_agent)
-        tmux_name = "agentchattr-" + agent["agent_id"]
+        tmux_name = "yapp-" + agent["agent_id"]
         self.assertEqual(subprocess.run(["tmux", "has-session", "-t", "=" + tmux_name],
                                        env=self.env, capture_output=True, timeout=5).returncode, 0)
         pane_pid = subprocess.run(

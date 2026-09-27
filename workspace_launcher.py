@@ -126,7 +126,7 @@ class WorkspaceLauncher:
         self.on_startup_ready = None
 
     def tmux_name(self, agent: dict) -> str:
-        return f"agentchattr-{agent['agent_id']}"
+        return f"yapp-{agent['agent_id']}"
 
     def _adapter(self, provider: str):
         return self._adapters(provider, self.config.get("agents", {}).get(provider, {}))

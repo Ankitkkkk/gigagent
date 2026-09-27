@@ -151,14 +151,14 @@ class CodexAdapterTests(unittest.TestCase):
     def test_launch_env_is_launch_specific(self):
         l1 = make_launch(agent_id="ag_1", nonce="aaa")
         l2 = make_launch(agent_id="ag_1", nonce="bbb")
-        self.assertEqual(self.a.launch_env(l1), {ORIGINATOR_ENV: "agentchattr:ag_1:aaa"})
+        self.assertEqual(self.a.launch_env(l1), {ORIGINATOR_ENV: "yapp:ag_1:aaa"})
         self.assertNotEqual(self.a.launch_env(l1), self.a.launch_env(l2))
 
     def test_discovers_exactly_its_own_rollout(self):
         launch = make_launch(agent_id="ag_1", nonce="aaa", cwd="/proj")
         write_rollout(self.home, "11111111-1111-4111-8111-111111111111", originator_for(launch), "/proj")
         write_rollout(self.home, "22222222-2222-4222-8222-222222222222", "codex-tui", "/proj")       # unrelated, same cwd
-        write_rollout(self.home, "33333333-3333-4333-8333-333333333333", "agentchattr:ag_1:old", "/proj")  # earlier launch
+        write_rollout(self.home, "33333333-3333-4333-8333-333333333333", "yapp:ag_1:old", "/proj")  # earlier launch
         self.assertEqual(self.a.discover_session_id(launch, timeout=10),
                          "11111111-1111-4111-8111-111111111111")
 

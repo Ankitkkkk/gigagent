@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# agentchattr - starts server (if not running) + GitHub Copilot CLI wrapper
+# yapp - starts server (if not running) + GitHub Copilot CLI wrapper
 # Usage: sh start_copilot.sh
 # Requires the copilot CLI on PATH. First launch prompts GitHub login.
 cd "$(dirname "$0")/.."

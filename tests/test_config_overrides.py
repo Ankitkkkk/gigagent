@@ -1,4 +1,4 @@
-"""Tests for AGENTCHATTR_* env var overrides in config_loader.
+"""Tests for YAPP_* env var overrides in config_loader.
 
 These tests exercise load_config() directly (not through run.py) because
 wrappers also call load_config(), and the core guarantee is that the
@@ -18,11 +18,11 @@ import config_loader  # noqa: E402
 
 
 ENV_VARS = [
-    "AGENTCHATTR_DATA_DIR",
-    "AGENTCHATTR_PORT",
-    "AGENTCHATTR_MCP_HTTP_PORT",
-    "AGENTCHATTR_MCP_SSE_PORT",
-    "AGENTCHATTR_UPLOAD_DIR",
+    "YAPP_DATA_DIR",
+    "YAPP_PORT",
+    "YAPP_MCP_HTTP_PORT",
+    "YAPP_MCP_SSE_PORT",
+    "YAPP_UPLOAD_DIR",
 ]
 
 
@@ -46,55 +46,55 @@ class ConfigOverrideTests(unittest.TestCase):
         self.assertEqual(config["server"]["data_dir"], "./data")
 
     def test_port_env_var_overrides_config(self):
-        os.environ["AGENTCHATTR_PORT"] = "8310"
+        os.environ["YAPP_PORT"] = "8310"
         config = config_loader.load_config(ROOT)
         self.assertEqual(config["server"]["port"], 8310)
 
     def test_mcp_ports_env_vars_override_config(self):
-        os.environ["AGENTCHATTR_MCP_HTTP_PORT"] = "8210"
-        os.environ["AGENTCHATTR_MCP_SSE_PORT"] = "8211"
+        os.environ["YAPP_MCP_HTTP_PORT"] = "8210"
+        os.environ["YAPP_MCP_SSE_PORT"] = "8211"
         config = config_loader.load_config(ROOT)
         self.assertEqual(config["mcp"]["http_port"], 8210)
         self.assertEqual(config["mcp"]["sse_port"], 8211)
 
     def test_data_dir_absolute_path_preserved(self):
-        abs_path = str(Path("/tmp/test-agentchattr").resolve())
-        os.environ["AGENTCHATTR_DATA_DIR"] = abs_path
+        abs_path = str(Path("/tmp/test-yapp").resolve())
+        os.environ["YAPP_DATA_DIR"] = abs_path
         config = config_loader.load_config(ROOT)
         self.assertEqual(config["server"]["data_dir"], abs_path)
 
     def test_data_dir_relative_path_resolves_to_cwd(self):
-        # Relative path should resolve against CWD, not agentchattr install
-        os.environ["AGENTCHATTR_DATA_DIR"] = "./my-project-data"
+        # Relative path should resolve against CWD, not yapp install
+        os.environ["YAPP_DATA_DIR"] = "./my-project-data"
         config = config_loader.load_config(ROOT)
         expected = str((Path.cwd() / "my-project-data").resolve())
         self.assertEqual(config["server"]["data_dir"], expected)
 
     def test_upload_dir_relative_path_resolves_to_cwd(self):
-        os.environ["AGENTCHATTR_UPLOAD_DIR"] = "./my-uploads"
+        os.environ["YAPP_UPLOAD_DIR"] = "./my-uploads"
         config = config_loader.load_config(ROOT)
         expected = str((Path.cwd() / "my-uploads").resolve())
         self.assertEqual(config["images"]["upload_dir"], expected)
 
     def test_empty_env_var_does_not_override(self):
-        os.environ["AGENTCHATTR_PORT"] = ""
+        os.environ["YAPP_PORT"] = ""
         config = config_loader.load_config(ROOT)
         # Empty value is ignored, default stays
         self.assertEqual(config["server"]["port"], 8300)
 
     def test_invalid_int_env_var_warns_and_keeps_default(self):
-        os.environ["AGENTCHATTR_PORT"] = "not-a-number"
+        os.environ["YAPP_PORT"] = "not-a-number"
         config = config_loader.load_config(ROOT)
         self.assertEqual(config["server"]["port"], 8300)
 
     def test_all_overrides_applied_together(self):
-        abs_data = str(Path("/tmp/proj-a/.agentchattr").resolve())
+        abs_data = str(Path("/tmp/proj-a/.yapp").resolve())
         abs_uploads = str(Path("/tmp/proj-a/uploads").resolve())
-        os.environ["AGENTCHATTR_DATA_DIR"] = abs_data
-        os.environ["AGENTCHATTR_PORT"] = "8310"
-        os.environ["AGENTCHATTR_MCP_HTTP_PORT"] = "8210"
-        os.environ["AGENTCHATTR_MCP_SSE_PORT"] = "8211"
-        os.environ["AGENTCHATTR_UPLOAD_DIR"] = abs_uploads
+        os.environ["YAPP_DATA_DIR"] = abs_data
+        os.environ["YAPP_PORT"] = "8310"
+        os.environ["YAPP_MCP_HTTP_PORT"] = "8210"
+        os.environ["YAPP_MCP_SSE_PORT"] = "8211"
+        os.environ["YAPP_UPLOAD_DIR"] = abs_uploads
         config = config_loader.load_config(ROOT)
         self.assertEqual(config["server"]["data_dir"], abs_data)
         self.assertEqual(config["server"]["port"], 8310)
@@ -103,7 +103,7 @@ class ConfigOverrideTests(unittest.TestCase):
         self.assertEqual(config["images"]["upload_dir"], abs_uploads)
 
     def test_agents_section_unchanged_by_overrides(self):
-        os.environ["AGENTCHATTR_PORT"] = "8310"
+        os.environ["YAPP_PORT"] = "8310"
         config = config_loader.load_config(ROOT)
         # Agent definitions must be untouched by path/port overrides
         self.assertIn("claude", config["agents"])
@@ -132,14 +132,14 @@ class CliOverrideExtractionTests(unittest.TestCase):
     def test_space_separated_flags_set_env_vars(self):
         argv = ["run.py", "--port", "8310", "--data-dir", "./foo"]
         config_loader.apply_cli_overrides(argv)
-        self.assertEqual(os.environ["AGENTCHATTR_PORT"], "8310")
-        self.assertEqual(os.environ["AGENTCHATTR_DATA_DIR"], "./foo")
+        self.assertEqual(os.environ["YAPP_PORT"], "8310")
+        self.assertEqual(os.environ["YAPP_DATA_DIR"], "./foo")
 
     def test_equals_form_flags_set_env_vars(self):
         argv = ["run.py", "--port=8310", "--data-dir=./foo"]
         config_loader.apply_cli_overrides(argv)
-        self.assertEqual(os.environ["AGENTCHATTR_PORT"], "8310")
-        self.assertEqual(os.environ["AGENTCHATTR_DATA_DIR"], "./foo")
+        self.assertEqual(os.environ["YAPP_PORT"], "8310")
+        self.assertEqual(os.environ["YAPP_DATA_DIR"], "./foo")
 
     def test_missing_flags_do_not_touch_env(self):
         argv = ["run.py"]
@@ -164,14 +164,14 @@ class CliOverrideExtractionTests(unittest.TestCase):
             "--upload-dir", "/tmp/proj-uploads",
         ]
         config_loader.apply_cli_overrides(argv)
-        self.assertEqual(os.environ["AGENTCHATTR_DATA_DIR"], "/tmp/proj")
-        self.assertEqual(os.environ["AGENTCHATTR_PORT"], "8310")
-        self.assertEqual(os.environ["AGENTCHATTR_MCP_HTTP_PORT"], "8210")
-        self.assertEqual(os.environ["AGENTCHATTR_MCP_SSE_PORT"], "8211")
-        self.assertEqual(os.environ["AGENTCHATTR_UPLOAD_DIR"], "/tmp/proj-uploads")
+        self.assertEqual(os.environ["YAPP_DATA_DIR"], "/tmp/proj")
+        self.assertEqual(os.environ["YAPP_PORT"], "8310")
+        self.assertEqual(os.environ["YAPP_MCP_HTTP_PORT"], "8210")
+        self.assertEqual(os.environ["YAPP_MCP_SSE_PORT"], "8211")
+        self.assertEqual(os.environ["YAPP_UPLOAD_DIR"], "/tmp/proj-uploads")
 
     def test_pass_through_separator_ignores_later_flags(self):
-        # `-- --port 9999` belongs to the agent CLI, not agentchattr.
+        # `-- --port 9999` belongs to the agent CLI, not yapp.
         # Flags AFTER `--` must NOT leak into the env.
         argv = [
             "wrapper.py", "claude",
@@ -181,11 +181,11 @@ class CliOverrideExtractionTests(unittest.TestCase):
             "--data-dir", "/agent-arg",
         ]
         config_loader.apply_cli_overrides(argv)
-        self.assertEqual(os.environ["AGENTCHATTR_PORT"], "8310")
-        self.assertNotIn("AGENTCHATTR_DATA_DIR", os.environ)
+        self.assertEqual(os.environ["YAPP_PORT"], "8310")
+        self.assertNotIn("YAPP_DATA_DIR", os.environ)
 
     def test_pass_through_alone_ignores_everything(self):
-        # If agentchattr flags appear ONLY after `--`, none are applied.
+        # If yapp flags appear ONLY after `--`, none are applied.
         argv = [
             "wrapper.py", "claude",
             "--",
@@ -193,8 +193,8 @@ class CliOverrideExtractionTests(unittest.TestCase):
             "--data-dir", "/agent-arg",
         ]
         config_loader.apply_cli_overrides(argv)
-        self.assertNotIn("AGENTCHATTR_PORT", os.environ)
-        self.assertNotIn("AGENTCHATTR_DATA_DIR", os.environ)
+        self.assertNotIn("YAPP_PORT", os.environ)
+        self.assertNotIn("YAPP_DATA_DIR", os.environ)
 
 
 if __name__ == "__main__":

@@ -243,7 +243,7 @@ class ImportExportApiTests(unittest.TestCase):
         app.summaries = self.summaries
         app.config = {"server": {"data_dir": str(self.root / "appdata"), "version": "test"}}
         app.room_settings = {
-            "title": "agentchattr",
+            "title": "yapp",
             "username": "user",
             "font": "sans",
             "channels": ["general"],

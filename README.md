@@ -1,17 +1,31 @@
-# gigagent
+# yapp: multi-agent chat and terminal UI for AI coding agents
+
+> Run Claude Code, Codex, Gemini CLI, and other AI coding agents side by side,
+> let them talk to each other over MCP, and manage them all from one full-screen
+> terminal app. Open source (MIT), local-first, installs with `pipx`.
 
 ![Linux](https://img.shields.io/badge/platform-Linux-orange) ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey) ![WSL2](https://img.shields.io/badge/Windows-WSL2-blue) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-green)
 
-**A full-screen terminal workspace for your AI coding agents.** Chat with multiple
-agents, organize them into sessions, see who needs input, and attach to their
-terminals without losing your message draft.
+**yapp is a full-screen terminal workspace (TUI) for your AI coding agents.** Chat
+with multiple agents in one shared room, @mention them to hand off work, organize
+them into sessions, see which agent is waiting for approval, and attach to their
+terminals without losing your message draft. Agents coordinate through a local
+[MCP](https://modelcontextprotocol.io/) chat server, so Claude Code can ask Codex
+for a review, and Gemini can pick up where they left off, with you in the loop.
 
-gigagent builds on [Agentchattr](https://github.com/bcurts/agentchattr), retaining
-its local server, MCP communication, and optional browser interface. This
-repository adds the terminal workflow described below. Existing Agentchattr
-configuration, API names, and stored sessions remain compatible.
+Use cases:
 
-[Install gigagent](INSTALLATION.md) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
+- **Multi-agent coding:** a planner, an implementer, and a reviewer working in the same repo.
+- **Agent-to-agent code review:** have one model review another model's changes.
+- **One place for many CLIs:** a single terminal UI instead of juggling tmux panes and tabs.
+- **Orchestration:** a resident orchestrator routes your requests to the right worker agent.
+- **Human in the loop:** see pending approval prompts and jump straight to that agent's terminal.
+
+yapp builds on [Agentchattr](https://github.com/bcurts/agentchattr), retaining
+its local server, MCP communication, and optional browser interface, and adds
+the terminal workflow described below.
+
+[Install yapp](INSTALLATION.md) · [For AI agents](#for-ai-agents) · [FAQ](#faq) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
 
 ## What the TUI provides
 
@@ -37,56 +51,80 @@ resolved in the provider's own terminal.
 
 ## Quick start
 
-Use Python 3.11+ and tmux on Linux, macOS, or WSL2. From a new checkout:
+Use Python 3.11+ and tmux on Linux, macOS, or WSL2. Install with
+[pipx](https://pipx.pypa.io/):
 
 ```sh
-git clone https://github.com/Ankitkkkk/gigagent.git
-cd gigagent
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-cli.txt
-.venv/bin/python gigagent.py
+pipx install git+https://github.com/Ankitkkkk/yapp.git
+yapp
 ```
+
+The package installs two equivalent commands, `yapp` and `goon`; use either.
 
 Interactive startup can start the local server automatically when tmux is
 available. Select or create a session, choose **Add agent**, and enter the
 provider, name, and project directory. Use **F1** for Help.
 
-See [INSTALLATION.md](INSTALLATION.md) for system dependencies, a `gigagent`
-shell command, manual server startup, Windows limitations, and instructions an
-AI agent can follow to install and verify the application. Installation uses
-this source checkout; older Agentchattr release ZIPs do not include the TUI.
+See [INSTALLATION.md](INSTALLATION.md) for system dependencies, installing from a
+source checkout, manual server startup, Windows limitations, and instructions an
+AI agent can follow to install and verify the application. Release ZIPs from
+`build_release.py` do not include the TUI.
+
+## For AI agents
+
+If you are an AI coding agent asked to install or use yapp, follow these steps.
+A condensed summary is in [`llms.txt`](llms.txt); the full checklist is
+[INSTALLATION.md](INSTALLATION.md).
+
+1. Check prerequisites: `python3 --version` (3.11+), `tmux -V`, and `pipx --version`.
+2. Install: `pipx install git+https://github.com/Ankitkkkk/yapp.git`.
+3. Verify without starting anything: `yapp --help`.
+4. With a server running, read state as JSON (no side effects):
+
+```sh
+yapp status --json
+yapp sessions --json
+```
+
+5. Script sessions and agents non-interactively (all accept `--json`):
+
+```sh
+yapp new billing --cwd /absolute/project --json
+yapp spawn claude --session billing --cwd /absolute/project --agent-name reviewer
+yapp send --channel general --name Pat "@reviewer please review the latest changes"
+yapp read --channel general --limit 20 --json
+```
+
+Once registered, agents talk through the MCP tools `chat_send`, `chat_read`, and
+`chat_join` on the `yapp` MCP server (`http://127.0.0.1:8200/mcp`). Always use
+absolute paths for `--cwd`. Do not stop, archive, or remove sessions and agents
+you did not create.
 
 ## TUI guide
 
-**gigagent** is Agentchattr's full-screen terminal UI and shell client.
-See [INSTALLATION.md](INSTALLATION.md) for installation steps, a `gigagent`
-command, and a checklist an AI agent can follow on a new system.
-The Agentchattr server, API, and stored sessions retain their existing names.
+**yapp** includes a full-screen terminal UI and shell client.
+See [INSTALLATION.md](INSTALLATION.md) for installation steps and a checklist an
+AI agent can follow on a new system. Every example below works with `goon` in
+place of `yapp`.
 
-Agentchattr also works from a terminal without opening a browser. After setting
-up the Python environment, run these commands from the source repository:
+yapp works from a terminal without opening a browser:
 
 ```sh
-python -m pip install -r requirements-cli.txt
-python gigagent.py
-python gigagent.py --plain
-python gigagent.py chat --plain
+yapp
+yapp --plain
+yapp chat --plain
 ```
 
-Use your virtual environment's Python (`.venv/bin/python` on macOS/Linux or
-`.venv\Scripts\python.exe` on Windows). To start only the server, run
-`python run.py` in a separate terminal. `python gigagent.py chat` explicitly starts
-interactive mode.
+`yapp chat` explicitly starts interactive mode. In a source checkout,
+`python yapp.py` and `python cli.py` accept the same arguments, and
+`python run.py` starts only the server.
 
-`python gigagent.py` is the branded entry point; `python cli.py` remains supported
-with the same arguments and behavior.
-
-From this source checkout, `python gigagent.py` opens the full-screen terminal UI and
+`yapp` opens the full-screen terminal UI and
 its session picker. Create a session or select an existing one; the picker can
 also show archived sessions and asks before restoring one. Terminal sessions
 group a channel, working directories, and persistent agent identities.
 
-Use `python gigagent.py --plain` or `python gigagent.py chat --plain` for the legacy
+Use `yapp --plain` or `yapp chat --plain` for the legacy
 scrolling prompt. When stdout is not a terminal, or on macOS/Linux when `TERM`
 is unset, empty, or `dumb`, interactive chat automatically uses that renderer
 and prints `Full-screen unavailable; using plain mode.` once to stderr. Input
@@ -95,15 +133,15 @@ failure after full-screen startup exits with one line naming only the exception
 type and recommends rerunning with `--plain`.
 
 ```sh
-python gigagent.py
-python gigagent.py --channel general
-python gigagent.py --session billing --no-resume
-python gigagent.py new billing --orchestrator-provider codex --cwd /absolute/project --json
-python gigagent.py spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal --role code-reviewer --personality meticulous
-python gigagent.py resume reviewer --session billing --fresh
-python gigagent.py attach reviewer --session billing
-python gigagent.py unread --session billing
-python gigagent.py archive billing --yes
+yapp
+yapp --channel general
+yapp --session billing --no-resume
+yapp new billing --orchestrator-provider codex --cwd /absolute/project --json
+yapp spawn claude --session billing --cwd /absolute/project --agent-name reviewer --history-mode literal --role code-reviewer --personality meticulous
+yapp resume reviewer --session billing --fresh
+yapp attach reviewer --session billing
+yapp unread --session billing
+yapp archive billing --yes
 ```
 
 `--session` accepts an exact session ID, exact name, or unique name prefix.
@@ -285,9 +323,9 @@ the field to remove them. Existing running agents pick up changes on their next
 launch. The shell and slash commands support the same option:
 
 ```sh
-python gigagent.py spawn codex --session billing --cwd /absolute/project --provider-flags='--model MODEL_NAME'
-python gigagent.py resume reviewer --session billing --provider-flags='--model MODEL_NAME'
-python gigagent.py resume reviewer --session billing --provider-flags=''
+yapp spawn codex --session billing --cwd /absolute/project --provider-flags='--model MODEL_NAME'
+yapp resume reviewer --session billing --provider-flags='--model MODEL_NAME'
+yapp resume reviewer --session billing --provider-flags=''
 ```
 
 In chat, use `/spawn codex --provider-flags='--model MODEL_NAME'` or
@@ -351,7 +389,7 @@ python waiting_hooks.py install --provider codex --project /absolute/project/pat
 This adds notification commands to the project's `.codex/hooks.json`, preserving
 existing entries. In Codex, use **`/hooks`** to inspect and trust the added
 commands. New or changed hook definitions require native trust; the installer
-does not bypass it. Start/resume the agent through an updated agentchattr
+does not bypass it. Start/resume the agent through an updated yapp
 wrapper to enable its private event stream. Terminal detection works even when
 hooks are not installed or trusted. Existing running wrappers need relaunching.
 
@@ -422,12 +460,12 @@ keeps running. Attaching inside tmux switches clients; switch back with
 For scripts and one-shot commands:
 
 ```sh
-python gigagent.py send --channel general --name Pat "@claude review the latest changes"
-python gigagent.py read --channel general --limit 20
-python gigagent.py status
-python gigagent.py channels
-python gigagent.py read --json
-python gigagent.py send --json - < task.txt
+yapp send --channel general --name Pat "@claude review the latest changes"
+yapp read --channel general --limit 20
+yapp status
+yapp channels
+yapp read --json
+yapp send --json - < task.txt
 ```
 
 `send` waits for a server acknowledgment after persistence (or command handling).
@@ -437,14 +475,14 @@ stderr. Delivery can be uncertain after a transport failure, so inspect history
 before retrying a send. Messages are not retried automatically.
 
 Use `--url http://127.0.0.1:18300` to select another local instance. Otherwise,
-the port comes from the shared configuration, including `AGENTCHATTR_PORT`.
+the port comes from the shared configuration, including `YAPP_PORT`.
 `--timeout 15` bounds shell requests. Options work before or after the subcommand.
 For `attach`, it bounds API resolution; foreground tmux attachment lasts until
 you detach or the agent terminal exits.
 The terminal client connects to localhost only.
 
 Interactive chat without an explicit `--url` can start a missing local server
-in the `agentchattr-server` tmux session. Shell commands and explicit `--url`
+in the `yapp-server` tmux session. Shell commands and explicit `--url`
 never auto-start it. Server logs are at `<resolved data_dir>/logs/server.log`;
 startup failures include that path and a manual `python run.py` hint. Connecting
 to an existing server with a different data directory prints a warning.
@@ -459,15 +497,12 @@ end to end. Real provider authentication, trust dialogs, and terminal behavior
 depend on the installed provider CLI. Decision buttons, attachment uploads, and
 other graphical workflows still use the web UI.
 
-These commands require a source checkout. `build_release.py` has a pre-existing
-packaging gap: it does not yet ship the CLI files, `requirements-cli.txt`, or
-terminal-session core modules (`workspace_store.py`, `workspace_unread.py`,
-`workspace_launcher.py`, and `providers/`). Release archives do not provide
-this workflow yet.
+Release ZIPs from `build_release.py` do not ship the CLI files or the
+terminal-session core modules; install the package instead.
 
 ## Browser and wrapper quickstart (Windows)
 
-These launchers open the inherited browser/server workflow. For gigagent's
+These launchers open the inherited browser/server workflow. For yapp's
 terminal-agent lifecycle on Windows, use WSL2 and the [installation guide](INSTALLATION.md).
 
 **1. Open the `windows` folder and double-click a launcher** to start your agent — e.g. `start_claude.bat`, `start_codex.bat`, `start_gemini.bat`, etc.
@@ -517,7 +552,7 @@ brew install tmux    # macOS
 
 Open a terminal in the `macos-linux` folder (right-click → "Open Terminal Here", or `cd` into it) and run a launcher — e.g. `sh start_claude.sh`, `sh start_codex.sh`, `sh start_gemini.sh`, etc.
 
-On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Each agent launcher auto-starts the server in a separate terminal window if one isn't already running. The agent opens inside a **tmux** session. Detach with `Ctrl+B, D` — the agent keeps running in the background. Reattach with `tmux attach -t agentchattr-claude`.
+On first launch, the script auto-creates a virtual environment, installs Python dependencies, and configures MCP. Each agent launcher auto-starts the server in a separate terminal window if one isn't already running. The agent opens inside a **tmux** session. Detach with `Ctrl+B, D` — the agent keeps running in the background. Reattach with `tmux attach -t yapp-claude`.
 
 <details>
 <summary>All agent launchers (click to expand)</summary>
@@ -564,13 +599,13 @@ Agents wake each other up, coordinate, and report back.
 ```
 
 <p align="center">
-  <img src="gang.gif" alt="agentchattr gang" width="600"><br>
+  <img src="gang.gif" alt="yapp gang" width="600"><br>
   <sub>the gang after <code>/hatmaking</code></sub>
 </p>
 
 ## Browser and server features
 
-The following capabilities come from the underlying Agentchattr server and
+The following capabilities come from the underlying Yapp server and
 browser interface. Graphical features such as image uploads and decision cards
 remain available in the browser; they are separate from the TUI controls above.
 
@@ -729,9 +764,9 @@ Hats are SVG overlays (viewBox `0 0 32 16`, max 5KB) that sit above agent avatar
 
 ### Web chat UI
 
-The optional browser interface retains the Agentchattr appearance:
+The optional browser interface retains the Yapp appearance:
 
-![Agentchattr browser interface](screenshot.png)
+![Yapp browser interface](screenshot.png)
 
 Dark-themed chat at `localhost:8300` with real-time updates:
 
@@ -753,7 +788,7 @@ Dark-themed chat at `localhost:8300` with real-time updates:
 
 ### Token cost
 
-Compared to manually copy-pasting messages between agent CLIs, agentchattr adds this overhead:
+Compared to manually copy-pasting messages between agent CLIs, yapp adds this overhead:
 
 | Overhead | Extra tokens | Notes |
 |----------|-------------|-------|
@@ -766,7 +801,7 @@ The message *content* itself costs the same either way — you'd read those word
 **Example**: Reading 3 new messages costs about 150 tokens of overhead beyond the message content. Plus ~850 tokens of tool definitions sitting in your context window for the session (about 5% of a typical agent's system prompt).
 
 ### Token-overload minimization
-agentchattr is designed to keep coordination lightweight:
+yapp is designed to keep coordination lightweight:
 
 - `chat_read(sender=...)` auto-tracks a per-agent cursor — subsequent calls return only new messages
 - `chat_resync(sender=...)` gives an explicit full refresh when you actually need it
@@ -794,14 +829,14 @@ The start scripts auto-configure MCP on launch. If you prefer to register by han
 
 **Claude Code:**
 ```bash
-claude mcp add agentchattr --transport http http://127.0.0.1:8200/mcp
+claude mcp add yapp --transport http http://127.0.0.1:8200/mcp
 ```
 
 **Codex / other agents** — add to `.mcp.json` in your project root:
 ```json
 {
   "mcpServers": {
-    "agentchattr": {
+    "yapp": {
       "type": "http",
       "url": "http://127.0.0.1:8200/mcp"
     }
@@ -813,7 +848,7 @@ claude mcp add agentchattr --transport http http://127.0.0.1:8200/mcp
 ```json
 {
   "mcpServers": {
-    "agentchattr": {
+    "yapp": {
       "type": "sse",
       "url": "http://127.0.0.1:8201/sse"
     }
@@ -825,7 +860,7 @@ claude mcp add agentchattr --transport http http://127.0.0.1:8200/mcp
 ```json
 {
   "mcpServers": {
-    "agentchattr": {
+    "yapp": {
       "type": "http",
       "url": "http://127.0.0.1:8200/mcp"
     }
@@ -837,7 +872,7 @@ claude mcp add agentchattr --transport http http://127.0.0.1:8200/mcp
 ```json
 {
   "mcp": {
-    "agentchattr": {
+    "yapp": {
       "type": "remote",
       "url": "http://127.0.0.1:8200/mcp",
       "enabled": true
@@ -933,21 +968,21 @@ sse_port = 8201             # MCP SSE transport (Gemini)
 
 ### Per-project isolation
 
-If you keep one agentchattr install shared across several repos (e.g. via dotfiles), you can run an isolated instance per project without editing `config.toml` — override the data directory and ports at launch time.
+If you keep one yapp install shared across several repos (e.g. via dotfiles), you can run an isolated instance per project without editing `config.toml` — override the data directory and ports at launch time.
 
 **CLI flags** (accepted by `run.py`, `wrapper.py`, and `wrapper_api.py`):
 
 ```bash
 # Start the server for project A
 python run.py \
-  --data-dir ./project-a/.agentchattr \
+  --data-dir ./project-a/.yapp \
   --port 8310 \
   --mcp-http-port 8210 \
   --mcp-sse-port 8211
 
 # Launch a wrapper that connects to that same instance
 python wrapper.py claude \
-  --data-dir ./project-a/.agentchattr \
+  --data-dir ./project-a/.yapp \
   --port 8310 \
   --mcp-http-port 8210 \
   --mcp-sse-port 8211
@@ -955,15 +990,15 @@ python wrapper.py claude \
 
 **Env vars** (equivalent — set once in your shell and every process picks them up):
 
-- `AGENTCHATTR_DATA_DIR` — overrides `server.data_dir`
-- `AGENTCHATTR_PORT` — overrides `server.port`
-- `AGENTCHATTR_MCP_HTTP_PORT` — overrides `mcp.http_port`
-- `AGENTCHATTR_MCP_SSE_PORT` — overrides `mcp.sse_port`
-- `AGENTCHATTR_UPLOAD_DIR` — overrides `images.upload_dir`
+- `YAPP_DATA_DIR` — overrides `server.data_dir`
+- `YAPP_PORT` — overrides `server.port`
+- `YAPP_MCP_HTTP_PORT` — overrides `mcp.http_port`
+- `YAPP_MCP_SSE_PORT` — overrides `mcp.sse_port`
+- `YAPP_UPLOAD_DIR` — overrides `images.upload_dir`
 
-Relative paths resolve against the shell's current directory (not agentchattr's install location), so `./.agentchattr` ends up inside your project folder.
+Relative paths resolve against the shell's current directory (not yapp's install location), so `./.yapp` ends up inside your project folder.
 
-Server and wrappers share the same `AGENTCHATTR_*` env vars and the same flag names, so a launcher/profile can run multiple isolated instances by passing matching values to each process. If no flags or env vars are set, `config.toml` is used exactly as before — zero change for existing setups.
+Server and wrappers share the same `YAPP_*` env vars and the same flag names, so a launcher/profile can run multiple isolated instances by passing matching values to each process. If no flags or env vars are set, `config.toml` is used exactly as before — zero change for existing setups.
 
 With several instances open at once, set **Settings → This server** to give each one a short name. It appears beside the title in the header and in the browser tab title, so you can tell which project a tab belongs to. It is empty by default, which looks exactly as it does now.
 
@@ -1027,7 +1062,7 @@ Available models: `MiniMax-M3` (default), `MiniMax-M2.7`, `MiniMax-M2.7-highspee
 
 ## Architecture
 
-`gigagent.py` launches the terminal client. Its UI, forms, and terminal handoff
+`yapp.py` (the `yapp` and `goon` commands) launches the terminal client. Its UI, forms, and terminal handoff
 live in `cli_tui.py`, `cli_tui_view.py`, and `cli_tui_dialogs.py`. The client uses
 authenticated HTTP and WebSocket connections to the same local server shown
 below; `cli.py` remains a compatible entry point.
@@ -1085,8 +1120,8 @@ below; `cli.py` remains a compatible entry point.
 - **Linux/macOS/WSL2**: `tmux` for TUI agent lifecycle and server auto-start
 - An interactive terminal at least **80 × 18** for the full-screen TUI
 
-Install **`requirements-cli.txt`** for gigagent; it includes the server packages
-from `requirements.txt`, plus the terminal dependencies. The browser/wrapper
+Installing the package pulls in the server and terminal dependencies
+(`requirements-cli.txt` lists the same set for manual setups). The browser/wrapper
 quickstart scripts install their own server dependencies on first launch.
 Native Windows chat can connect to a manually running server, but the TUI's
 tmux lifecycle actions require Linux/macOS or WSL2.
@@ -1096,13 +1131,13 @@ tmux lifecycle actions require Linux/macOS or WSL2.
 The inherited provider wrappers support auto-trigger on these platforms:
 
 - **Windows** — `wrapper_windows.py` injects keystrokes into the agent's console via Win32 `WriteConsoleInput`. The agent runs as a direct subprocess.
-- **Mac/Linux** — `wrapper_unix.py` runs the agent inside a `tmux` session and delivers each prompt as a single bracketed paste (`tmux paste-buffer -p`), so a CLI that supports bracketed paste reassembles a long prompt even when the pty splits it across reads. Detach with `Ctrl+B, D` to leave the agent running in the background; reattach with `tmux attach -t agentchattr-claude`.
+- **Mac/Linux** — `wrapper_unix.py` runs the agent inside a `tmux` session and delivers each prompt as a single bracketed paste (`tmux paste-buffer -p`), so a CLI that supports bracketed paste reassembles a long prompt even when the pty splits it across reads. Detach with `Ctrl+B, D` to leave the agent running in the background; reattach with `tmux attach -t yapp-claude`.
 
 The chat server and web UI are fully cross-platform (Python + browser).
 
 ## Security
 
-agentchattr is designed for **localhost use only** and includes several protections:
+yapp is designed for **localhost use only** and includes several protections:
 
 - **Session token** — a random token is generated on each server start and injected into the web UI. All API and WebSocket requests must present this token.
 - **Loopback-only registration** — agent registration, deregistration, and heartbeat endpoints only accept connections from localhost, preventing remote agent impersonation.
@@ -1114,10 +1149,42 @@ The session token is displayed in the terminal on startup and is only accessible
 
 > **`--allow-network` warning:** Network mode binds to a LAN IP, which exposes the server to your local network over unencrypted HTTP. Anyone on the same network can sniff the session token and gain full access — including the ability to @mention agents and trigger tool execution. If agents are running with auto-approve flags, this effectively grants remote code execution on your machine. **Only use `--allow-network` on a trusted home network. Never on public or shared WiFi.**
 
+## FAQ
+
+### How do I make Claude Code and Codex talk to each other?
+Install yapp, create a session, and add a Claude agent and a Codex agent. Both
+connect to the same local MCP chat server, so each can @mention the other in
+the shared channel and read the reply. See [Agent-to-agent communication](#agent-to-agent-communication).
+
+### How do I run multiple AI coding agents in one terminal?
+Run `yapp` (or `goon`). Each agent runs in its own tmux session; the TUI lists
+them with status and unread counts, and **F6** attaches to any of them.
+
+### Which AI agents and CLIs are supported?
+Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity (agy), GitHub Copilot CLI,
+Kimi, Qwen Code, Kilo CLI, CodeBuddy, MiniMax, and OpenAI-compatible local models
+(for example Ollama or LM Studio) through [API agents](#api-agents-local-models).
+
+### Is yapp free and open source?
+Yes. yapp is MIT licensed. It runs entirely on your machine; the server binds to
+localhost and your chats stay in local files.
+
+### Does it work on Windows or macOS?
+Linux and macOS are fully supported. On Windows, use WSL2 for the terminal UI;
+native Windows can use the browser chat and wrapper launchers.
+
+### What is the `goon` command?
+An alias. `pipx install` creates both `yapp` and `goon`, and they run the same app.
+
+### How is yapp related to Agentchattr?
+yapp is built on [Agentchattr](https://github.com/bcurts/agentchattr) and keeps
+its MCP chat server and browser UI, adding the full-screen terminal UI, sessions,
+agent profiles, orchestration, and pip/pipx packaging.
+
 ## Project and upstream
 
-Report gigagent issues and feature requests in
-[Ankitkkkk/gigagent](https://github.com/Ankitkkkk/gigagent/issues).
+Report yapp issues and feature requests in
+[Ankitkkkk/yapp](https://github.com/Ankitkkkk/yapp/issues).
 The server and browser foundation is [Agentchattr](https://github.com/bcurts/agentchattr).
 Its upstream community is available on the [Agentchattr Discord](https://discord.gg/qzfn5YTT9a).
 

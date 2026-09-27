@@ -99,19 +99,19 @@ class ServerLifecycleTests(unittest.TestCase):
         lifecycle.request_restart(lifecycle.instance_id)
         lifecycle.begin_shutdown()
         lifecycle.drain()
-        lifecycle.restart_environment = {'AGENTCHATTR_PORT': '19300'}
+        lifecycle.restart_environment = {'YAPP_PORT': '19300'}
         def replace(*args):
-            self.assertEqual(os.environ['AGENTCHATTR_PORT'], '19300')
+            self.assertEqual(os.environ['YAPP_PORT'], '19300')
             self.assertEqual(os.environ['RESTART_TEST_UNRELATED'], 'kept')
-            self.assertEqual(os.environ['_AGENTCHATTR_RESTART_PARENT'], lifecycle.instance_id)
+            self.assertEqual(os.environ['_YAPP_RESTART_PARENT'], lifecycle.instance_id)
             raise OSError('test failure')
-        with patch.dict(os.environ, {'_AGENTCHATTR_RESTART_PARENT': 'original',
-                                   'AGENTCHATTR_PORT': '18300', 'RESTART_TEST_UNRELATED': 'kept'}), \
+        with patch.dict(os.environ, {'_YAPP_RESTART_PARENT': 'original',
+                                   'YAPP_PORT': '18300', 'RESTART_TEST_UNRELATED': 'kept'}), \
                 patch('server_lifecycle.os.execv', side_effect=replace):
             with self.assertRaises(OSError):
                 lifecycle.replace_process()
-            self.assertEqual(os.environ['_AGENTCHATTR_RESTART_PARENT'], 'original')
-            self.assertEqual(os.environ['AGENTCHATTR_PORT'], '18300')
+            self.assertEqual(os.environ['_YAPP_RESTART_PARENT'], 'original')
+            self.assertEqual(os.environ['YAPP_PORT'], '18300')
 
     def test_uvicorn_drains_accepted_executor_write_after_graceful_timeout(self):
         import asyncio

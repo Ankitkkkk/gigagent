@@ -19,7 +19,7 @@ ORIGINATOR_ENV = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"
 
 
 def originator_for(launch: LaunchContext) -> str:
-    return f"agentchattr:{launch.agent_id}:{launch.launch_nonce}"
+    return f"yapp:{launch.agent_id}:{launch.launch_nonce}"
 
 
 class CodexAdapter(ProviderAdapter):

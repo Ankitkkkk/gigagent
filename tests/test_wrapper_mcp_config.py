@@ -32,7 +32,7 @@ class JsonMcpSettingsTests(unittest.TestCase):
         _write_json_mcp_settings(self.target, "http://127.0.0.1:8200/mcp",
                                  transport="http")
         data = self._read()
-        entry = data["mcpServers"]["agentchattr"]
+        entry = data["mcpServers"]["yapp"]
         self.assertEqual(entry["type"], "http")
         self.assertEqual(entry["httpUrl"], "http://127.0.0.1:8200/mcp")
         self.assertNotIn("url", entry)
@@ -42,7 +42,7 @@ class JsonMcpSettingsTests(unittest.TestCase):
         _write_json_mcp_settings(self.target, "http://127.0.0.1:8200/mcp",
                                  transport="http", http_key="url")
         data = self._read()
-        entry = data["mcpServers"]["agentchattr"]
+        entry = data["mcpServers"]["yapp"]
         self.assertEqual(entry["type"], "http")
         self.assertEqual(entry["url"], "http://127.0.0.1:8200/mcp")
         self.assertNotIn("httpUrl", entry)
@@ -52,7 +52,7 @@ class JsonMcpSettingsTests(unittest.TestCase):
         _write_json_mcp_settings(self.target, "http://127.0.0.1:8201/sse",
                                  transport="sse")
         data = self._read()
-        entry = data["mcpServers"]["agentchattr"]
+        entry = data["mcpServers"]["yapp"]
         self.assertEqual(entry["type"], "sse")
         self.assertEqual(entry["url"], "http://127.0.0.1:8201/sse")
 
@@ -60,7 +60,7 @@ class JsonMcpSettingsTests(unittest.TestCase):
         _write_json_mcp_settings(self.target, "http://127.0.0.1:8200/mcp",
                                  transport="http", token="secret-token-123",
                                  http_key="url")
-        entry = self._read()["mcpServers"]["agentchattr"]
+        entry = self._read()["mcpServers"]["yapp"]
         self.assertEqual(entry["headers"]["Authorization"], "Bearer secret-token-123")
 
     def test_existing_servers_preserved(self):
@@ -73,7 +73,7 @@ class JsonMcpSettingsTests(unittest.TestCase):
                                  transport="http", http_key="url")
         data = self._read()
         self.assertIn("some-other-server", data["mcpServers"])
-        self.assertIn("agentchattr", data["mcpServers"])
+        self.assertIn("yapp", data["mcpServers"])
 
 
 class ExpanduserPathTests(unittest.TestCase):

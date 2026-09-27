@@ -2,11 +2,11 @@
 
 ## Scope and Purpose
 
-This file applies to the entire `agentchattr` repository. Run commands from this
+This file applies to the entire `yapp` repository. Run commands from this
 directory, which contains `run.py` and `requirements.txt`; the enclosing
 `agent-collab` directory is not the Git root.
 
-Agentchattr is a local chat application for humans and AI coding agents. It
+Yapp is a local chat application for humans and AI coding agents. It
 provides channels, mentions, agent presence and roles, jobs, rules, structured
 sessions, schedules, image sharing, and history import/export. Agents communicate
 through MCP or the HTTP API; wrappers consume queued triggers and deliver prompts
@@ -42,7 +42,7 @@ For an isolated manual check, choose three unused ports and separate data and
 upload directories, for example:
 
 ```sh
-.venv/bin/python run.py --port 18300 --mcp-http-port 18200 --mcp-sse-port 18201 --data-dir /tmp/agentchattr-check/data --upload-dir /tmp/agentchattr-check/uploads
+.venv/bin/python run.py --port 18300 --mcp-http-port 18200 --mcp-sse-port 18201 --data-dir /tmp/yapp-check/data --upload-dir /tmp/yapp-check/uploads
 ```
 
 Use matching overrides for every wrapper connecting to that instance.
@@ -100,8 +100,8 @@ Use matching overrides for every wrapper connecting to that instance.
 1. `config.toml` supplies defaults.
 2. `config.local.toml` adds new entries under `[agents]` only. It does not
    override existing agent definitions or other configuration sections.
-3. `AGENTCHATTR_DATA_DIR`, `AGENTCHATTR_PORT`, `AGENTCHATTR_MCP_HTTP_PORT`,
-   `AGENTCHATTR_MCP_SSE_PORT`, and `AGENTCHATTR_UPLOAD_DIR` override the
+3. `YAPP_DATA_DIR`, `YAPP_PORT`, `YAPP_MCP_HTTP_PORT`,
+   `YAPP_MCP_SSE_PORT`, and `YAPP_UPLOAD_DIR` override the
    corresponding settings.
 4. Explicit CLI override flags set those environment variables before loading.
    Arguments after `--` are passed through to the agent CLI.
@@ -156,7 +156,7 @@ import tempfile
 sys.path.insert(0, str(Path.cwd() / 'tests'))
 from _cli_server import isolated_environment, stop_process
 
-with tempfile.TemporaryDirectory(prefix='agentchattr-suite-') as directory:
+with tempfile.TemporaryDirectory(prefix='yapp-suite-') as directory:
     env = isolated_environment(directory)
     with ExitStack() as cleanup:
         cleanup.callback(subprocess.run, ['tmux', 'kill-server'], env=env,

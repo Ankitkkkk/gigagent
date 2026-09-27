@@ -203,7 +203,7 @@ class RequestJsonTests(unittest.TestCase):
                 request_json("http://127.0.0.1:8300", "secret-token",
                              "GET", "/timeout", timeout=0.25)
         self.assertEqual(caught.exception.message,
-                         "Could not connect to the local agentchattr server")
+                         "Could not connect to the local yapp server")
 
     def test_redirect_is_rejected_before_credentials_reach_target(self):
         reached = []

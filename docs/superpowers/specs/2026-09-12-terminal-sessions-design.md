@@ -103,7 +103,7 @@ the picker warns and resume is blocked until the user re-points it.
   fields written by the launcher and summariser (§3, §6, §7).
 
 The five identifiers stay separate: workspace `id`, display `name`,
-`registry_name`, tmux session name (`agentchattr-<agent_id>`, derived from
+`registry_name`, tmux session name (`yapp-<agent_id>`, derived from
 the stable id so renames never strand `/attach`), and `native_session_id`.
 
 **Floor.** see "Visibility policy" below.
@@ -236,7 +236,7 @@ prints it verbatim.
    ```
    python wrapper.py <provider> --no-attach --no-restart \
        --cwd <cwd> --identity-file data/identity/<agent_id>.json \
-       --tmux-name agentchattr-<agent_id> \
+       --tmux-name yapp-<agent_id> \
        -- <adapter.new_session_args(id)>
    ```
 
@@ -255,7 +255,7 @@ prints it verbatim.
    `running` but acts on nothing until the user answers it via `/attach`.
    The CLI's `/spawn` output says so when the cwd has no `.claude` state.
    No `ready` within 60 s of launch → the launcher **terminates that launch**:
-   `tmux kill-session -t agentchattr-<agent_id>` if it exists, `SIGTERM` to
+   `tmux kill-session -t yapp-<agent_id>` if it exists, `SIGTERM` to
    the wrapper pid from the identity file (then `SIGKILL` after 5 s),
    `registry.deregister(registry_name)`, identity file kept (shadow). Only
    then `last_state: exited`, `last_error` from the log. Nothing is left
@@ -272,7 +272,7 @@ prints it verbatim.
   `/api/register`. Existing behaviour is unchanged when the flag is absent.
 - `--no-attach` skips `tmux attach-session` and goes straight to the keep-alive
   loop that today runs after a manual detach.
-- `--tmux-name NAME` overrides the default `agentchattr-<agent>` session name
+- `--tmux-name NAME` overrides the default `yapp-<agent>` session name
   passed to `run_agent`.
 - Heartbeats carry `ready: bool` (see Spawn step 7).
 - `--no-restart` already exists; managed agents always pass it so an exit is an
@@ -326,7 +326,7 @@ the adapter need not support resume. Then:
 
 ### Stop
 
-`tmux kill-session -t agentchattr-<agent_id>`. The wrapper sees the
+`tmux kill-session -t yapp-<agent_id>`. The wrapper sees the
 session die, deregisters through the existing path, and exits because of
 `--no-restart`. The deregister handler in `app.py` marks the agent
 `exited`. If the wrapper process outlives the tmux session by more than a few
@@ -637,16 +637,16 @@ API in §2. The user-facing word is "session"; flags and commands use it.
 ### Startup: `python cli.py`
 
 1. **Server** (D7) — interactive chat only. Probe `GET /api/status` on the port from `config.toml`.
-   Down → `tmux new-session -d -s agentchattr-server "<sys.executable> run.py
+   Down → `tmux new-session -d -s yapp-server "<sys.executable> run.py
    --port … --data-dir … --upload-dir … --mcp-http-port … --mcp-sse-port …"`
-   (the values the CLI resolved from `config.toml` and any `AGENTCHATTR_*`
+   (the values the CLI resolved from `config.toml` and any `YAPP_*`
    overrides, passed explicitly because a session created on an existing
    tmux server inherits that server's environment, not the CLI's) from the
    repo root, with output appended to `data/logs/server.log`, then poll
-   `/api/status` for up to 15 s. If a tmux session named `agentchattr-server`
+   `/api/status` for up to 15 s. If a tmux session named `yapp-server`
    already exists while the port is down, do not create or kill anything:
    exit 1 naming that session and the manual command. Print one line:
-   `Started server in tmux session agentchattr-server.` If tmux is missing or
+   `Started server in tmux session yapp-server.` If tmux is missing or
    the server never answers, exit 1 with `Start it manually: python run.py`
    and the log location. `--url` given → never auto-start; the user chose a
    specific server. Shell commands never auto-start: they probe the chosen
@@ -691,7 +691,7 @@ API in §2. The user-facing word is "session"; flags and commands use it.
 | `/spawn <provider> [--agent-name NAME] [--cwd PATH] [--history-mode none\|literal\|summary]` | Missing `--cwd` → prompt, default = last cwd used in this workspace, else the CLI's cwd. Missing `--history-mode` → prompt; until slice 3 ships only `none`/`literal` are offered with `literal` as the default (the size-based `summary` default applies once slice 3 exists); an explicit `summary` is refused with the server's "not available" message. `--agent-name` sets a custom `registry_name`; default `<provider>-<n>`. (`--name` keeps its existing meaning everywhere: the human sender; `--history` stays the numeric history limit.) `POST …/agents`; prints `registry_name`, state. While `history_state` is `pending` prints `catching up…` (`summarizing…` once slice 3 exists and the mode is `summary`); on `done` prints so; on `failed` (slice 3 only — nothing in slice 1–2 writes `failed`) prints the reason and prompts `[r]etry / [l]iteral / [n]one`. Progress arrives via the WebSocket `workspace` event; the 2 s poll runs only while an agent is `starting` or `history_state` is `pending`, or while the WebSocket is down. |
 | `/resume <agent> [--fresh] [--agent-name NAME] [--cwd PATH]` | `POST …/resume`. `--agent-name` takes a new registry name when the old one is held; `--cwd` re-points a moved project. On `native_session_id` null without `--fresh`: prints the refusal and the exact `--fresh` command. |
 | `/stop <agent>` | `POST …/stop`. |
-| `/attach <agent>` | Uses the agent's `tmux_session` field from the server (`agentchattr-<agent_id>`; derive it only if the field is absent). Outside tmux: `tmux attach -t <session>` in the foreground, run off the event loop so the receiver keeps draining; messages arriving during attach are buffered (bounded) and printed after detach (Ctrl+B D). Inside tmux (`$TMUX` set): `tmux switch-client -t <session>` — nested attach is refused by tmux — and the CLI prints how to switch back (`tmux switch-client -l`). If the tmux session is gone, prints `not running` and the resume hint. |
+| `/attach <agent>` | Uses the agent's `tmux_session` field from the server (`yapp-<agent_id>`; derive it only if the field is absent). Outside tmux: `tmux attach -t <session>` in the foreground, run off the event loop so the receiver keeps draining; messages arriving during attach are buffered (bounded) and printed after detach (Ctrl+B D). Inside tmux (`$TMUX` set): `tmux switch-client -t <session>` — nested attach is refused by tmux — and the CLI prints how to switch back (`tmux switch-client -l`). If the tmux session is gone, prints `not running` and the resume hint. |
 | `/agents` | Extended: for each workspace agent — `registry_name`, provider, state, cwd, unread count, native id present or not. Non-workspace agents listed below as today. |
 | `/unread [agent]`, `/retry <agent>` | §4. |
 | `/history` (no arguments) | Unchanged from today: prints recent channel history. |
@@ -856,12 +856,12 @@ attempted (`native_session_id` stays `null`; resume refused unless `--fresh`).
   header carries `payload.originator`, which codex takes from the
   environment variable `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`. Spike
   (2026-09-12, codex 0.154.0): `codex exec` launched with the override wrote
-  `"originator": "agentchattr:spike:abc123"` into `session_meta`, alongside
+  `"originator": "yapp:spike:abc123"` into `session_meta`, alongside
   the launch `cwd`. Note `codex exec` refuses a directory that is not a git
   repository unless `--skip-git-repo-check` is passed; interactive `codex`
   prompts instead. Correlation is launch-specific:
   1. **Launch** with `launch_env` returning
-     `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=agentchattr:<agent_id>:<launch_nonce>`,
+     `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=yapp:<agent_id>:<launch_nonce>`,
      both taken from the `LaunchContext` (the wrapper already builds an
      `env(1)` prefix for the tmux command, so the value reaches the provider
      process itself). The same context is persisted as `last_launch`, so a

@@ -17,7 +17,7 @@ import uuid
 
 from providers import get_adapter
 
-EVENTS_ENV = 'AGENTCHATTR_PROMPT_EVENTS'
+EVENTS_ENV = 'YAPP_PROMPT_EVENTS'
 
 
 def configure_stream(directory: Path, provider: str, agent_cfg: dict):
@@ -119,7 +119,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.exit(1, f'Could not install waiting hooks: {error}\n')
     print(f'Installed: {path}\nReview and trust these commands using Codex /hooks.\n'
-          'New agentchattr wrappers enable their private event stream. No approvals are automated.')
+          'New yapp wrappers enable their private event stream. No approvals are automated.')
 
 
 if __name__ == '__main__':

@@ -29,6 +29,6 @@ Completed: all three steps implemented. Independent review clear after fixes for
 spawn/remove serialization, transient empty Linux argv, survivor-name retention,
 and store-save rollback. Focused17 pass; final outer-isolated full discovery943
 total,941 pass,2 expected skips,151.295s (2026-09-13). Log:
-/tmp/agentchattr-remove-final-suite.log. One pre-existing Help-test scheduling race
+/tmp/yapp-remove-final-suite.log. One pre-existing Help-test scheduling race
 was fixed with a bounded state wait. Live server/CLI restart remains an activation
 step; no actual user agents were removed during verification.

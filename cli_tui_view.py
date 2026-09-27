@@ -817,7 +817,7 @@ class TuiView:
         content = Frame(Window(self.help,
             height=lambda: max(3, min(20, self._app().output.get_size().rows - 4)),
             width=lambda: max(10, min(90, self._app().output.get_size().columns - 4))),
-            title='gigagent Help · F1/Esc Back · PgUp/PgDn Scroll')
+            title='yapp Help · F1/Esc Back · PgUp/PgDn Scroll')
         return FloatContainer(content=content, floats=[], modal=True, key_bindings=bindings,
                               style='class:dialog.body')
 
@@ -1344,7 +1344,7 @@ class TuiView:
         name = (workspace.get('name') or workspace['id']) if workspace else '#' + self.client.channel
         connected = self.client.connection_state == 'connected'
         status = ('● ' if connected else '○ ') + label_text(self.client.connection_state).capitalize() + '  '
-        brand = '  gigagent  '
+        brand = '  yapp  '
         width = self._app().output.get_size().columns
         session = clip_cells('  ' + label_text(name), max(0, width - len(brand) - get_cwidth(status) - 2))
         gap = ' ' * max(1, width - len(brand) - get_cwidth(session) - get_cwidth(status))

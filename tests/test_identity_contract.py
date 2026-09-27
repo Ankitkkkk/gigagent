@@ -193,7 +193,7 @@ class WrapperLaunchTests(unittest.TestCase):
             self.assertEqual(inject_env, {})
             payload = json.loads(Path(settings_path).read_text("utf-8"))
             self.assertEqual(
-                payload["mcpServers"]["agentchattr"]["headers"]["Authorization"],
+                payload["mcpServers"]["yapp"]["headers"]["Authorization"],
                 "Bearer named_claude_token",
             )
 
@@ -209,7 +209,7 @@ class WrapperLaunchTests(unittest.TestCase):
         )
 
         self.assertEqual(args[0], "-c")
-        self.assertIn('mcp_servers.agentchattr.url="http://127.0.0.1:7777/mcp"', args[1])
+        self.assertIn('mcp_servers.yapp.url="http://127.0.0.1:7777/mcp"', args[1])
         self.assertEqual(inject_env, {})
         self.assertIsNone(settings_path)
 
@@ -261,7 +261,7 @@ class WrapperLaunchTests(unittest.TestCase):
             (project_dir / ".mcp.json").write_text(json.dumps({
                 "mcpServers": {
                     "unity-mcp": {"type": "http", "url": "http://127.0.0.1:8090/mcp"},
-                    "agentchattr": {"type": "http", "url": "http://127.0.0.1:8200/mcp"},
+                    "yapp": {"type": "http", "url": "http://127.0.0.1:8200/mcp"},
                 }
             }))
 
@@ -284,15 +284,15 @@ class WrapperLaunchTests(unittest.TestCase):
             payload = json.loads(config_path.read_text("utf-8"))
             # Points at real server, not proxy
             self.assertEqual(
-                payload["mcpServers"]["agentchattr"]["url"],
+                payload["mcpServers"]["yapp"]["url"],
                 "http://127.0.0.1:8200/mcp",
             )
             # Bearer token in headers
             self.assertEqual(
-                payload["mcpServers"]["agentchattr"]["headers"]["Authorization"],
+                payload["mcpServers"]["yapp"]["headers"]["Authorization"],
                 "Bearer test_token_abc",
             )
-            # Project servers preserved (minus unauthenticated agentchattr)
+            # Project servers preserved (minus unauthenticated yapp)
             self.assertIn("unity-mcp", payload["mcpServers"])
             # Extra args preserved
             self.assertEqual(args[2], "--debug")
@@ -322,16 +322,16 @@ class WrapperLaunchTests(unittest.TestCase):
             settings_path = Path(inject_env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
             self.assertTrue(settings_path.exists())
             payload = json.loads(settings_path.read_text("utf-8"))
-            self.assertEqual(payload["mcpServers"]["agentchattr"]["type"], "http")
+            self.assertEqual(payload["mcpServers"]["yapp"]["type"], "http")
             # Points at the real streamable-http server, not the proxy. Gemini
             # expects the URL under "httpUrl" (not "url") for http transport.
             self.assertEqual(
-                payload["mcpServers"]["agentchattr"]["httpUrl"],
+                payload["mcpServers"]["yapp"]["httpUrl"],
                 "http://127.0.0.1:8200/mcp",
             )
             # Bearer token in headers
             self.assertEqual(
-                payload["mcpServers"]["agentchattr"]["headers"]["Authorization"],
+                payload["mcpServers"]["yapp"]["headers"]["Authorization"],
                 "Bearer gemini_token_xyz",
             )
 
@@ -347,7 +347,7 @@ class WrapperLaunchTests(unittest.TestCase):
         )
 
         self.assertEqual(args[0], "-c")
-        self.assertIn('mcp_servers.agentchattr.url="http://127.0.0.1:7777/mcp"', args[1])
+        self.assertIn('mcp_servers.yapp.url="http://127.0.0.1:7777/mcp"', args[1])
         self.assertEqual(args[2], "--no-alt-screen")
         self.assertIn("PATH", env)
 
@@ -382,7 +382,7 @@ class WrapperUnixLifecycleTests(unittest.TestCase):
                 agent="claude",
                 no_restart=False,
                 start_watcher=lambda inject_fn: None,
-                session_name="agentchattr-claude-1",
+                session_name="yapp-claude-1",
             )
 
         has_session_checks = [

@@ -30,7 +30,7 @@ def temporary_ports():
 
 def isolated_environment(directory, additions=None):
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith('AGENTCHATTR_') and k not in ('TMUX', 'TMUX_TMPDIR')}
+           if not k.startswith('YAPP_') and k not in ('TMUX', 'TMUX_TMPDIR')}
     socket_dir = Path(directory) / 'tmux'
     socket_dir.mkdir(exist_ok=True)
     env['TMUX_TMPDIR'] = str(socket_dir)
@@ -71,7 +71,7 @@ class IsolatedCliServer(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory(prefix='agentchattr-cli-test-')
+        cls.temp = tempfile.TemporaryDirectory(prefix='yapp-cli-test-')
         cls.addClassCleanup(cls.temp.cleanup)
         cls.log_path = Path(cls.temp.name) / 'server.log'
         cls.log = cls.log_path.open('w+')

@@ -93,7 +93,7 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
             snapshot['agents'] = [dict(
                 agent_id='ag_synthetic_status', registry_name='qa-status', provider='kilo',
                 cwd=self.temp.name, last_state='running', native_session_id='NATIVE-SECRET-QA',
-                tmux_session='agentchattr-ag_synthetic_status', history_mode='none', history_state='done',
+                tmux_session='yapp-ag_synthetic_status', history_mode='none', history_state='done',
                 history_note=None, unread_count=0, last_error=None,
                 last_launch={'kind': 'spawn', 'nonce': 'synthetic-only',
                              'at': '2026-09-13T00:00:00Z', 'pid': None})]
@@ -157,16 +157,16 @@ class _PtyCase(IsolatedCliServer):
                 'SHELL': '/bin/sh', 'TUI_INERT_LAUNCH_LOG': str(cls.shim_log)}
 
     def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory(prefix='agentchattr-tui-pty-')
+        self.scratch = tempfile.TemporaryDirectory(prefix='yapp-tui-pty-')
         self.addCleanup(self.scratch.cleanup)
         self.directory = Path(self.scratch.name)
         self.capture_path = self.directory / 'screen.json'
         self.terminal_env = dict(self.env, TERM='xterm-256color',
-                                 AGENTCHATTR_PORT=str(self.ports[0]),
-                                 AGENTCHATTR_MCP_HTTP_PORT=str(self.ports[1]),
-                                 AGENTCHATTR_MCP_SSE_PORT=str(self.ports[2]),
-                                 AGENTCHATTR_DATA_DIR=str(self.data_dir),
-                                 AGENTCHATTR_UPLOAD_DIR=str(self.upload_dir))
+                                 YAPP_PORT=str(self.ports[0]),
+                                 YAPP_MCP_HTTP_PORT=str(self.ports[1]),
+                                 YAPP_MCP_SSE_PORT=str(self.ports[2]),
+                                 YAPP_DATA_DIR=str(self.data_dir),
+                                 YAPP_UPLOAD_DIR=str(self.upload_dir))
         self.artifacts = Path(os.environ.get('TUI_QA_ARTIFACT_DIR', self.directory))
         self.artifacts.mkdir(parents=True, exist_ok=True)
         resolved = {name: shutil.which(name, path=self.terminal_env['PATH'])

@@ -126,7 +126,7 @@ class AttachHelperTests(unittest.TestCase):
     def test_stable_id_target_ignores_unusual_registry_name(self):
         self.assertEqual(self.helper('tmux_target')({
             'agent_id': 'ag_a', 'registry_name': 'name ; $(touch nope)'}),
-            'agentchattr-ag_a')
+            'yapp-ag_a')
 
     def test_present_server_target_does_not_fall_back(self):
         target = self.helper('tmux_target')
@@ -143,11 +143,11 @@ class AttachHelperTests(unittest.TestCase):
             code = self.helper()({'agent_id': 'ag_a'}, runner=runner)
         self.assertEqual(code, 7)
         self.assertEqual(runner.call_args_list[0].args[0],
-                         ['tmux', 'has-session', '-t', '=agentchattr-ag_a'])
+                         ['tmux', 'has-session', '-t', '=yapp-ag_a'])
         self.assertEqual(runner.call_args_list[0].kwargs,
                          {'timeout': 5, 'capture_output': True})
         self.assertEqual(runner.call_args_list[1].args[0],
-                         ['tmux', 'attach', '-t', 'agentchattr-ag_a'])
+                         ['tmux', 'attach', '-t', 'yapp-ag_a'])
         self.assertEqual(runner.call_args_list[1].kwargs, {})
         self.assertEqual(runner.call_count, 2)
 
@@ -680,7 +680,7 @@ class MainValidationTests(unittest.TestCase):
 
     def test_shell_connection_failure_includes_manual_start_hint(self):
         runner = MagicMock(side_effect=CLIError(
-            "Could not connect to the local agentchattr server"))
+            "Could not connect to the local yapp server"))
         code, _, stderr, _, _ = self.run_main(["sessions"], runner=runner)
         self.assertEqual(code, 1)
         self.assertIn("Could not connect", stderr)
@@ -694,7 +694,7 @@ class MainValidationTests(unittest.TestCase):
         self.assertIn("Start it manually: python run.py", stderr)
 
     def test_all_shell_commands_share_down_server_error_and_manual_hint(self):
-        expected = ("Could not connect to the local agentchattr server\n"
+        expected = ("Could not connect to the local yapp server\n"
                     "Start it manually: python run.py\n")
         commands = [
             ["--url", "http://127.0.0.1:1", "send", "--json", "hello"],

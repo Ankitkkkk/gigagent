@@ -175,7 +175,7 @@ class ProcessOwnershipTests(unittest.TestCase):
     def test_reused_pid_is_not_signalled(self):
         child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
         self.addCleanup(self.stop_child, child)
-        stop_wrapper_process(child.pid, Path('/not-this-project'), Path('/identity.json'), 'agentchattr-ag_x')
+        stop_wrapper_process(child.pid, Path('/not-this-project'), Path('/identity.json'), 'yapp-ag_x')
         self.assertIsNone(child.poll())
 
     @staticmethod
@@ -191,9 +191,9 @@ class ProcessOwnershipTests(unittest.TestCase):
             script.write_text('import time\ntime.sleep(30)\n')
             identity = root / 'identity.json'
             child = subprocess.Popen([sys.executable, str(script), 'fake', '--identity-file',
-                                      str(identity), '--tmux-name', 'agentchattr-ag_x'])
+                                      str(identity), '--tmux-name', 'yapp-ag_x'])
             self.addCleanup(self.stop_child, child)
-            stop_wrapper_process(child.pid, root, identity, 'agentchattr-ag_x')
+            stop_wrapper_process(child.pid, root, identity, 'yapp-ag_x')
             self.assertIsNotNone(child.wait(timeout=5))
 
     def test_empty_cmdline_on_live_process_fails_closed(self):
@@ -201,7 +201,7 @@ class ProcessOwnershipTests(unittest.TestCase):
         self.addCleanup(self.stop_child, child)
         with patch.object(Path, 'read_bytes', return_value=b''):
             with self.assertRaisesRegex(RuntimeError, 'Cannot verify'):
-                stop_wrapper_process(child.pid, Path('/root'), Path('/identity'), 'agentchattr-ag_x')
+                stop_wrapper_process(child.pid, Path('/root'), Path('/identity'), 'yapp-ag_x')
         self.assertIsNone(child.poll())
 
     def test_transient_empty_cmdline_is_retried_before_stopping(self):
@@ -211,11 +211,11 @@ class ProcessOwnershipTests(unittest.TestCase):
             script.write_text('import time; time.sleep(30)')
             identity = root / 'identity.json'
             argv = [sys.executable, str(script), 'fake', '--identity-file', str(identity),
-                    '--tmux-name', 'agentchattr-ag_x']
+                    '--tmux-name', 'yapp-ag_x']
             child = subprocess.Popen(argv)
             self.addCleanup(self.stop_child, child)
             with patch.object(Path, 'read_bytes', side_effect=[b'', b'\0'.join(os.fsencode(a) for a in argv)]):
-                stop_wrapper_process(child.pid, root, identity, 'agentchattr-ag_x')
+                stop_wrapper_process(child.pid, root, identity, 'yapp-ag_x')
             self.assertIsNotNone(child.wait(timeout=5))
 
     def test_owned_wrapper_ignoring_term_is_killed(self):
@@ -235,12 +235,12 @@ class ExactTmuxTests(unittest.TestCase):
     def test_remove_uses_exact_target_and_checks_absence(self):
         replies = [subprocess.CompletedProcess([], 0, stderr=''),
                    subprocess.CompletedProcess([], 0, stderr=''),
-                   subprocess.CompletedProcess([], 1, stderr="can't find session: agentchattr-ag_one")]
+                   subprocess.CompletedProcess([], 1, stderr="can't find session: yapp-ag_one")]
         with patch('workspace_launcher.subprocess.run', side_effect=replies) as run:
-            TmuxOps().remove_session('agentchattr-ag_one')
-        self.assertTrue(all('=agentchattr-ag_one' in call.args[0] for call in run.call_args_list))
+            TmuxOps().remove_session('yapp-ag_one')
+        self.assertTrue(all('=yapp-ag_one' in call.args[0] for call in run.call_args_list))
 
     def test_tmux_error_is_not_treated_as_absence(self):
         with patch('workspace_launcher.subprocess.run', return_value=subprocess.CompletedProcess(
                 [], 1, stderr='permission denied')):
-            with self.assertRaises(RuntimeError): TmuxOps().remove_session('agentchattr-ag_one')
+            with self.assertRaises(RuntimeError): TmuxOps().remove_session('yapp-ag_one')

@@ -92,7 +92,7 @@ def tmux_target(agent):
         target = agent['tmux_session']
     else:
         agent_id = agent.get('agent_id')
-        target = f'agentchattr-{agent_id}' if agent_id else None
+        target = f'yapp-{agent_id}' if agent_id else None
     if not isinstance(target, str) or not target:
         raise CLIError('Agent terminal session is unavailable')
     return target
@@ -291,7 +291,7 @@ class WorkspaceAPI:
             except CLIError:
                 raise
             except OSError:
-                raise CLIError("Could not connect to the local agentchattr server") from None
+                raise CLIError("Could not connect to the local yapp server") from None
             except ValueError as error:
                 raise CLIError(str(error)) from None
         try:
@@ -396,9 +396,9 @@ class WorkspaceAPI:
         try:
             values = self.request('GET', '/api/terminal-capabilities')
         except CLIError:
-            raise CLIError('Restart the agentchattr server to use saved agent profiles and orchestration.') from None
+            raise CLIError('Restart the yapp server to use saved agent profiles and orchestration.') from None
         if not isinstance(values, dict) or values.get(capability) != 1:
-            raise CLIError('Restart the agentchattr server to use saved agent profiles and orchestration.')
+            raise CLIError('Restart the yapp server to use saved agent profiles and orchestration.')
         return values
 
     def create(self, name="", *, orchestrator=None):

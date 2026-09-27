@@ -28,7 +28,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 
-SERVER_NAME = "agentchattr"
+SERVER_NAME = "yapp"
+# Pre-rename server name; removed from provider configs so tools are not listed twice.
+LEGACY_SERVER_NAMES = ("agentchattr",)
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +41,7 @@ def _write_json_mcp_settings(config_file: Path, url: str, transport: str = "http
                               *, token: str = "", http_key: str = "httpUrl") -> Path:
     """Write/merge a settings-style JSON file with nested mcpServers config.
 
-    Preserves existing servers in the file — only updates the agentchattr entry.
+    Preserves existing servers in the file — only updates the yapp entry.
 
     Gemini CLI 0.32+ expects:
       - "httpUrl" key (not "url") for streamable-http transport
@@ -68,6 +70,8 @@ def _write_json_mcp_settings(config_file: Path, url: str, transport: str = "http
         entry = {"type": transport, "url": url, "trust": True}
     if token:
         entry["headers"] = {"Authorization": f"Bearer {token}"}
+    for legacy in LEGACY_SERVER_NAMES:
+        servers.pop(legacy, None)
     servers[SERVER_NAME] = entry
     existing["mcpServers"] = servers
 
@@ -89,8 +93,9 @@ def _read_project_mcp_servers(project_dir: Path) -> dict:
         try:
             data = json.loads(mcp_file.read_text("utf-8"))
             servers = data.get("mcpServers", {})
-            # Remove agentchattr — we'll add our own authenticated version
-            servers.pop(SERVER_NAME, None)
+            # Remove yapp — we'll add our own authenticated version
+            for name in (SERVER_NAME, *LEGACY_SERVER_NAMES):
+                servers.pop(name, None)
             return servers
         except Exception:
             pass
@@ -113,7 +118,7 @@ def _write_claude_mcp_config(
     # Start with other project servers (e.g. unity-mcp)
     servers = dict(project_servers or {})
 
-    # Add agentchattr with bearer token for direct server auth
+    # Add yapp with bearer token for direct server auth
     entry: dict = {"type": "http", "url": url}
     if token:
         entry["headers"] = {"Authorization": f"Bearer {token}"}
@@ -589,7 +594,7 @@ def parse_wrapper_args(argv: list[str], agent_names: list[str]):
     parser.add_argument("--identity-file", default=None,
                         help="JSON with registry_name+token from the server; skips /api/register")
     parser.add_argument("--no-attach", action="store_true", help="Never attach to the tmux session")
-    parser.add_argument("--tmux-name", default=None, help="tmux session name (default agentchattr-<name>)")
+    parser.add_argument("--tmux-name", default=None, help="tmux session name (default yapp-<name>)")
     parser.add_argument("--provider-env", action="append", default=[], metavar="KEY=VALUE",
                         help="Extra environment for the provider process (repeatable)")
     # Per-project isolation flags (consumed by apply_cli_overrides(); listed for --help)
@@ -647,7 +652,7 @@ def main():
 
     from config_loader import apply_cli_overrides, load_config
 
-    # Apply AGENTCHATTR_* overrides (from CLI flags or env) BEFORE loading
+    # Apply YAPP_* overrides (from CLI flags or env) BEFORE loading
     # config so the wrapper connects to the same data_dir/ports as a server
     # launched with matching flags.
     apply_cli_overrides()
@@ -679,7 +684,7 @@ def main():
 
     assigned_name = registration["name"]
     assigned_token = registration["token"]
-    unix_session_name = args.tmux_name or f"agentchattr-{assigned_name}"
+    unix_session_name = args.tmux_name or f"yapp-{assigned_name}"
     print(f"  Registered as: {assigned_name} (slot {registration.get('slot', '?')})")
 
     proxy = None

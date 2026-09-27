@@ -64,7 +64,7 @@ explicitly, then continue.
 **Watcher.** I do not poll the file. A persistent Monitor emits an event on
 every new non-Claude `### [` header and every new commit:
 ```
-cd /home/fa064152/projects/personal/agent-collab/agentchattr
+cd /home/fa064152/projects/personal/agent-collab/yapp
 last_lines=$(wc -l < AGENT_MESSAGES.md); last_head=$(git rev-parse HEAD)
 while true; do sleep 5
   cur=$(wc -l < AGENT_MESSAGES.md 2>/dev/null || echo 0)
@@ -103,7 +103,7 @@ read the entry with `awk '/<subject>/{p=1} p' AGENT_MESSAGES.md`.
   them; when a review of commit X is running while Codex edits the same file,
   tell the reviewer to reason from the diff and not run that test file.
 - Never run the full suite while Codex is mid-edit; run it on a clean tree
-  before the finishing step. `python` = `/tmp/agentchattr-cli-venv/bin/python`
+  before the finishing step. `python` = `/tmp/yapp-cli-venv/bin/python`
   (plain `python` is unavailable on this box).
 - `⚠ Cannot verify from diff` items in a review are the controller's to
   resolve before closing the task.
@@ -164,7 +164,7 @@ finishing menu (merge locally / push+PR / keep) for the **whole branch**.
    tmux via `switch-client`, `/history` no-arg unchanged, picker `fresh`
    marker + 4-hex id suffix + archived `--session` prompt + `sessions
    --archived`, auto-start passes explicit `run.py` flags and refuses when
-   `agentchattr-server` already exists, polling only while
+   `yapp-server` already exists, polling only while
    starting/pending/WS-down.
 7. `/attach` (handler, help, completion) deferred wholly to Task 5, no
    placeholder (Codex proposal, accepted).

@@ -1,5 +1,5 @@
 /**
- * store.js -- Minimal reactive state for agentchattr
+ * store.js -- Minimal reactive state for yapp
  *
  * Thin wrapper: get/set/watch. During the transition, feature modules
  * proxy their globals through here one feature at a time (starting

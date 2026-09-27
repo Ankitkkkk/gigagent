@@ -10,10 +10,10 @@ import app
 
 
 class RoomSubtitleTests(unittest.TestCase):
-    """A second name shown beside 'agentchattr' in the header.
+    """A second name shown beside 'yapp' in the header.
 
     Several servers run at once (one per repo) and every one of them says
-    'agentchattr', so the tab and header are indistinguishable. This adds a
+    'yapp', so the tab and header are indistinguishable. This adds a
     name alongside the product name rather than replacing it -- the existing
     `title` setting already covers a full rename.
     """
@@ -92,7 +92,7 @@ class RoomSubtitleTests(unittest.TestCase):
 
     def test_the_product_name_is_not_replaced_by_the_new_setting(self):
         """Control: `title` still means a full rename and is untouched."""
-        self.assertEqual(app.room_settings.get("title"), "agentchattr")
+        self.assertEqual(app.room_settings.get("title"), "yapp")
 
 
 if __name__ == "__main__":

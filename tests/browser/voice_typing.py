@@ -1,6 +1,6 @@
 """Voice editing/lifecycle regression checks in the real browser UI.
 
-Run an isolated Agentchattr server, install Playwright/Chromium in a test env,
+Run an isolated Yapp server, install Playwright/Chromium in a test env,
 then run: python tests/browser/voice_typing.py http://127.0.0.1:PORT
 This clicks/types in the app and sends one uniquely named test message.
 SpeechRecognition is replaced at the browser API boundary: these checks do

@@ -23,7 +23,7 @@ from cli_view_contracts import ActionOutcome, ViewEvent, _safe, terminal_text
 
 
 ROOT = Path(__file__).resolve().parent
-SERVER_SESSION = 'agentchattr-server'
+SERVER_SESSION = 'yapp-server'
 _RESUME_COMMAND = ContextVar('resume_command', default=None)
 
 
@@ -49,12 +49,12 @@ def _probe_status(url, timeout):
     try:
         status = cli_api.request_json(url, token, 'GET', '/api/status', timeout=remaining)
     except CLIError as error:
-        if error.status is None and str(error) == 'Could not connect to the local agentchattr server':
+        if error.status is None and str(error) == 'Could not connect to the local yapp server':
             return None
         raise
     if (not isinstance(status, dict) or not isinstance(status.get('paused'), bool)
             or not isinstance(status.get('data_dir'), str) or not status['data_dir']):
-        raise CLIError('The local endpoint did not return an agentchattr server status')
+        raise CLIError('The local endpoint did not return a yapp server status')
     return status
 
 
@@ -1011,7 +1011,7 @@ class WorkspaceChatController:
             if (action == 'remove' and isinstance(error, CLIError)
                     and error.status == 404 and error.message == 'Not Found'):
                 error = CLIError('This server does not support Remove agent. '
-                                 'Restart the agentchattr server, then retry. '
+                                 'Restart the yapp server, then retry. '
                                  'The agent was not removed.', 404)
             resume = ((_RESUME_COMMAND.get() or argparse.Namespace(agent=agent_id, fresh=payload['fresh'],
                       agent_name=payload['name'], cwd=payload['cwd'])) if action == 'resume' else None)
