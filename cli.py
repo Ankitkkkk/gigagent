@@ -591,6 +591,10 @@ def main(argv=None, *, prog=None):
         parser.error(str(error))
     try:
         if args.command == "chat":
+            import updates
+            # Only a relaunch after an update names a state file; pop it before the
+            # server (or anything else) is started so no child or later run reuses it.
+            relaunch_state = os.environ.pop(updates.RELAUNCH_ENV, None)
             initial_notices = []
 
             def startup_output(text):
@@ -600,17 +604,14 @@ def main(argv=None, *, prog=None):
 
             startup_status = ensure_server(url, explicit_url=args.url is not None, config=config,
                                            output=startup_output)
-            import updates
             restored = None
             if startup_status.get('data_dir'):
-                restored = updates.load_relaunch_state(startup_status['data_dir'])
-            selector = args.session
-            if restored and selector is None and args.channel is None:
-                selector = restored['session_id']
+                # The restored session is only a preference; the TUI falls back to the picker.
+                restored = updates.load_relaunch_state(startup_status['data_dir'], path=relaunch_state)
             if restored and args.channel is not None and restored['channel']:
                 client.channel = restored['channel']
             controller = WorkspaceChatController(
-                client, WorkspaceAPI(url, timeout=args.timeout), selector=selector,
+                client, WorkspaceAPI(url, timeout=args.timeout), selector=args.session,
                 no_resume=args.no_resume, plain_channel=args.channel is not None,
                 data_dir=startup_status.get('data_dir'), providers=config.get('agents', {}))
             relaunch = False
@@ -629,12 +630,14 @@ def main(argv=None, *, prog=None):
                 except Exception as error:
                     parser.exit(1, "Full-screen terminal stopped after an unexpected "
                                 f"local error ({type(error).__name__}); rerun with --plain.\n")
-            if relaunch is True:
+            if relaunch is True and controller.data_dir:
+                os.environ[updates.RELAUNCH_ENV] = str(updates.relaunch_path(controller.data_dir))
                 try:
                     os.execv(sys.executable, [sys.executable, *sys.argv])
                 except OSError as error:
+                    os.environ.pop(updates.RELAUNCH_ENV, None)
                     parser.exit(1, f"yapp was updated but could not reopen ({error.strerror}); "
-                                "run the same command again. Your drafts are saved.\n")
+                                "run the same command again.\n")
         elif args.command == 'attach':
             api = WorkspaceAPI(url, timeout=args.timeout)
 

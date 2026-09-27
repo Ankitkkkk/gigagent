@@ -86,6 +86,9 @@ class AutoUpdater:
                 self.host.notice(f"{kind} to {result['latest']} failed: {outcome['message']} "
                                  'F4 → Update yapp to retry.')
                 return ActionOutcome('failed', outcome['message'])
+            if wait_safe:
+                # apply() can take minutes; never restart under work started meanwhile.
+                await self._wait_safe()
             problem = await self.host.restart_server_for_update()
             if wait_safe:
                 # The user may have opened a dialog while installing; do not cut it off.

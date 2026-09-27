@@ -30,7 +30,7 @@ class EntryHarness(unittest.TestCase):
     def run_main(self, argv=(), *, stdin_tty=True, stdout_tty=True,
                  platform="linux", term="xterm-256color", ensure=None,
                  tui_effect=None, install_tui=True, export_tui=True,
-                 tui_import_error=None, legacy_effect=None):
+                 tui_import_error=None, legacy_effect=None, extra_env=None):
         stdin = TerminalStream(tty=stdin_tty)
         stdout = TerminalStream(tty=stdout_tty)
         stderr = io.StringIO()
@@ -52,6 +52,8 @@ class EntryHarness(unittest.TestCase):
                 raise tui_import_error
             return original_import(name, *args, **kwargs)
         environment = {} if term is None else {"TERM": term}
+        environment.update(extra_env or {})
+        env_after = {}
         with patch.object(cli.sys, "stdin", stdin), \
                 patch.object(cli.sys, "platform", platform), \
                 patch.dict(os.environ, environment, clear=True), \
@@ -66,7 +68,8 @@ class EntryHarness(unittest.TestCase):
                 code = 0
             except SystemExit as error:
                 code = error.code
-        return {
+            env_after.update(os.environ)
+        return {"env_after": env_after,
             "code": code, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(),
             "ensure": ensure, "legacy": legacy, "tui": tui, "config": load_config,
         }
@@ -211,32 +214,57 @@ class MainEntryTests(EntryHarness):
         self.assertEqual(result["tui"].await_args.kwargs["initial_notices"],
                          ["Started[31m server", "Warning: mismatch"])
 
-    def test_update_relaunch_execs_same_command_after_tui_exits(self):
-        with patch.object(cli.os, "execv") as execv, patch.object(cli.sys, "argv", ["yapp", "chat"]):
+    def test_update_relaunch_execs_same_command_with_state_path(self):
+        import updates
+        seen = {}
+        def execv(executable, argv):
+            seen['env'] = os.environ.get(updates.RELAUNCH_ENV)
+        with patch.object(cli.os, "execv", side_effect=execv) as mocked, \
+                patch.object(cli.sys, "argv", ["yapp", "chat"]):
             result = self.run_main(("chat",), tui_effect=lambda *a, **k: True)
         self.assertEqual(result["code"], 0, result["stderr"])
-        execv.assert_called_once_with(sys.executable, [sys.executable, "yapp", "chat"])
+        mocked.assert_called_once_with(sys.executable, [sys.executable, "yapp", "chat"])
+        self.assertEqual(seen['env'], str(updates.relaunch_path("/tmp/entry-data")))
         updater = result["tui"].await_args.kwargs["updater_factory"](Mock())
         self.assertEqual(updater.data_dir, "/tmp/entry-data")
-        with patch.object(cli.os, "execv") as execv:
+        with patch.object(cli.os, "execv") as mocked:
             self.run_main(("chat",), tui_effect=lambda *a, **k: False)
-        execv.assert_not_called()
+        mocked.assert_not_called()
 
-    def test_saved_relaunch_state_restores_selection_and_drafts(self):
+    def run_relaunched(self, data, argv, state_path):
+        import updates
+        seen = {}
+        def ensure(*args, **kwargs):
+            seen['env'] = os.environ.get(updates.RELAUNCH_ENV)
+            return {"paused": False, "data_dir": data}
+        extra = {} if state_path is None else {updates.RELAUNCH_ENV: str(state_path)}
+        result = self.run_main(argv, ensure=Mock(side_effect=ensure), extra_env=extra)
+        result["env_at_server_start"] = seen.get('env')
+        result["env_after"] = result["env_after"].get(updates.RELAUNCH_ENV)
+        return result
+
+    def test_relaunch_state_comes_only_from_the_environment_path(self):
         import tempfile
         import updates
         with tempfile.TemporaryDirectory() as data:
-            ensure = Mock(return_value={"paused": False, "data_dir": data})
-            updates.save_relaunch_state(data, drafts=[(("session", "w1"), "hi", 2)],
-                                        session_id="w1", channel=None, notices=["Updated to yapp 0.6.0."])
-            result = self.run_main(("chat",), ensure=ensure)
+            path = updates.save_relaunch_state(data, drafts=[(("session", "w1"), "hi", 2)],
+                                               session_id="w1", channel=None,
+                                               notices=["Updated to yapp 0.6.0."])
+            result = self.run_relaunched(data, ("chat",), None)
+            self.assertIsNone(result["tui"].await_args.kwargs["restored"])
+            self.assertTrue(path.exists())
+            result = self.run_relaunched(data, ("chat",), path)
+            self.assertEqual(result["code"], 0, result["stderr"])
             _, controller = result["tui"].await_args.args
-            self.assertEqual(controller.selector, "w1")
+            self.assertIsNone(controller.selector)  # A soft preference, applied by the TUI.
             restored = result["tui"].await_args.kwargs["restored"]
+            self.assertEqual(restored["session_id"], "w1")
             self.assertEqual(restored["drafts"], [(("session", "w1"), "hi", 2)])
-            self.assertIsNone(updates.load_relaunch_state(data))
-            updates.save_relaunch_state(data, drafts=[], session_id=None, channel="ops", notices=[])
-            result = self.run_main(("chat", "--channel", "support"), ensure=ensure)
+            self.assertFalse(path.exists())
+            self.assertIsNone(result["env_after"])
+            self.assertIsNone(result["env_at_server_start"])
+            path = updates.save_relaunch_state(data, drafts=[], session_id=None, channel="ops", notices=[])
+            result = self.run_relaunched(data, ("chat", "--channel", "support"), path)
             client, controller = result["tui"].await_args.args
             self.assertEqual(client.channel, "ops")
             self.assertIsNone(controller.selector)

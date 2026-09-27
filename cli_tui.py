@@ -130,6 +130,11 @@ class TuiApplication:
             mouse_support=Condition(lambda: not self.view.selecting_text),
             key_bindings=merge_key_bindings([self.view.global_key_bindings, bindings]), style=self.view.style)
         self.relaunch_requested = False
+        # A relaunch's saved session is a soft preference; explicit --session stays strict.
+        self._preferred_session = None
+        if (restored and restored.get('session_id') and controller.selector is None
+                and not controller.plain_channel and controller.workspace is None):
+            self._preferred_session = restored['session_id']
         self.updater = None
         self._update_task = None
         self._updater_factory = updater_factory
@@ -547,6 +552,29 @@ class TuiApplication:
                             self.application.exit()
                         self._finished = True
 
+    async def _select_preferred_session(self):
+        """Reselect the session from before an update relaunch; False opens the picker."""
+        session_id, self._preferred_session = self._preferred_session, None
+        if session_id is None:
+            return False
+        try:
+            response = await self.controller.list_sessions(include_archived=True)
+            rows = response['workspaces']
+            self.view.set_sessions(rows)
+            if response.get('warning'):
+                self.notice(response['warning'])
+            match = next((row for row in rows if row.get('id') == session_id), None)
+            if match is not None and not match.get('archived'):
+                outcome = await self.controller.select_session(session_id)
+                if outcome.status == 'completed' and self.controller.workspace is not None:
+                    return True
+                if outcome.status == 'cancelled':
+                    return False
+        except (CLIError, OSError, TimeoutError, KeyError, TypeError, AttributeError):
+            pass
+        self.notice('Your previous session is no longer available; choose a session.')
+        return False
+
     async def _startup(self):
         try:
             if self.controller.plain_channel or self.controller.workspace is not None:
@@ -564,7 +592,7 @@ class TuiApplication:
                     if outcome.status == 'failed':
                         raise CLIError(outcome.message or 'Session selection failed')
                     await self.request_quit(signal=True)
-            else:
+            elif not await self._select_preferred_session():
                 await self.navigate(mandatory=True)
         except asyncio.CancelledError:
             if not self.quitting:

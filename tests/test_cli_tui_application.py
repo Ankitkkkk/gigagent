@@ -174,7 +174,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 await ui.tui.relaunch_for_update('0.6.0', 'restart failed')
                 await ui.wait_until(lambda: ui.task.done())
                 self.assertTrue(ui.tui.relaunch_requested)
-            state = updates.load_relaunch_state(data)
+            state = updates.load_relaunch_state(data, path=updates.relaunch_path(data))
             self.assertEqual(state['session_id'], workspace()['id'])
             self.assertEqual([text for _, text, _ in state['drafts']], ['keep me'])
             self.assertEqual(state['notices'][0], 'Updated to yapp 0.6.0.')
@@ -198,6 +198,33 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             await self.connected(ui)
             await ui.wait_until(lambda: ui.view.composer.text == 'restored text')
             self.assertIn('Updated to yapp 0.6.0.', ui.state.notices.lines)
+
+    async def test_restored_session_is_selected_without_a_picker(self):
+        restored = {'session_id': 'ws_two', 'channel': None, 'notices': [],
+                    'drafts': [(('session', 'ws_two'), 'hello two', 9)]}
+        async with self.ui(rows=[workspace(), workspace('ws_two', 'Two')], restored=restored) as ui:
+            await self.connected(ui)
+            await ui.wait_until(lambda: ui.controller.workspace is not None)
+            self.assertEqual(ui.controller.workspace['id'], 'ws_two')
+            self.assertIsNone(ui.controller.selector)
+            await ui.wait_until(lambda: ui.view.composer.text == 'hello two')
+
+    async def test_unavailable_restored_session_falls_back_to_picker(self):
+        cases = (('missing', [workspace()], 'ws_gone'),
+                 ('archived', [workspace(archived=True), workspace('ws_two', 'Two')], 'ws_one'))
+        for label, rows, session_id in cases:
+            with self.subTest(label):
+                restored = {'session_id': session_id, 'channel': None, 'notices': [],
+                            'drafts': [(('session', session_id), 'kept draft', 4)]}
+                async with self.ui(rows=rows, restored=restored) as ui:
+                    await self.modal(ui, 'Show archived')
+                    self.assertIn('Your previous session is no longer available; choose a session.',
+                                  ui.state.notices.lines)
+                    self.assertFalse(ui.task.done())
+                    self.assertIsNone(ui.tui._run_error)
+                    self.assertIsNone(ui.controller.workspace)
+                    self.assertEqual(ui.state.drafts.get(('session', session_id)), 'kept draft')
+                    self.assertNotIn('unarchive', ui.events)
 
     async def test_updater_runs_in_background_and_is_cancelled_at_shutdown(self):
         from cli_view_contracts import ActionOutcome

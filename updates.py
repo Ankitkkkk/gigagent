@@ -25,7 +25,9 @@ APPLY_TIMEOUT = 600
 RELAUNCH_MAX_AGE = 600
 CACHE_FILE = 'update_check.json'
 LOCK_FILE = 'update.lock'
-RELAUNCH_FILE = 'relaunch_state.json'
+RELAUNCH_FILE = 'relaunch_state.{pid}.json'
+RELAUNCH_ENV = 'YAPP_RELAUNCH_STATE'
+_RELAUNCH_NAME = re.compile(r'^relaunch_state\.\d+\.json$')
 MARKER = 'yapp-install.json'
 _VERSION = re.compile(r'^v?(\d+(?:\.\d+)*)$')
 
@@ -235,29 +237,67 @@ def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess
         lock.unlink(missing_ok=True)
 
 
-def save_relaunch_state(data_dir, *, drafts, session_id, channel, notices, now=time.time):
+def relaunch_path(data_dir, pid=None):
+    """This process's relaunch file; execv keeps the pid, but the path travels in RELAUNCH_ENV."""
+    return Path(data_dir) / RELAUNCH_FILE.format(pid=os.getpid() if pid is None else pid)
+
+
+def save_relaunch_state(data_dir, *, drafts, session_id, channel, notices, now=time.time, pid=None):
+    """Write this process's drafts/selection privately and atomically; return the path."""
     payload = {'saved_at': now(), 'session_id': session_id, 'channel': channel,
                'notices': list(notices),
                'drafts': [{'key': list(key), 'text': text, 'cursor': cursor}
                           for key, text, cursor in drafts]}
-    path = Path(data_dir) / RELAUNCH_FILE
+    path = relaunch_path(data_dir, pid)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.tmp')
     fd = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
     with os.fdopen(fd, 'w') as handle:
         json.dump(payload, handle)
     os.replace(temporary, path)
+    return path
 
 
-def load_relaunch_state(data_dir, *, now=time.time):
-    """Return saved drafts/selection once, or None; the file is always removed."""
-    path = Path(data_dir) / RELAUNCH_FILE
+def _clean_stale_relaunch_files(data_dir):
+    """Remove leftovers from relaunches that never happened (crashes, failed execv)."""
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, ValueError):
-        payload = None
+        entries = list(Path(data_dir).glob('relaunch_state.*.json*'))
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name.removesuffix('.tmp')
+        if not _RELAUNCH_NAME.match(name):
+            continue
+        try:
+            if time.time() - entry.stat().st_mtime > RELAUNCH_MAX_AGE:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def load_relaunch_state(data_dir, *, path=None, now=time.time):
+    """Return the saved drafts/selection at `path` once, or None; that file is always removed.
+
+    Only a relaunch file directly inside data_dir is read (and deleted); without a
+    path (a normal start) nothing is loaded. Stale leftovers are cleaned up either way.
+    """
+    payload = None
+    try:
+        if path:
+            path = Path(path)
+            if path.parent.resolve() != Path(data_dir).resolve() or not _RELAUNCH_NAME.match(path.name):
+                path = None
+            else:
+                try:
+                    payload = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    payload = None
+                finally:
+                    path.unlink(missing_ok=True)
     finally:
-        path.unlink(missing_ok=True)
+        _clean_stale_relaunch_files(data_dir)
+    if not path:
+        return None
     try:
         age = now() - float(payload['saved_at'])
         if not 0 <= age <= RELAUNCH_MAX_AGE:

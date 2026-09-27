@@ -103,6 +103,22 @@ class AutoUpdaterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clock.waits[:2], [1, 1])
         self.assertEqual(host.relaunched, [('0.6.0', None)])
 
+    async def test_restart_waits_until_safe_again_after_install(self):
+        host = FakeHost()
+        events = []
+        clock = Clock(hook=lambda n: (events.append(('tick', host.restarted)),
+                                      setattr(host, 'safe', n >= 3)), limit=10)
+        auto, _, apply = updater(host, clock=clock)
+        def install(*args, **kwargs):
+            host.safe = False  # The user started work while apply ran.
+            return INSTALLED
+        apply.side_effect = install
+        await run_until_cancelled(auto)
+        self.assertEqual(clock.waits[:3], [1, 1, 1])
+        self.assertEqual(events[:3], [('tick', 0)] * 3)
+        self.assertEqual(host.restarted, 1)
+        self.assertEqual(host.relaunched, [('0.6.0', None)])
+
     async def test_failed_install_is_reported_once_and_not_retried(self):
         host = FakeHost()
         failed = {'ok': False, 'state': 'failed', 'version': '', 'message': 'Install failed: boom.'}

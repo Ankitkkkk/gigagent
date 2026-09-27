@@ -289,20 +289,61 @@ class RelaunchStateTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_round_trip_private_and_consumed_once(self):
-        updates.save_relaunch_state(
+        path = updates.save_relaunch_state(
             self.data, drafts=[(('session', 'ws_1'), 'hello @claude', 5)],
             session_id='ws_1', channel=None, notices=['Updated to yapp 0.6.0.'], now=lambda: 100.0)
-        path = self.data / updates.RELAUNCH_FILE
+        self.assertEqual(path, self.data / f'relaunch_state.{os.getpid()}.json')
+        self.assertEqual(path, updates.relaunch_path(self.data))
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        state = updates.load_relaunch_state(self.data, now=lambda: 150.0)
+        state = updates.load_relaunch_state(self.data, path=str(path), now=lambda: 150.0)
         self.assertEqual(state, {'session_id': 'ws_1', 'channel': None,
                                  'drafts': [(('session', 'ws_1'), 'hello @claude', 5)],
                                  'notices': ['Updated to yapp 0.6.0.']})
         self.assertFalse(path.exists())
-        self.assertIsNone(updates.load_relaunch_state(self.data, now=lambda: 150.0))
+        self.assertIsNone(updates.load_relaunch_state(self.data, path=str(path), now=lambda: 150.0))
+
+    def test_two_processes_do_not_collide(self):
+        first = updates.save_relaunch_state(self.data, drafts=[(('session', 'a'), 'one', 1)],
+                                            session_id='a', channel=None, notices=[], pid=111)
+        second = updates.save_relaunch_state(self.data, drafts=[(('session', 'b'), 'two', 2)],
+                                             session_id='b', channel=None, notices=[], pid=222)
+        self.assertNotEqual(first, second)
+        self.assertEqual(updates.load_relaunch_state(self.data, path=str(second))['session_id'], 'b')
+        self.assertTrue(first.exists())
+        self.assertEqual(updates.load_relaunch_state(self.data, path=str(first))['drafts'],
+                         [(('session', 'a'), 'one', 1)])
+
+    def test_without_a_path_nothing_is_loaded(self):
+        path = updates.save_relaunch_state(self.data, drafts=[], session_id='a', channel=None, notices=[])
+        self.assertIsNone(updates.load_relaunch_state(self.data))
+        self.assertIsNone(updates.load_relaunch_state(self.data, path=None))
+        self.assertTrue(path.exists())
+
+    def test_foreign_paths_are_neither_read_nor_deleted(self):
+        other = self.data / 'notes.json'
+        other.write_text('{}')
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        elsewhere = updates.save_relaunch_state(outside.name, drafts=[], session_id='a',
+                                                channel=None, notices=[])
+        for path in (other, elsewhere):
+            with self.subTest(path=path):
+                self.assertIsNone(updates.load_relaunch_state(self.data, path=str(path)))
+                self.assertTrue(path.exists())
+
+    def test_stale_leftovers_are_cleaned_up_on_load(self):
+        stale = updates.save_relaunch_state(self.data, drafts=[], session_id='a', channel=None,
+                                            notices=[], pid=111)
+        fresh = updates.save_relaunch_state(self.data, drafts=[], session_id='b', channel=None,
+                                            notices=[], pid=222)
+        old = stale.stat().st_mtime - updates.RELAUNCH_MAX_AGE - 5
+        os.utime(stale, (old, old))
+        self.assertIsNone(updates.load_relaunch_state(self.data))
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
 
     def test_invalid_or_stale_state_is_ignored_and_deleted(self):
-        path = self.data / updates.RELAUNCH_FILE
+        path = updates.relaunch_path(self.data)
         payloads = ['{broken',
                     json.dumps({'saved_at': 100, 'drafts': 'nope'}),
                     json.dumps({'saved_at': 100, 'drafts': [{'key': ['session'], 'text': 'x', 'cursor': 0}]}),
@@ -311,9 +352,8 @@ class RelaunchStateTests(unittest.TestCase):
         for payload in payloads:
             with self.subTest(payload=payload):
                 path.write_text(payload)
-                self.assertIsNone(updates.load_relaunch_state(self.data, now=lambda: 100.0))
+                self.assertIsNone(updates.load_relaunch_state(self.data, path=str(path), now=lambda: 100.0))
                 self.assertFalse(path.exists())
-
 
 if __name__ == '__main__':
     unittest.main()
