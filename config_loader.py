@@ -132,6 +132,11 @@ def load_config(root: Path | None = None) -> dict:
             else:
                 print(f"  Warning: Ignoring local agent '{name}' (already defined in config.toml)")
 
+        # [updates] settings (e.g. auto = false) may live in the local file too.
+        local_updates = local.get("updates")
+        if isinstance(local_updates, dict):
+            config.setdefault("updates", {}).update(local_updates)
+
     _apply_env_overrides(config)
 
     return config
