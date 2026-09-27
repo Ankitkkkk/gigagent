@@ -11,7 +11,8 @@
 #   PYTHON         Python 3.11+ interpreter to use (default: python3)
 set -eu
 
-SOURCE="${YAPP_SOURCE:-https://github.com/Ankitkkkk/yapp/archive/refs/heads/main.zip}"
+MAIN_ARCHIVE="https://github.com/Ankitkkkk/yapp/archive/refs/heads/main.zip"
+SOURCE="${YAPP_SOURCE:-}"
 YAPP_HOME="${YAPP_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/yapp}"
 VENV="$YAPP_HOME/venv"
 BIN_DIR="${YAPP_BIN_DIR:-$HOME/.local/bin}"
@@ -36,12 +37,41 @@ if [ ! -x "$VENV/bin/python" ]; then
     }
 fi
 
+if [ -z "$SOURCE" ]; then
+    # Latest published release; fall back to main when there is none yet.
+    TAG="$("$VENV/bin/python" - <<'PY' 2>/dev/null || true
+import json, urllib.request
+request = urllib.request.Request(
+    'https://api.github.com/repos/Ankitkkkk/yapp/releases/latest',
+    headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'yapp-installer'})
+with urllib.request.urlopen(request, timeout=10) as response:
+    tag = json.load(response).get('tag_name', '')
+print(tag if isinstance(tag, str) and tag.startswith('v') else '')
+PY
+)"
+    if [ -n "$TAG" ]; then
+        SOURCE="https://github.com/Ankitkkkk/yapp/archive/refs/tags/$TAG.zip"
+    else
+        say "No published release found; installing the latest main branch."
+        SOURCE="$MAIN_ARCHIVE"
+    fi
+fi
+
 say "Installing yapp from $SOURCE"
 "$VENV/bin/python" -m pip install -q --upgrade pip
 "$VENV/bin/python" -m pip install -q --upgrade "$SOURCE"
 # The version number does not change on every commit, so force the app
 # itself to reinstall (dependencies are left alone) to pick up updates.
 "$VENV/bin/python" -m pip install -q --force-reinstall --no-deps "$SOURCE"
+
+"$VENV/bin/python" - "$VENV/yapp-install.json" "$SOURCE" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+path, source = sys.argv[1], sys.argv[2]
+with open(path, 'w') as handle:
+    json.dump({'method': 'installer', 'source': source,
+               'installed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}, handle)
+PY
 
 mkdir -p "$BIN_DIR"
 linked=""
