@@ -439,10 +439,18 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         release = threading.Event()
 
         class Launcher:
+            _lifecycle_lock = threading.RLock()
+
             def checkpoint(self, ws_id):
                 started.set()
                 release.wait(timeout=1)
                 return {"checked": 0}
+
+            def stop(self, ws_id, agent_id):
+                return self.checkpoint(ws_id)
+
+            def unread_for(self, *args, **kwargs):
+                return []
 
         self.app.workspace_launcher = Launcher()
 
@@ -468,6 +476,7 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
 
     def test_archive_route_keeps_event_loop_responsive(self):
         ws = self.ws_store.create("archive-thread")
+        self.add_agent(ws, 'none', 0, state='running')
         result = self._assert_route_yields_while_checkpoint_runs(
             lambda: self.app.archive_workspace(ws["id"])
         )

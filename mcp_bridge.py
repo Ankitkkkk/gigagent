@@ -29,6 +29,10 @@ agents = None         # set by run.py — AgentManager instance
 # Workspace visibility (spec §1). Both set by run.py; None = feature off.
 workspace_policy = None   # callable(registry_name, channel) -> {"agent_id","floor_id"} | None
 workspace_ack = None      # callable(registry_name, channel, returned_ids: list[int]) -> None
+workspace_late_messages = None  # callable(name, channel) -> original messages assigned below cursor
+saved_profile = None      # callable(name) -> immutable saved profile | None
+saved_profile_names = None
+orchestration_service = None
 _presence: dict[str, float] = {}
 _activity: dict[str, bool] = {}   # True = screen changed on last poll
 _activity_ts: dict[str, float] = {}  # timestamp of last active=True heartbeat
@@ -349,7 +353,7 @@ def chat_send(
 
     msg = store.add(sender, message.strip(), attachments=attachments,
                     reply_to=reply_id, channel=channel,
-                    msg_type=msg_type, metadata=metadata)
+                    msg_type=msg_type, metadata=metadata, actor_kind='agent')
     _update_cursor(sender, [msg], channel)
     with _presence_lock:
         _presence[sender] = time.time()
@@ -526,6 +530,8 @@ def _save_roles():
 
 def set_role(name: str, role: str):
     """Set or clear an agent's role. Empty string clears."""
+    if saved_profile and saved_profile(name):
+        raise ValueError('Role and personality are locked for this saved agent. Create a new agent to change them.')
     if role:
         _roles[name] = role
     else:
@@ -535,12 +541,36 @@ def set_role(name: str, role: str):
 
 def get_role(name: str) -> str:
     """Get an agent's current role, or empty string."""
-    return _roles.get(name, "")
+    profile = saved_profile(name) if saved_profile else None
+    return profile['role'] if profile else _roles.get(name, "")
 
 
 def get_all_roles() -> dict[str, str]:
     """All active roles."""
-    return dict(_roles)
+    roles = dict(_roles)
+    for name in saved_profile_names() if saved_profile_names else []:
+        profile = saved_profile(name) if saved_profile else None
+        if profile:
+            roles[name] = profile['role']
+    return roles
+
+
+def chat_orchestrate(action: str = 'pending', message_id: int | None = None,
+                     agent_ids: list[str] | None = None, reason: str = '',
+                     ctx: Context = None) -> str:
+    """Session orchestrator only: read pending requests/worker profiles, or route an
+    original message to ready workers by stable agent_ids. Never send an addressed
+    relay as well. Repeating the same decision does not enqueue it again.
+    """
+    from orchestration import OrchestrationError
+    if orchestration_service is None:
+        return 'Error: session orchestration is not available.'
+    try:
+        result = orchestration_service.call(_extract_agent_token(ctx), action,
+            message_id=message_id, agent_ids=agent_ids, reason=reason)
+        return json.dumps(result, ensure_ascii=False)
+    except (OrchestrationError, OSError) as error:
+        return f'Error: {error}'
 
 
 def migrate_identity(old_name: str, new_name: str):
@@ -712,6 +742,9 @@ def chat_read(
     else:
         msgs = store.get_recent(limit, channel=ch)
 
+    late = workspace_late_messages(sender, ch) if sender and workspace_late_messages else []
+    if late:
+        msgs = sorted({m['id']: m for m in msgs + late}.values(), key=lambda m: m['id'])
     msgs = _apply_visibility(sender, msgs)
     if msgs is None:
         return BLOCKED_TEXT
@@ -719,9 +752,20 @@ def chat_read(
     if explicit:
         has_more = len(msgs) > limit
         msgs = msgs[:limit]          # oldest-first page
+    elif late:
+        late_ids = {m['id'] for m in late}
+        priority = [m for m in msgs if m['id'] in late_ids][:limit]
+        room = max(0, limit - len(priority))
+        newer = [m for m in msgs if m['id'] not in late_ids]
+        msgs = sorted(priority + (newer[-room:] if room else []), key=lambda m: m['id'])
+        has_more = len(late_ids) > len(priority)
     else:
         msgs = msgs[-limit:]         # newest window, unchanged behaviour
+    with _cursors_lock:
+        previous_cursor = _cursors.get(sender, {}).get(ch if ch else '__all__', 0)
     _update_cursor(sender, msgs, ch)
+    if late and msgs and msgs[-1]['id'] < previous_cursor:
+        _update_cursor(sender, [{'id': previous_cursor}], ch)
     _record_acks(sender, msgs)
     serialized = _serialize_messages(msgs)
     if has_more and msgs:
@@ -1038,7 +1082,7 @@ def chat_summary(
 
 _ALL_TOOLS = [
     chat_send, chat_read, chat_resync, chat_join, chat_who, chat_rules, chat_decision,
-    chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job,
+    chat_channels, chat_set_hat, chat_claim, chat_summary, chat_propose_job, chat_orchestrate,
 ]
 
 

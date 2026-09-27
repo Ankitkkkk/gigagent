@@ -1,10 +1,10 @@
 """Entry point — starts MCP server (port 8200) + web UI (port 8300)."""
 
 import argparse
+import os
 import asyncio
 import secrets
 import sys
-import threading
 import time
 import logging
 from pathlib import Path
@@ -39,6 +39,10 @@ def main():
         datefmt="%H:%M:%S",
     )
 
+    # Preserve interpreter flags as well as the original application arguments.
+    from server_lifecycle import ServerLifecycle, _RESTART_PARENT
+    restart_argv = [sys.executable, *sys.orig_argv[1:]]
+
     # Parse flags for --help support; the actual env propagation happens via
     # the shared config_loader.apply_cli_overrides helper so run.py and the
     # wrappers use identical extraction logic.
@@ -54,12 +58,28 @@ def main():
 
     config = load_config(ROOT)
 
+    host = config.get("server", {}).get("host", "127.0.0.1")
+    restart_supported = os.name == 'posix' and host in ('127.0.0.1', 'localhost', '::1')
+    lifecycle = ServerLifecycle(restart_argv, restart_supported=restart_supported,
+        previous_instance_id=os.environ.pop(_RESTART_PARENT, None),
+        reason='' if restart_supported else
+        'Restart from the TUI requires a localhost server on Linux or macOS. Restart run.py manually.')
+
     # --- Security: generate a random session token (in-memory only) ---
     session_token = secrets.token_hex(32)
 
     # Configure the FastAPI app (creates shared store)
     from app import app, configure, set_event_loop, store as _store_ref
-    configure(config, session_token=session_token)
+    configure(config, session_token=session_token, lifecycle=lifecycle)
+    # Keep this instance's endpoints and storage on reload, including values
+    # originally supplied by config.toml rather than command-line overrides.
+    lifecycle.restart_environment = {
+        'AGENTCHATTR_PORT': str(config.get('server', {}).get('port', 8300)),
+        'AGENTCHATTR_MCP_HTTP_PORT': str(config.get('mcp', {}).get('http_port', 8200)),
+        'AGENTCHATTR_MCP_SSE_PORT': str(config.get('mcp', {}).get('sse_port', 8201)),
+        'AGENTCHATTR_DATA_DIR': config['server']['data_dir'],
+        'AGENTCHATTR_UPLOAD_DIR': str(Path(config.get('images', {}).get('upload_dir', './uploads')).resolve()),
+    }
 
     # Share stores with the MCP bridge
     from app import store, rules, summaries, jobs, room_settings, registry, router as app_router, agents as app_agents, session_engine, session_store
@@ -86,23 +106,24 @@ def main():
     from workspace_launcher import WorkspaceLauncher
     app_module.workspace_launcher = WorkspaceLauncher(
         store=app_module.workspace_store, messages=store, registry=registry, agents=app_agents,
-        config=config, data_dir=data_dir, root=ROOT)
+        config=config, data_dir=data_dir, root=ROOT, background=lifecycle.start_worker)
     app_module.wire_workspace_hooks()
+    app_module.initialize_orchestration()
     app_module.workspace_launcher.reconcile()
     for _ws in app_module.workspace_store.list(include_archived=True):
         app_module._ensure_channel(_ws["channel"])
     app_module._replay_unrouted()
 
     def _launcher_tick():
-        while True:
-            time.sleep(5)
+        while not lifecycle.stop_event.wait(5):
             try:
                 app_module.workspace_launcher.tick()
+                app_module.orchestration.tick()
                 app_module._compact_routing_marks()
             except Exception:
                 logging.getLogger(__name__).exception("launcher tick failed")
 
-    threading.Thread(target=_launcher_tick, daemon=True).start()
+    lifecycle.start_worker(_launcher_tick)
 
     # Start MCP servers in background threads
     http_port = config.get("mcp", {}).get("http_port", 8200)
@@ -110,8 +131,16 @@ def main():
     mcp_bridge.mcp_http.settings.port = http_port
     mcp_bridge.mcp_sse.settings.port = sse_port
 
-    threading.Thread(target=mcp_bridge.run_http_server, daemon=True).start()
-    threading.Thread(target=mcp_bridge.run_sse_server, daemon=True).start()
+    # Own all three uvicorn servers so a restart drains both MCP transports as
+    # well as the browser/CLI listener. The FastMCP factories match its run APIs.
+    import uvicorn
+    for bridge, transport in ((mcp_bridge.mcp_http, 'http'), (mcp_bridge.mcp_sse, 'sse')):
+        mcp_app = bridge.streamable_http_app() if transport == 'http' else bridge.sse_app()
+        server = uvicorn.Server(uvicorn.Config(mcp_app, host=bridge.settings.host,
+            port=bridge.settings.port, log_level=bridge.settings.log_level.lower(),
+            timeout_graceful_shutdown=5))
+        lifecycle.add_server(server)
+        lifecycle.start_worker(server.run)
     time.sleep(0.5)
     logging.getLogger(__name__).info("MCP streamable-http on port %d, SSE on port %d", http_port, sse_port)
 
@@ -182,7 +211,15 @@ def main():
     print(f"  Agents auto-trigger on @mention")
     print(f"\n  Session token: {session_token}\n")
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    web_server = uvicorn.Server(uvicorn.Config(app, host=host, port=port,
+        log_level="info", timeout_graceful_shutdown=5))
+    lifecycle.add_server(web_server)
+    try:
+        web_server.run()
+    finally:
+        lifecycle.begin_shutdown()
+        lifecycle.drain()
+    lifecycle.replace_process()
 
 
 if __name__ == "__main__":

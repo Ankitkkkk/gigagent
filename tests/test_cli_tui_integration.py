@@ -22,11 +22,20 @@ from cli_workspace_chat import WorkspaceChatController
 class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
     """Catches lost/duplicate sends and missing switch/Quit checkpoints."""
 
+    @classmethod
+    def environment_additions(cls):
+        shim_directory = Path(cls.temp.name) / 'bin'
+        shim_directory.mkdir()
+        shim = shim_directory / 'kilo'
+        shim.write_text(f'#!{sys.executable}\nfor line in __import__("sys").stdin: pass\n')
+        shim.chmod(0o755)
+        return {'PATH': str(shim_directory) + os.pathsep + os.defpath, 'SHELL': '/bin/sh'}
+
     @asynccontextmanager
     async def real_tui(self):
         client = cli.ChatClient(self.url)
         controller = WorkspaceChatController(client, self.api, no_resume=True,
-                                             data_dir=str(self.data_dir))
+                                             data_dir=str(self.data_dir), providers=['kilo'])
         events = []
         original_action = self.api.action
         original_receive = client.receive_forever
@@ -61,11 +70,16 @@ class TuiIntegrationTests(IsolatedCliServer, unittest.IsolatedAsyncioTestCase):
         await ui.type_text(name)
         await ui.key('Tab')
         await ui.key('Enter')
+        await ui.wait_until(lambda: 'Orchestrator provider:' in ui.screen_text(), timeout=15)
+        await ui.focus_field('cwd')
+        await ui.key('Enter')
         await ui.wait_until(lambda: ui.controller.workspace is not None
                             and ui.controller.workspace['name'] == name, timeout=15)
         await asyncio.wait_for(ui.client.ready.wait(), 15)
         await ui.wait_until(lambda: ui.focused_control == 'composer', timeout=15)
-        return ui.controller.workspace['id']
+        ws_id = ui.controller.workspace['id']
+        self.addCleanup(self.api.action, ws_id, 'archive')
+        return ws_id
 
     async def test_real_session_message_switch_and_quit(self):
         async with self.real_tui() as ui:
@@ -303,12 +317,41 @@ class TuiPtyIntegrationTests(_PtyCase):
             self.button(terminal, 'New session')
             self.screen(terminal, lambda s: 'Session name:' in s['text'])
             self.paste(terminal, 'pty-controls')
+            self.press(terminal, 'Enter', lambda s: 'Orchestrator provider:' in s['text'])
+            self.press(terminal, 'Tab', lambda s: 'Working directory:' in s['text'])
             self.press(terminal, 'Enter', lambda s: 'Connected' in s['text'] and 'Session name:' not in s['text'])
             session = next(w for w in self.api.list()['workspaces'] if w['name'] == 'pty-controls')
             self.addCleanup(self.archive_session, session['id'])
             draft = 'first line\nsecond line'
             self.paste(terminal, draft)
             self.press(terminal, 'Left', lambda s: s['buffer_cursor'] == len(draft) - 1)
+            # A transcript click must not strand Vim edit-entry keys or mouse refocus.
+            self.press(terminal, 'Escape', lambda s: 'Message · NORMAL' in s['text'])
+            current = self.screen(terminal)
+            y, row = next((y, row) for y, row in enumerate(current['text'].splitlines())
+                          if 'No messages yet' in row)
+            x = row.index('No messages yet')
+            click_chat = f'\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m'
+            terminal.send(click_chat)
+            self.screen(terminal, lambda s: s['buffer'] == '')
+            terminal.send('I')
+            self.screen(terminal, lambda s: s['buffer'] == draft
+                        and s['buffer_cursor'] == draft.index('\n') + 1
+                        and 'Message · INSERT' in s['text'])
+            terminal.send('Z')
+            self.screen(terminal, lambda s: s['buffer'] == draft.replace('\n', '\nZ'))
+            terminal.send('\x7f')
+            self.screen(terminal, lambda s: s['buffer'] == draft)
+            self.press(terminal, 'End')
+            self.press(terminal, 'Left', lambda s: s['buffer_cursor'] == len(draft) - 1)
+            terminal.send(click_chat)
+            current = self.screen(terminal, lambda s: s['buffer'] == '')
+            y, row = next((y, row) for y, row in enumerate(current['text'].splitlines())
+                          if 'second line' in row)
+            x = row.index('second line') + 2
+            terminal.send(f'\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m')
+            self.screen(terminal, lambda s: s['buffer'] == draft and 'Message · INSERT' in s['text'])
+            self.save(terminal, 'pty-mouse-vim-recovered')
             initial = self.save(terminal, 'pty-wide-120x30')
             self.assertEqual(initial['buffer_cursor'], len(draft) - 1)
             self.assertEqual(self.json_command('read', '--session', session['id']), [])
@@ -352,7 +395,8 @@ class TuiPtyIntegrationTests(_PtyCase):
             self.press(terminal, 'Enter', lambda s: 'absolute existing directory' in s['text'])
             self.save(terminal, 'pty-validation-error')
             self.assertIn('relative-invalid-cwd', self.screen(terminal)['text'])
-            self.assertEqual(self.api.get(session['id'])['agents'], [])
+            self.assertFalse(any(agent.get('kind') != 'orchestrator'
+                                 for agent in self.api.get(session['id'])['agents']))
             self.press(terminal, 'Escape', lambda s: s['buffer'] == draft)
             # Actual SGR press/release on visible sidebar button.
             current = self.screen(terminal)
@@ -416,6 +460,61 @@ class TuiTmuxIntegrationTests(_PtyCase):
     def finish_with_draft(self, terminal):
         self.press(terminal, 'CtrlQ', lambda s: 'Quit with unsent' in s['text'])
         terminal.send('y')
+
+    def test_stop_all_releases_two_sessions_and_keeps_saved_chat(self):
+        other = self.api.create('other-stop-all-session')
+        self.addCleanup(self.archive_session, other['id'])
+        self.api.action(other['id'], 'spawn', body={
+            'provider': 'kilo', 'cwd': self.temp.name, 'name': 'qa-inert-other-stop',
+            'history_mode': 'none'})
+        second = self.poll(lambda: next((a for a in self.api.get(other['id'])['agents']
+                                        if a['last_state'] == 'running'), None))
+        agents = (self.agent, second)
+        wrappers = [(a['last_launch'].get('wrapper_pid') or a['last_launch']['pid']) for a in agents]
+        panes = [int(self.tmux('list-panes', '-t', a['tmux_session'] + ':',
+                              '-F', '#{pane_pid}').stdout.strip()) for a in agents]
+        self.json_command('send', '--session', self.session['id'], 'Saved stop-all note')
+        with PtyTerminal(self.cli_command('--session', self.session['id']),
+                         env=self.terminal_env, cwd=ROOT) as terminal:
+            self.addCleanup(self.assert_terminal_closed, terminal)
+            cursor = self.prepare_draft(terminal)
+            self.palette(terminal, 'Stop all agents')
+            self.screen(terminal, lambda s: 'Stop all agents?' in s['text'])
+            self.press(terminal, 'Enter', lambda s: 'Stop all agents?' not in s['text'])
+            for a in agents:
+                self.tmux('has-session', '-t', '=' + a['tmux_session'])
+            self.palette(terminal, 'Stop all agents')
+            self.screen(terminal, lambda s: 'Stop all agents?' in s['text'])
+            terminal.send('y')
+            result = self.screen(terminal, lambda s: 'Confirmed stopped:' in s['text']
+                                 and s['buffer'] == 'survives attachment')
+            self.assertEqual(result['buffer_cursor'], cursor)
+            self.assertIn('Message · INSERT', result['text'])
+            self.save(terminal, 'stop-all-completed')
+            for a in agents:
+                self.assertNotEqual(self.tmux('has-session', '-t', '=' + a['tmux_session'],
+                                             check=False).returncode, 0)
+            def gone(pid):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return True
+                # An orphan zombie has already released its execution resources.
+                stat = Path(f'/proc/{pid}/stat')
+                return stat.exists() and stat.read_text().split(') ', 1)[1].startswith('Z ')
+            for pid in wrappers + panes:
+                self.poll(lambda pid=pid: gone(pid))
+            self.tmux('has-session', '-t', '=qa-keeper')
+            for ident, original in ((self.session['id'], self.agent), (other['id'], second)):
+                saved = self.api.get(ident)
+                self.assertFalse(saved['archived'])
+                self.assertEqual(len(saved['agents']), 1)
+                self.assertEqual(saved['agents'][0]['agent_id'], original['agent_id'])
+                self.assertEqual(saved['agents'][0]['last_state'], 'exited')
+            messages = self.json_command('read', '--session', self.session['id'])
+            self.assertTrue(any(m['text'] == 'Saved stop-all note' for m in messages))
+            self.finish_with_draft(terminal)
+            self.assert_restored(terminal)
 
     def test_resume_refusal_then_explicit_fresh_launch(self):
         self.api.action(self.session['id'], 'stop', self.agent['agent_id'])

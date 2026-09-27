@@ -2,6 +2,7 @@
 
 import json
 import logging
+from contextlib import nullcontext
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ class AgentTrigger:
         return self._registry.is_registered(name)
 
     def get_status(self) -> dict:
-        from mcp_bridge import is_online, is_active, is_waiting_for_input, get_role
+        from mcp_bridge import is_online, is_active, is_waiting_for_input, get_role, saved_profile
         instances = self._registry.get_all()
         return {
             name: {
@@ -26,6 +27,7 @@ class AgentTrigger:
                 "label": info["label"],
                 "color": info["color"],
                 "role": get_role(name),
+                "profile_locked": bool(saved_profile and saved_profile(name)),
             }
             for name, info in instances.items()
         }
@@ -73,7 +75,10 @@ class AgentTrigger:
         if job_id is not None:
             entry["job_id"] = job_id
 
-        with open(queue_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        token = kwargs.get('expected_token')
+        guard = self._registry.guard_identity(agent_name, token) if token is not None else nullcontext()
+        with guard:
+            with open(queue_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
 
         log.info("Queued @%s trigger (ch=%s, job=%s): %s", agent_name, channel, job_id, message[:80])

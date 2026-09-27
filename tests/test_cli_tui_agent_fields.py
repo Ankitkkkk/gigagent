@@ -6,6 +6,15 @@ from tests.test_cli_tui_workflows import agent, workspace, workflow_harness
 
 
 class AgentFieldTests(unittest.IsolatedAsyncioTestCase):
+    async def submit_profile(self, ui):
+        await ui.wait_until(lambda: 'New agent · 2 of 2' in ui.screen_text())
+        screen = ui.screen_text()
+        for text in ('Role:', 'generalist', 'Personality:', 'pragmatic', 'Start agent'):
+            self.assertIn(text, screen)
+        await ui.key('Tab')
+        await ui.key('Tab')
+        await ui.key('Enter')
+
     async def test_resume_directory_is_prefilled_read_only_and_uses_saved_directory(self):
         with tempfile.TemporaryDirectory() as cwd:
             saved = agent(state='exited', cwd=cwd)
@@ -50,6 +59,8 @@ class AgentFieldTests(unittest.IsolatedAsyncioTestCase):
                     await ui._send('\x01\x0b')
                     expected = []
                 await ui.key('Enter')
+                if action == 'spawn':
+                    await self.submit_profile(ui)
                 await ui.wait_until(task.done)
                 self.assertEqual((await task).status, 'completed')
                 self.assertEqual(ui.api.action.call_args.kwargs['body']['provider_args'], expected)
@@ -72,12 +83,14 @@ class AgentFieldTests(unittest.IsolatedAsyncioTestCase):
                     await ui.type_text('worker-custom')
                     ui.api.action.assert_not_called()
                     # Submit using the actual button after editing both inputs by mouse.
-                    y, row = next((y, row) for y, row in enumerate(ui.rows) if 'Start agent' in row)
-                    await ui.click(row.index('Start agent'), y)
+                    y, row = next((y, row) for y, row in enumerate(ui.rows) if 'Next' in row)
+                    await ui.click(row.index('Next'), y)
+                    await self.submit_profile(ui)
                     await ui.wait_until(task.done)
                     self.assertEqual((await task).status, 'completed')
                     self.assertEqual(ui.api.action.call_args.kwargs['body'],
-                                     dict(provider='codex', cwd=cwd, name='worker-custom', history_mode='literal'))
+                                     dict(provider='codex', cwd=cwd, name='worker-custom', history_mode='literal',
+                                          role='generalist', personality='pragmatic'))
                     self.assertEqual(ui.view.composer.text, 'keep chat draft')
 
     async def test_directory_validation_retains_name_and_allows_mouse_correction(self):
@@ -100,6 +113,7 @@ class AgentFieldTests(unittest.IsolatedAsyncioTestCase):
             await ui._send('\x01\x0b')
             await ui.type_text('/tmp')
             await ui.key('Enter')
+            await self.submit_profile(ui)
             await ui.wait_until(task.done)
             self.assertEqual(ui.api.action.call_args.kwargs['body']['cwd'], '/tmp')
             self.assertEqual(ui.api.action.call_args.kwargs['body']['name'], 'my-agent')

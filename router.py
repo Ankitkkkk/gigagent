@@ -53,12 +53,13 @@ class Router:
     def _is_agent(self, sender: str) -> bool:
         return sender.lower() in self.agent_names
 
-    def get_targets(self, sender: str, text: str, channel: str = "general") -> list[str]:
+    def get_targets(self, sender: str, text: str, channel: str = "general", *,
+                    is_agent: bool | None = None) -> list[str]:
         """Determine which agents should receive this message."""
         ch = self._get_ch(channel)
         mentions = self.parse_mentions(text)
 
-        if not self._is_agent(sender):
+        if not (self._is_agent(sender) if is_agent is None else is_agent):
             # Human message resets hop counter and unpauses
             ch["hop_count"] = 0
             ch["paused"] = False

@@ -16,6 +16,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_profiles import ORCHESTRATOR_INSTRUCTIONS, make_profile, validate_profile
+
 log = logging.getLogger(__name__)
 
 HISTORY_MODES = ("none", "literal", "summary")
@@ -168,6 +170,28 @@ class WorkspaceStore:
             if not ws:
                 return None
             ws["archived"] = bool(archived)
+            if archived and ws.get("orchestrator"):
+                ws["orchestrator"]["enabled"] = False
+            self._touch(ws)
+            self._commit(ws_id)
+            return json.loads(json.dumps(ws))
+
+    def set_orchestrator(self, ws_id: str, **fields) -> dict | None:
+        with self._lock:
+            ws = self._find(ws_id)
+            if not ws:
+                return None
+            control = dict(ws.get("orchestrator") or {})
+            if "agent_id" in fields and fields["agent_id"] != control.get("agent_id"):
+                raise ValueError("orchestrator ownership is immutable")
+            if "enabled" in fields and type(fields["enabled"]) is not bool:
+                raise ValueError("enabled must be boolean")
+            if not control.get("agent_id"):
+                raise ValueError("session has no orchestrator")
+            control.update(json.loads(json.dumps(fields)))
+            if ws.get("archived"):
+                control["enabled"] = False
+            ws["orchestrator"] = control
             self._touch(ws)
             self._commit(ws_id)
             return json.loads(json.dumps(ws))
@@ -176,7 +200,17 @@ class WorkspaceStore:
 
     def add_agent(self, ws_id: str, *, provider: str, cwd: str, history_mode: str,
                   registry_name: str, floor_id: int, native_session_id: str | None,
-                  history_state: str, last_launch: dict, provider_args: list[str] | None = None) -> dict:
+                  history_state: str, last_launch: dict, provider_args: list[str] | None = None,
+                  profile: dict | None = None, kind: str = "worker") -> dict:
+        if kind not in ("worker", "orchestrator"):
+            raise ValueError("kind must be worker or orchestrator")
+        # Low-level legacy callers omit snapshots. Actual new launches pass
+        # an explicit snapshot; legacy recovery must never invent instructions.
+        if profile is None and kind == "orchestrator":
+            profile = make_profile()
+            profile["role_instructions"] = ORCHESTRATOR_INSTRUCTIONS
+        if profile is not None:
+            profile = validate_profile(profile)
         if history_mode not in HISTORY_MODES:
             raise ValueError(f"history_mode must be one of {HISTORY_MODES}")
         if history_state not in HISTORY_STATES:
@@ -185,7 +219,13 @@ class WorkspaceStore:
             ws = self._find(ws_id)
             if not ws:
                 raise KeyError(ws_id)
+            if kind == "orchestrator" and (ws.get("orchestrator", {}).get("agent_id")
+                    or any(a.get("kind") == "orchestrator" for a in ws["agents"])):
+                raise ValueError("session already has an orchestrator")
+            previous_orchestrator = ws.get("orchestrator")
             agent = {
+                "kind": kind,
+                **({"profile": profile} if profile is not None else {}),
                 "agent_id": "ag_" + uuid.uuid4().hex[:12],
                 "provider": provider,
                 "registry_name": registry_name,
@@ -209,11 +249,18 @@ class WorkspaceStore:
             missing = object()
             previous_updated_at = ws.get("updated_at", missing)
             ws["agents"].append(agent)
+            if kind == "orchestrator":
+                ws["orchestrator"] = {"agent_id": agent["agent_id"], "enabled": True,
+                                      "retry_count": 0, "next_retry_at": 0}
             self._touch(ws)
             try:
                 self._commit(ws_id)
             except Exception:
                 ws["agents"].remove(agent)
+                if previous_orchestrator is None:
+                    ws.pop("orchestrator", None)
+                else:
+                    ws["orchestrator"] = previous_orchestrator
                 if previous_updated_at is missing:
                     ws.pop("updated_at", None)
                 else:
@@ -249,7 +296,9 @@ class WorkspaceStore:
                 return None
             if "last_state" in fields and fields["last_state"] not in AGENT_STATES:
                 raise ValueError(f"last_state must be one of {AGENT_STATES}")
-            a.update(fields)
+            if any(key in fields and fields[key] != a.get(key) for key in ("kind", "profile")):
+                raise ValueError("saved kind and profile are immutable")
+            a.update(json.loads(json.dumps(fields)))
             self._touch(ws)
             self._commit(ws_id)
             return json.loads(json.dumps(a))
@@ -264,10 +313,15 @@ class WorkspaceStore:
             ws["agents"] = [a for a in previous_agents if a["agent_id"] != agent_id]
             if len(ws["agents"]) == len(previous_agents):
                 return False
+            previous_orchestrator = ws.get("orchestrator")
+            if previous_orchestrator and previous_orchestrator.get("agent_id") == agent_id:
+                ws.pop("orchestrator", None)
             self._touch(ws)
             try:
                 self._commit(ws_id)
             except OSError:
+                if previous_orchestrator is not None:
+                    ws["orchestrator"] = previous_orchestrator
                 ws["agents"], ws["updated_at"] = previous_agents, previous_updated
                 raise
             return True
@@ -281,7 +335,9 @@ class WorkspaceStore:
             a = self._find_agent(ws, agent_id) if ws else None
             if not a or (a.get("last_launch") or {}).get("nonce") != nonce:
                 return False
-            a.update(fields)
+            if any(key in fields and fields[key] != a.get(key) for key in ("kind", "profile")):
+                raise ValueError("saved kind and profile are immutable")
+            a.update(json.loads(json.dumps(fields)))
             self._touch(ws)
             self._commit(ws_id)
             return True
@@ -377,6 +433,10 @@ class WorkspaceStore:
         ids: list[str] = []
         for m in members:
             rn = m["registry_name"].lower()
+            if m.get("kind") == "orchestrator":
+                if rn in explicit:
+                    ids.append(m["agent_id"])
+                continue
             if rn in explicit or m["provider"].lower() in explicit:
                 ids.append(m["agent_id"])
             elif m["last_state"] == "running" and rn in targets:
@@ -397,7 +457,20 @@ class WorkspaceStore:
             for ws in self._workspaces:
                 if ws["channel"] == channel and not ws.get("archived"):
                     if agent_ids:
-                        ws.setdefault("routing", {})[str(msg_id)] = sorted(set(agent_ids))
+                        key = str(msg_id)
+                        routing = ws.setdefault("routing", {})
+                        # Assignment tombstones outlive routing pruning. A later
+                        # ledger reconciliation must not resurrect an acked original.
+                        assignments = ws.setdefault("routing_assignments", {})
+                        previous = set(assignments.get(key, routing.get(key, [])))
+                        selected = set(agent_ids)
+                        for agent in ws["agents"]:
+                            if (agent["agent_id"] in selected - previous
+                                    and msg_id <= agent["read_mark"]):
+                                agent["late_unacked_ids"] = sorted(
+                                    set(agent.get("late_unacked_ids", [])) | {msg_id})
+                        assignments[key] = sorted(previous | selected)
+                        routing[key] = sorted(set(routing.get(key, [])) | selected)
                     if int(msg_id) > int(ws.get("routing_high_water", -1)):
                         done = set(ws.setdefault("routing_done", []))
                         done.add(int(msg_id))
@@ -475,9 +548,12 @@ class WorkspaceStore:
                 return
             routed = sorted(int(k) for k, ids in ws.get("routing", {}).items() if agent_id in ids)
             mark, acked = apply_acks(a["read_mark"], a["acked_above_mark"], list(returned_ids), routed)
-            if mark == a["read_mark"] and acked == a["acked_above_mark"]:
+            late = sorted(set(a.get("late_unacked_ids", [])) - set(returned_ids))
+            if (mark == a["read_mark"] and acked == a["acked_above_mark"]
+                    and late == a.get("late_unacked_ids", [])):
                 return
             a["read_mark"], a["acked_above_mark"] = mark, acked
+            a["late_unacked_ids"] = late
             self._prune_routing_locked(ws)
             self._commit(ws_id)
 
@@ -514,6 +590,7 @@ class WorkspaceStore:
                 "history_mode": agent["history_mode"],
                 "floor_id": agent["floor_id"],
                 "last_launch": agent.get("last_launch"),
+                **{key: (current or agent)[key] for key in ("kind", "profile") if key in (current or agent)},
             }
             return self._write_identity_dict(agent_id, data)
 
@@ -577,7 +654,8 @@ class WorkspaceStore:
                 for a in ws["agents"]:
                     if a["registry_name"] != registry_name:
                         continue
-                    pol = {"workspace_id": ws["id"], "agent_id": a["agent_id"], "floor_id": a.get("floor_id")}
+                    pol = {"workspace_id": ws["id"], "agent_id": a["agent_id"], "floor_id": a.get("floor_id"),
+                           "late_unacked_ids": list(a.get("late_unacked_ids", []))}
                     if a["last_state"] in self._LIVE:
                         return pol
                     fallback = fallback or pol

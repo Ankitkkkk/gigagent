@@ -8,8 +8,9 @@ from cli_view_contracts import SubmitOutcome
 from tests._tui_harness import tui_harness
 
 
-def bind(ui, submit=None):
-    ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': []})
+def bind(ui, submit=None, *, agent_names=()):
+    ui.controller._select({'id': 'ws_one', 'name': 'One', 'channel': 'general', 'agents': [
+        {'agent_id': name, 'registry_name': name} for name in agent_names]})
     ui.bind_submit(submit or AsyncMock(return_value=SubmitOutcome('failed')))
 
 
@@ -268,7 +269,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completion_enter_tab_and_ctrl_c(self):
         async with tui_harness() as ui:
-            bind(ui)
+            bind(ui, agent_names=['claude-2', 'claude-3'])
             ui.client.handle_event({'type': 'agents', 'data': ['claude-2', 'claude-3']})
             await ui._send('i')
             await ui._send('@cl')
@@ -281,6 +282,9 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ui.submit_mock.await_count, 0)
             await ui.key('Tab')
             self.assertEqual(ui.focused_control, 'clear_draft')
+            await ui.key('Tab')
+            self.assertEqual(ui.focused_control, 'restart_server')
+            self.assertIsNone(ui.dialogs.future)
             await ui.key('Tab')
             self.assertEqual(ui.focused_control, 'navigation')
             ui.view.focus_named('composer')
@@ -593,7 +597,7 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completion_menu_is_hidden_in_resize_mode(self):
         async with tui_harness() as ui:
-            bind(ui)
+            bind(ui, agent_names=['claude-2', 'claude-3'])
             ui.client.handle_event({'type': 'agents', 'data': ['claude-2', 'claude-3']})
             await ui._send('i')
             await ui._send('@cl')
@@ -610,7 +614,8 @@ class ComposerTests(unittest.IsolatedAsyncioTestCase):
         for text in ('hi @claude', 'hi #dev'):
             with self.subTest(text=text):
                 async with tui_harness() as ui:
-                    bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)))
+                    bind(ui, AsyncMock(return_value=SubmitOutcome('completed', sent=True)),
+                         agent_names=['claude-2', 'claude'])
                     ui.client.handle_event({'type': 'agents', 'data': ['claude-2', 'claude']})
                     ui.client.channels = ['dev-ops', 'dev']
                     await ui._send('i')

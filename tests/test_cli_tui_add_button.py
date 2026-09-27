@@ -13,8 +13,9 @@ class AddAgentButtonTests(unittest.IsolatedAsyncioTestCase):
                 async with workflow_harness(rows=[one], selected=one, size=size) as ui:
                     ui.view.composer.text = 'draft survives'
                     await ui.wait_render()
-                    y, row = next((y, row) for y, row in enumerate(ui.rows) if '<Add agent >' in row or '< Add agent' in row)
-                    await ui.click(row.index('Add agent') + 2, y)
+                    info = ui.view.agent_add.window.render_info
+                    self.assertIn('+ Add agent', ui.rows[info._y_offset])
+                    await ui.click(info._x_offset + 5, info._y_offset)
                     await ui.wait_until(lambda: 'Provider' in ui.screen_text())
                     self.assertNotIn('Choose agent', ui.screen_text())
                     await ui.key('Escape')
@@ -37,4 +38,4 @@ class AddAgentButtonTests(unittest.IsolatedAsyncioTestCase):
             await ui.resize(120, 30)
             await ui.type_text('hello')
             self.assertEqual(ui.view.composer.text, 'hello')
-            self.assertNotIn('<Add agent >', ui.screen_text())
+            self.assertNotIn('+ Add agent', ui.screen_text())

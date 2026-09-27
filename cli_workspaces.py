@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 
 import cli_api
 from cli_api import CLIError
@@ -149,7 +150,19 @@ def run_workspace_command(api, args):
     if command == "sessions":
         return WorkspaceCommandResult(api.list(bool(args.archived)))
     if command == "new":
-        return WorkspaceCommandResult(api.create(args.session_name))
+        orchestrator = None
+        if args.orchestrator_provider:
+            if not args.cwd:
+                raise CLIError('--cwd is required with --orchestrator-provider')
+            orchestrator = {'provider': args.orchestrator_provider, 'cwd': args.cwd}
+            if args.provider_flags is not None:
+                from provider_args import parse_provider_flags
+                try:
+                    orchestrator['provider_args'] = parse_provider_flags(args.provider_flags)
+                except ValueError as error:
+                    raise CLIError(str(error)) from None
+        return WorkspaceCommandResult(api.create(args.session_name, orchestrator=orchestrator)
+                                      if orchestrator is not None else api.create(args.session_name))
 
     if command in ("spawn", "resume"):
         require_tmux_platform()
@@ -165,13 +178,18 @@ def run_workspace_command(api, args):
         except ValueError as error:
             raise CLIError(str(error)) from None
     if command == "spawn":
-        data = api.action(ws_id, "spawn", body={
+        body = {
             "provider": args.provider,
             "cwd": args.cwd,
             "history_mode": args.history_mode,
             "name": args.agent_name,
             **provider_options,
-        })
+        }
+        if args.role is not None:
+            body['role'] = args.role
+        if args.personality is not None:
+            body['personality'] = args.personality
+        data = api.action(ws_id, "spawn", body=body)
     elif command == "archive":
         data = api.action(ws_id, "archive")
     elif command == "unread":
@@ -295,14 +313,105 @@ class WorkspaceAPI:
     def settings(self):
         return self.request('GET', '/api/settings')
 
+    @staticmethod
+    def _validate_server_status(value):
+        required = {'instance_id', 'previous_instance_id', 'state', 'restart_supported', 'reason'}
+        if (not isinstance(value, dict) or not required <= set(value)
+                or (value.get('restart_supported') is True and
+                    (not isinstance(value.get('instance_id'), str) or not value['instance_id']))
+                or value.get('instance_id') is not None and not isinstance(value.get('instance_id'), str)
+                or value.get('previous_instance_id') is not None
+                   and not isinstance(value.get('previous_instance_id'), str)
+                or value.get('state') not in ('starting', 'ready', 'restarting')
+                or not isinstance(value.get('restart_supported'), bool)
+                or not isinstance(value.get('reason'), str)):
+            raise CLIError('Server returned invalid restart status. Restart run.py manually.')
+        return value
+
+    def server_status(self):
+        try:
+            value = self.request('GET', '/api/server')
+        except CLIError as error:
+            if error.status == 404:
+                raise CLIError('Restart run.py manually once to upgrade; this server lacks restart support.') from None
+            raise
+        return self._validate_server_status(value)
+
+    def restart_server(self, instance_id, timeout=30):
+        """Submit once, then use fresh bootstrap tokens for read-only readiness checks."""
+        deadline = cli_api.monotonic() + timeout
+        uncertain = False
+        try:
+            remaining = self._remaining(deadline)
+            if self._token is None:
+                self._token = cli_api.fetch_session_token(self.url, timeout=min(5, remaining))
+                remaining = self._remaining(deadline)
+            accepted = cli_api.request_json(
+                self.url, self._token, 'POST', '/api/server/restart',
+                body={'instance_id': instance_id}, timeout=remaining)
+            if (not isinstance(accepted, dict) or accepted.get('instance_id') != instance_id
+                    or accepted.get('state') != 'restarting'):
+                raise CLIError('Server did not confirm restart. Restart outcome is uncertain; check status manually.')
+        except CLIError as error:
+            if error.status in (401, 403):
+                self._token = None
+            if error.status is not None:
+                raise
+            uncertain = True
+        except (OSError, ValueError):
+            uncertain = True
+        self._token = None
+        while True:
+            remaining = deadline - cli_api.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                token = cli_api.fetch_session_token(self.url, timeout=min(5, remaining))
+                remaining = deadline - cli_api.monotonic()
+                if remaining <= 0:
+                    break
+                status = cli_api.request_json(self.url, token, 'GET', '/api/server',
+                                              timeout=min(5, remaining))
+                status = self._validate_server_status(status)
+                if (status['instance_id'] != instance_id and status['previous_instance_id'] == instance_id
+                        and status['state'] == 'ready'):
+                    self._token = token
+                    return status
+            except (CLIError, OSError, ValueError):
+                pass
+            remaining = deadline - cli_api.monotonic()
+            if remaining > 0:
+                time.sleep(min(.25, remaining))
+        prefix = 'Restart outcome is uncertain.' if uncertain else 'Server restart is still pending.'
+        raise CLIError(prefix + ' Check Activity and server logs. Old server may still be draining; '
+                       'restart run.py manually only after confirming it stopped.')
+
     def set_loop_guard(self, hops):
         return self.request('PATCH', '/api/settings/loop-guard', {'max_agent_hops': hops})
 
     def resolve(self, selector, include_archived=True):
         return resolve_session(self.list(include_archived)["workspaces"], selector)
 
-    def create(self, name=""):
-        return self.request("POST", "/api/workspaces", {"name": name})
+    def require_capability(self, capability):
+        try:
+            values = self.request('GET', '/api/terminal-capabilities')
+        except CLIError:
+            raise CLIError('Restart the agentchattr server to use saved agent profiles and orchestration.') from None
+        if not isinstance(values, dict) or values.get(capability) != 1:
+            raise CLIError('Restart the agentchattr server to use saved agent profiles and orchestration.')
+        return values
+
+    def create(self, name="", *, orchestrator=None):
+        body = {"name": name}
+        if orchestrator is not None:
+            self.require_capability('session_orchestrator')
+            body['orchestrator'] = orchestrator
+        return self.request("POST", "/api/workspaces", body)
+
+    def configure_orchestrator(self, ws_id, config):
+        self.require_capability('session_orchestrator')
+        root = "/api/workspaces/" + quote(ws_id, safe="")
+        return self.request("POST", root + "/orchestrator", config)
 
     def rename(self, ws_id, name):
         root = "/api/workspaces/" + quote(ws_id, safe="")
@@ -311,11 +420,14 @@ class WorkspaceAPI:
     def action(self, ws_id, action, agent_id=None, body=None):
         root = "/api/workspaces/" + quote(ws_id, safe="")
         if action == "spawn":
+            if isinstance(body, dict) and ('role' in body or 'personality' in body):
+                self.require_capability('agent_profiles')
             path = root + "/agents"
         elif agent_id is None:
             path = root + "/" + action
         else:
-            path = root + "/agents/" + quote(agent_id, safe="") + "/" + action
+            route = 'stop-verified' if action == 'stop_verified' else action
+            path = root + "/agents/" + quote(agent_id, safe="") + "/" + route
         if action in ("resume", "history") and body is None:
             body = {}
         elif action in ("stop", "retry", "remove"):

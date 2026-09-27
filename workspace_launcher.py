@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_profiles import ORCHESTRATOR_INSTRUCTIONS, make_profile, profile_prompt
 from providers import AmbiguousSessionId, LaunchContext, get_adapter
 from provider_args import validate_provider_args
 from registry import NameInUse
@@ -27,6 +28,7 @@ READY_TIMEOUT = 60.0
 DISCOVERY_TIMEOUT = 60.0
 VERIFY_DELAY = 10.0
 LOG_TAIL_LINES = 20
+_ANY_LAUNCH = object()
 
 LITERAL_PROMPT = ("Catch up: use mcp to read #{channel} with since_id=-1 and keep reading while "
                   "has_more is true, then respond in #{channel} with a two-line status of where "
@@ -41,6 +43,17 @@ class LaunchError(Exception):
 
 
 class TmuxOps:
+    def session_absent(self, name: str) -> bool:
+        """Only recognized tmux absence proves that relaunch is safe."""
+        try:
+            result = subprocess.run(['tmux', 'has-session', '-t', '=' + name],
+                                    capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        error = (result.stderr or '').lower()
+        return result.returncode != 0 and any(text in error for text in (
+            "can't find session", 'no server running', 'no such file or directory'))
+
     def remove_session(self, name: str) -> None:
         """Removal requires verified absence, not best-effort kill success."""
         target = '=' + name
@@ -110,6 +123,7 @@ class WorkspaceLauncher:
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._processes: dict[str, subprocess.Popen] = {}
+        self.on_startup_ready = None
 
     def tmux_name(self, agent: dict) -> str:
         return f"agentchattr-{agent['agent_id']}"
@@ -228,13 +242,19 @@ class WorkspaceLauncher:
             ) from exc
 
     def spawn(self, ws_id: str, provider: str, cwd: str, history_mode: str,
-              name: str | None = None, provider_args: list[str] | None = None) -> dict:
+              name: str | None = None, provider_args: list[str] | None = None,
+              *, role="generalist", personality="pragmatic", _kind="worker") -> dict:
         with self._lifecycle_lock:
-            return self._spawn(ws_id, provider, cwd, history_mode, name, provider_args)
+            return self._spawn(ws_id, provider, cwd, history_mode, name, provider_args,
+                               role=role, personality=personality, _kind=_kind)
 
     def _spawn(self, ws_id: str, provider: str, cwd: str, history_mode: str,
-               name: str | None = None, provider_args: list[str] | None = None) -> dict:
+               name: str | None = None, provider_args: list[str] | None = None,
+              *, role="generalist", personality="pragmatic", _kind="worker") -> dict:
         try:
+            profile = make_profile(role, personality)
+            if _kind == "orchestrator":
+                profile["role_instructions"] = ORCHESTRATOR_INSTRUCTIONS
             provider_args = validate_provider_args([] if provider_args is None else provider_args)
         except ValueError as error:
             raise LaunchError(400, str(error)) from None
@@ -262,7 +282,7 @@ class WorkspaceLauncher:
                 registry_name=reg["name"], floor_id=self._floor_for(history_mode, ws["channel"]),
                 native_session_id=session_id,
                 history_state="done" if history_mode == "none" else "pending",
-                last_launch=last_launch, provider_args=provider_args,
+                last_launch=last_launch, provider_args=provider_args, profile=profile, kind=_kind,
             )
             self.store.write_identity(ws, agent, reg["token"])
             launch = self.launch_context_for(agent)
@@ -273,19 +293,63 @@ class WorkspaceLauncher:
             if reg is not None:
                 self.registry.deregister(reg["name"])
             if agent is not None:
-                self.store.delete_identity(agent["agent_id"])
-                self.store.remove_agent(ws_id, agent["agent_id"])
+                if _kind == "orchestrator":
+                    self.store.update_agent(ws_id, agent["agent_id"], last_state="exited", last_error=str(exc))
+                    self.store.set_orchestrator(ws_id, enabled=False, last_error=str(exc))
+                else:
+                    self.store.delete_identity(agent["agent_id"])
+                    self.store.remove_agent(ws_id, agent["agent_id"])
             if isinstance(exc, LaunchError):
                 raise
             raise LaunchError(500, f"failed to start wrapper: {exc}")
         last_launch["wrapper_pid"] = wrapper_pid
         return self.store.update_agent(ws_id, agent["agent_id"], last_launch=last_launch)
 
+    def startup_ready(self, name: str) -> bool:
+        found = self.store.find_agent_by_registry_name(name)
+        if not found:
+            return True
+        ws, agent = found
+        launch = agent.get("last_launch") or {}
+        return (not ws.get("archived") and agent.get("last_state") == "running"
+                and not launch.get("terminated")
+                and launch.get("startup_delivery_done", not bool(agent.get("profile"))))
+
+    def _manager_needs_fresh(self, agent: dict, cwd: str | None = None) -> bool:
+        adapter = self._adapter(agent["provider"])
+        session_id = agent.get("native_session_id")
+        if not session_id or not adapter.supports_resume:
+            return True
+        return (adapter.can_locate_transcripts
+                and adapter.locate_transcript(session_id, Path(cwd or agent["cwd"])) is None)
+
+    def configure_orchestrator(self, ws_id: str, provider: str, cwd: str,
+                               provider_args: list[str] | None = None) -> dict:
+        with self._lifecycle_lock:
+            ws = self.store.get(ws_id)
+            self._validate(ws, provider, cwd)
+            control = ws.get("orchestrator") or {}
+            agent = self.store.get_agent(ws_id, control.get("agent_id"))
+            if agent:
+                if agent["provider"] != provider:
+                    raise LaunchError(409, "Saved orchestrator provider is fixed; remove it before changing provider")
+                if agent["last_state"] not in ("starting", "running"):
+                    self.resume(ws_id, agent["agent_id"], fresh=self._manager_needs_fresh(agent, cwd),
+                                cwd=cwd, provider_args=provider_args)
+                self.store.set_orchestrator(ws_id, enabled=True, retry_count=0, next_retry_at=0)
+            else:
+                self._spawn(ws_id, provider, cwd, "none", provider_args=provider_args,
+                            _kind="orchestrator")
+            return self.store.get(ws_id)
+
     def resume(self, ws_id: str, agent_id: str, fresh: bool = False,
                name: str | None = None, cwd: str | None = None,
                provider_args: list[str] | None = None) -> dict:
         with self._lifecycle_lock:
-            return self._resume(ws_id, agent_id, fresh, name, cwd, provider_args)
+            result = self._resume(ws_id, agent_id, fresh, name, cwd, provider_args)
+            if result.get("kind") == "orchestrator":
+                self.store.set_orchestrator(ws_id, enabled=True, retry_count=0, next_retry_at=0, last_error=None)
+            return result
 
     def _resume(self, ws_id: str, agent_id: str, fresh: bool = False,
                 name: str | None = None, cwd: str | None = None,
@@ -394,7 +458,7 @@ class WorkspaceLauncher:
         if not found:
             return
         ws, agent = found
-        if not ready:
+        if not ready or ws.get("archived"):
             return
         if (agent["last_state"] == "running"
                 and (agent.get("last_launch") or {}).get("startup_delivery_done") is False):
@@ -439,7 +503,8 @@ class WorkspaceLauncher:
             agent = self.store.get_agent(ws_id, agent_id)
             if not ws or not agent or (agent.get("last_launch") or {}).get("nonce") != nonce:
                 return
-            if agent['last_launch'].get('startup_delivery_done'):
+            if (ws.get("archived") or agent['last_state'] != 'running' or agent['last_launch'].get('terminated')
+                    or agent['last_launch'].get('startup_delivery_done')):
                 return
             kind = agent["last_launch"].get("kind", "spawn")
             catch_up = agent["history_mode"] == "literal" and agent["history_state"] == "pending"
@@ -453,12 +518,14 @@ class WorkspaceLauncher:
                     "do not infer your identity from chat history or another agent's messages. "
                     "Use this exact name as sender when calling chat_send. "
                 )
+                prompt += profile_prompt(agent)
                 prompt += (LITERAL_PROMPT.format(channel=ws['channel']) if catch_up else
                            "Wait for requests addressed to you in this session; no history catch-up is requested.")
                 try:
                     self.agents.trigger_sync(
                         agent["registry_name"], message="catch up" if catch_up else "session identity",
                         channel=ws["channel"], prompt=prompt,
+                        expected_token=(self.store.read_identity(agent_id) or {}).get('token'),
                     )
                 except Exception:
                     if catch_up:
@@ -468,7 +535,7 @@ class WorkspaceLauncher:
                 launch = dict(agent["last_launch"], identity_prompt_sent=True)
                 if not self._update_if_launch(ws_id, agent_id, nonce, last_launch=launch):
                     return
-            if kind in ("resume", "fresh"):
+            if kind in ("resume", "fresh") or agent.get("profile"):
                 try:
                     self._send_bundle(ws, self.store.get_agent(ws_id, agent_id))
                 except Exception:
@@ -478,6 +545,11 @@ class WorkspaceLauncher:
             launch = dict(agent['last_launch'], startup_delivery_done=True)
             if not self._update_if_launch(ws_id, agent_id, nonce, last_launch=launch):
                 return
+            if self.on_startup_ready:
+                try:
+                    self.on_startup_ready(ws_id, agent_id)
+                except Exception:
+                    log.exception("startup-ready callback failed for %s", agent_id)
             adapter = self._adapter(agent["provider"])
             agent = self.store.get_agent(ws_id, agent_id)
         if agent["native_session_id"] is None:
@@ -518,6 +590,7 @@ class WorkspaceLauncher:
     def tick(self) -> None:
         with self._lifecycle_lock:
             self._tick()
+            self._supervise_orchestrators()
 
     def _tick(self) -> None:
         with self._lock:
@@ -531,6 +604,48 @@ class WorkspaceLauncher:
                 self._terminate_launch(info["ws_id"], agent, "no ready heartbeat within 60 s")
             with self._lock:
                 self._pending.pop(agent_id, None)
+
+    def _supervise_orchestrators(self) -> None:
+        for ws in self.store.list():
+            control = ws.get("orchestrator") or {}
+            if not control.get("enabled"):
+                continue
+            agent = self.store.get_agent(ws["id"], control.get("agent_id"))
+            if not agent or agent.get("kind") != "orchestrator":
+                continue
+            if agent["last_state"] in ("starting", "running"):
+                continue
+            attempts = control.get("retry_count", 0)
+            if attempts >= 3 or self._clock() < control.get("next_retry_at", 0):
+                continue
+            # Absence must be positively established. has_session() treats
+            # command errors as absent, so it is unsuitable for supervision.
+            probe = getattr(self._tmux, "session_absent", None)
+            try:
+                if probe is None or not probe(self.tmux_name(agent)):
+                    continue
+                process = self._processes.get(agent["agent_id"])
+                if process is not None:
+                    if process.poll() is None:
+                        continue
+                else:
+                    pid = self._wrapper_pid(agent)
+                    if type(pid) is int and pid > 1:
+                        try:
+                            self._kill(pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        else:
+                            continue
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                continue
+            self.store.set_orchestrator(ws["id"], retry_count=attempts + 1,
+                                        next_retry_at=self._clock() + 5 * (2 ** attempts))
+            try:
+                self._resume(ws["id"], agent["agent_id"],
+                             fresh=self._manager_needs_fresh(agent))
+            except Exception as exc:
+                self.store.set_orchestrator(ws["id"], last_error=str(exc))
 
     def _wrapper_pid(self, agent: dict) -> int | None:
         last_launch = agent.get("last_launch") or {}
@@ -564,19 +679,52 @@ class WorkspaceLauncher:
 
             self._background(hard_kill)
 
-    def stop(self, ws_id: str, agent_id: str) -> dict:
+    def stop(self, ws_id: str, agent_id: str, *, expected_nonce=_ANY_LAUNCH) -> dict:
         with self._lifecycle_lock:
-            return self._stop(ws_id, agent_id)
+            return self._stop(ws_id, agent_id, expected_nonce=expected_nonce)
 
-    def _stop(self, ws_id: str, agent_id: str) -> dict:
+    def _stop(self, ws_id: str, agent_id: str, *, expected_nonce=_ANY_LAUNCH) -> dict:
         agent = self.store.get_agent(ws_id, agent_id)
         if agent is None:
             raise LaunchError(404, "agent not found")
-        if agent["last_state"] in ("starting", "running"):
-            self.checkpoint(ws_id)
-            self._terminate_launch(ws_id, agent, "stopped by user")
-            self.store.update_agent(ws_id, agent_id, last_error=None)
-        return self.store.get_agent(ws_id, agent_id)
+        launch = agent.get('last_launch') or {}
+        if expected_nonce is not _ANY_LAUNCH and expected_nonce != launch.get('nonce'):
+            raise LaunchError(409, 'Agent launch changed; review Stop all agents again.')
+        if agent.get("kind") == "orchestrator":
+            self.store.set_orchestrator(ws_id, enabled=False)
+        checkpoint_error = None
+        try:
+            # Fence late readiness before cleanup, even if a cleanup step fails.
+            self.store.update_agent(ws_id, agent_id, last_launch=dict(launch, terminated=True))
+            if agent['last_state'] in ('starting', 'running'):
+                try:
+                    self.checkpoint(ws_id, agent_id=agent_id)
+                except Exception as error:
+                    checkpoint_error = f'Agent stopped, but checkpoint failed: {error}'
+            identity = self.store.read_identity(agent_id)
+            with self._lock:
+                process = self._processes.get(agent_id)
+            pid = process.pid if process is not None else self._wrapper_pid(agent)
+            stop_wrapper_process(pid, self.root,
+                                 self.store.identity_path(agent_id), self.tmux_name(agent),
+                                 owned_process=process)
+            # Saved "exited" state cannot prove absence of leftover processes.
+            self._tmux.remove_session(self.tmux_name(agent))
+            token = (identity or {}).get('token')
+            owned = self.registry.resolve_token(token) if token else None
+            if owned and owned['name'] == agent['registry_name']:
+                self.registry.deregister(owned['name'], expected_token=token, rename_remaining=False)
+            with self._lock:
+                self._pending.pop(agent_id, None)
+                self._processes.pop(agent_id, None)
+            self.store.update_agent(ws_id, agent_id, last_state='exited', last_error=checkpoint_error)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            message = f'Could not confirm agent stopped: {error}'
+            self.store.update_agent(ws_id, agent_id, last_state='unknown', last_error=message)
+            raise LaunchError(409, message) from error
+        if checkpoint_error:
+            raise LaunchError(409, checkpoint_error)
+        return dict(self.store.get_agent(ws_id, agent_id), stop_confirmed=True)
 
     def remove(self, ws_id: str, agent_id: str) -> dict:
         with self._lifecycle_lock:
@@ -586,6 +734,9 @@ class WorkspaceLauncher:
             identity = self.store.read_identity(agent_id)
             name = agent['registry_name']
             try:
+                if agent.get('kind') == 'orchestrator':
+                    self.store.set_orchestrator(ws_id, enabled=False)
+                self.store.update_agent(ws_id, agent_id, last_launch=dict(agent.get('last_launch') or {}, terminated=True))
                 if agent['last_state'] == 'running':
                     self.checkpoint(ws_id)
                 with self._lock:
@@ -612,12 +763,14 @@ class WorkspaceLauncher:
                 raise LaunchError(409, f'Could not remove agent: {exc}') from exc
             return self.store.get(ws_id)
 
-    def checkpoint(self, ws_id: str) -> dict:
+    def checkpoint(self, ws_id: str, *, agent_id: str | None = None) -> dict:
         ws = self.store.get(ws_id)
         if ws is None:
             raise LaunchError(404, "session not found")
         checked = 0
         for agent in ws["agents"]:
+            if agent_id is not None and agent['agent_id'] != agent_id:
+                continue
             if agent["last_state"] != "running":
                 continue
             checked += 1
@@ -680,7 +833,8 @@ class WorkspaceLauncher:
         agent = self.store.get_agent(ws_id, agent_id) if ws else None
         if not agent:
             return []
-        messages = self.messages.get_since(agent["read_mark"], channel=ws["channel"])
+        since_id = min([agent["read_mark"]] + [mid - 1 for mid in agent.get("late_unacked_ids", [])])
+        messages = self.messages.get_since(since_id, channel=ws["channel"])
         if routing is None:
             routing = self.store.routing_for(ws_id)
         return unread(agent, messages, routing)
@@ -692,6 +846,7 @@ class WorkspaceLauncher:
         self.agents.trigger_sync(
             agent["registry_name"], message=f"{len(items)} unread", channel=ws["channel"],
             prompt=bundle_prompt(ws["channel"], items),
+            expected_token=(self.store.read_identity(agent['agent_id']) or {}).get('token'),
         )
         return len(items)
 

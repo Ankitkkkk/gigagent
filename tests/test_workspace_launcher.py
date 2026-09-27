@@ -38,6 +38,19 @@ class FakePopen:
 
         class P:
             pid = 4242
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
 
         return P()
 
@@ -505,7 +518,8 @@ class LauncherTests(unittest.TestCase):
     def test_stopped_wrapper_cannot_recover_from_late_ready_heartbeat(self):
         ag = self._running_claude()
         with patch.object(self.tmux, 'kill_session'):
-            self.launcher.stop(self.ws['id'], ag['agent_id'])
+            with self.assertRaises(LaunchError):
+                self.launcher.stop(self.ws['id'], ag['agent_id'])
         before = self.agent(ag)
         self.launcher.on_heartbeat('claude-1', ready=True, pid=4242)
         self.assertEqual(self.agent(ag), before)
@@ -528,6 +542,7 @@ class LauncherTests(unittest.TestCase):
         )
         nonce = ag["last_launch"]["nonce"]
 
+        self.store.update_agent(self.ws['id'], ag['agent_id'], last_state='running')
         with patch.object(self.store, "update_agent_if_launch", return_value=False):
             self.launcher._after_ready(self.ws["id"], ag["agent_id"], nonce)
 
@@ -540,6 +555,7 @@ class LauncherTests(unittest.TestCase):
         )
         nonce = ag["last_launch"]["nonce"]
 
+        self.store.update_agent(self.ws['id'], ag['agent_id'], last_state='running')
         with patch.object(self.agents, "trigger_sync", side_effect=OSError("queue read only")):
             with self.assertLogs("workspace_launcher", level="ERROR") as logs:
                 self.launcher._after_ready(self.ws["id"], ag["agent_id"], nonce)

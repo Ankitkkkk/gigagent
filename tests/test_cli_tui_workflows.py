@@ -37,8 +37,10 @@ async def workflow_harness(*, rows=(), selected=None, plain=False, no_resume=Tru
     api.list.side_effect = lambda *, include_archived=False: {'workspaces': [copy.deepcopy(w)
         for w in records.values() if include_archived or not w['archived']]}
     api.get.side_effect = lambda ident: copy.deepcopy(records[ident])
-    def create(name):
+    def create(name, *, orchestrator=None):
         records['ws_created'] = workspace('ws_created', name)
+        if orchestrator is not None:
+            records['ws_created']['orchestrator'] = dict(orchestrator, enabled=True)
         return copy.deepcopy(records['ws_created'])
     api.create.side_effect = create
     def rename(ident, name):
@@ -56,6 +58,9 @@ async def workflow_harness(*, rows=(), selected=None, plain=False, no_resume=Tru
         if action == 'spawn':
             value = agent('ag_created', cwd=body['cwd'], state='starting')
             value.update(provider=body['provider'], history_mode=body['history_mode'])
+            if body.get('role') or body.get('personality'):
+                value['profile'] = {'role': body.get('role', 'generalist'),
+                                    'personality': body.get('personality', 'pragmatic')}
             ws['agents'].append(value)
             return copy.deepcopy(value)
         if agent_id:
@@ -299,12 +304,9 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     await ui.key('Enter')
                 else:
                     await ui.wait_render()
-                    for y, row in enumerate(ui.rows):
-                        if '<' in row and 'Actions' in row:
-                            await ui.click(row.index('Actions'), y)
-                            break
-                    else:
-                        self.fail('No visible agent Actions control')
+                    info = ui.view.agent_actions.window.render_info
+                    self.assertIn('Actions', ui.rows[info._y_offset])
+                    await ui.click(info._x_offset + 5, info._y_offset)
                 await self.modal(ui, 'Agent actions: ag_one')
                 for label in ('Resume agent', 'Stop agent', 'Attach', 'Unread', 'Retry unread',
                               'History settings', 'Inspect agent'):
@@ -433,7 +435,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             title_y = next(y for y, row in enumerate(ui.rows) if 'Choose agent' in row)
             y, row = next((y, row) for y, row in enumerate(ui.rows)
                           if y > title_y and '<Add agent >' in row)
-            await ui.click(row.index('Add agent'), y)
+            await ui.click(row.index('<Add agent >') + 1, y)
             await self.modal(ui, 'New agent')
             await ui.key('Escape')
             await ui.paste('clear me')
@@ -556,6 +558,9 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.modal(ui, 'Show archived')
             await ui.activate_named('new_session')
             await self.modal(ui, 'Session name:')
+            await ui.key('Enter')
+            await self.modal(ui, 'Orchestrator provider:')
+            await ui.focus_field('cwd')
             await ui.key('Enter')
             await ui.wait_until(lambda: (ui.controller.workspace or {}).get('id') == 'ws_created')
             await ui.wait_render()
@@ -881,12 +886,17 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             task = ui.start(ui.workflows.new_session())
             await self.modal(ui, 'New session')
             await ui.key('Enter')
+            await self.modal(ui, 'Orchestrator provider:')
+            await ui.focus_field('cwd')
+            await ui.key('Enter')
             self.assertEqual((await task).status, 'completed')
-            ui.api.create.assert_called_once_with('')
+            ui.api.create.assert_called_once_with('', orchestrator={
+                'provider': 'codex', 'cwd': str(Path.cwd())})
             self.assertEqual(ui.controller.workspace['id'], 'ws_created')
             self.assertEqual(ui.composer_actions.key, ('session', 'ws_created'))
             self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'unsent')
-            self.assertLess(ui.api.mock_calls.index(call.create('')), ui.api.mock_calls.index(call.get('ws_created')))
+            self.assertLess(ui.api.mock_calls.index(call.create('', orchestrator={
+                'provider': 'codex', 'cwd': str(Path.cwd())})), ui.api.mock_calls.index(call.get('ws_created')))
 
     async def test_navigation_search_stable_ids_refresh_and_mouse(self):
         async with workflow_harness(rows=[workspace('ws_alpha', 'Same'), workspace('ws_beta', 'Same')]) as ui:
@@ -951,8 +961,14 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 task = ui.start(ui.workflows.agent_form('spawn'))
                 await self.modal(ui, 'New agent')
                 self.assertIn('codex', ui.screen_text())
+                await ui.key('Down')
                 self.assertIn('kilo', ui.screen_text())
+                await ui.key('Up')
                 self.assertIn(cwd, ui.screen_text())
+                await ui.key('Enter')
+                await self.modal(ui, 'New agent · 2 of 2')
+                await ui.key('Tab')
+                await ui.key('Tab')
                 await ui.key('Enter')
                 await self.modal(ui, 'exact launch refusal')
                 self.assertEqual(ui.api.action.call_count, 1)
@@ -961,9 +977,14 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(cwd, ui.screen_text())
                 ui.api.action.side_effect = action
                 await ui.key('Enter')
+                await self.modal(ui, 'New agent · 2 of 2')
+                await ui.key('Tab')
+                await ui.key('Tab')
+                await ui.key('Enter')
                 self.assertEqual((await task).status, 'completed')
                 self.assertEqual(ui.api.action.call_args.kwargs['body'],
-                                 dict(provider='codex', cwd=cwd, history_mode='literal', name=None))
+                                 dict(provider='codex', cwd=cwd, history_mode='literal', name=None,
+                                      role='generalist', personality='pragmatic'))
 
     async def test_resume_starts_ordinary_and_fresh_needs_confirmation(self):
         async with workflow_harness(selected=workspace(agents=[agent()])) as ui:
@@ -1059,6 +1080,9 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ui.state.drafts.get(('session', 'ws_one')), 'keep archived draft')
             await ui.activate_named('new_session')
             await self.modal(ui, 'Session name:')
+            await ui.key('Enter')
+            await self.modal(ui, 'Orchestrator provider:')
+            await ui.focus_field('cwd')
             await ui.key('Enter')
             self.assertEqual((await task).status, 'completed')
             self.assertEqual(ui.controller.workspace['id'], 'ws_created')
@@ -1297,7 +1321,16 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             await ui.paste('compact agent')
             await ui.key('Tab')
             await ui.key('Tab')
-            # Submit remains visible and focusable at the minimum usable size.
+            self.assertIn('Next', ui.screen_text())
+            await ui.focus_field('name')
+            await ui.key('Tab')
+            await ui.key('Tab')
+            await ui.key('Tab')
+            await ui.key('Enter')
+            await self.modal(ui, 'New agent · 2 of 2')
+            self.assertNotIn('Window too small', ui.screen_text())
+            await ui.key('Tab')
+            await ui.key('Tab')
             self.assertIn('Start agent', ui.screen_text())
             await ui.key('Enter')
             self.assertEqual((await task).status, 'completed')

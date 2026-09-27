@@ -15,19 +15,41 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer, Float,
                                    FloatContainer, HSplit, ScrollOffsets, VSplit, Window)
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.layout.containers import WindowAlign
 from prompt_toolkit.layout.layout import walk
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.processors import Processor, Transformation
-from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
-from prompt_toolkit.widgets import Button, Frame, TextArea
+from prompt_toolkit.widgets import Box, Button, Frame, TextArea
 
 from cli_tui_state import MAX_DRAFT_BYTES, body_text, clip_cells, label_text, layout_mode
+from cli_tui_theme import TUI_STYLE
 from cli_view_contracts import channel_transcript
 from cli_workspace_chat import SESSION_COMMANDS, SESSION_HELP, _timestamp
 from cli_workspaces import WINDOWS_TMUX_ERROR
+
+
+class _PaneButton(Button):
+    """Quiet, aligned pane actions with native Button input and mouse handling."""
+
+    def __init__(self, text, *, handler, width=20, symbol=''):
+        self.symbol = symbol
+        super().__init__(text, handler=handler, width=width, left_symbol=' ', right_symbol=' ')
+        native_style = self.window.style
+        self.window.style = lambda: 'class:pane-action ' + native_style()
+        self.window.align = WindowAlign.LEFT
+
+    def _get_text_fragments(self):
+        fragments = super()._get_text_fragments()
+        focused = get_app().layout.has_focus(self)
+        for index, (style, text, *extra) in enumerate(fragments):
+            if style == 'class:button.text':
+                label = ' ' + (self.symbol + ' ' if self.symbol else '') + self.text
+                fragments[index] = (style, label.ljust(self.width - 2), *extra)
+        fragments[0] = (fragments[0][0], '›' if focused else ' ', *fragments[0][2:])
+        return fragments
 
 
 def _wrap(text, width):
@@ -188,6 +210,8 @@ class _ConversationControl(UIControl):
 
     def _message_lines(self, message, width):
         width = max(1, width)
+        if not self.view.selecting_text:
+            width = min(width, 112)
         raw_sender = message.get('sender', '?')
         sender = label_text(raw_sender)
         system = raw_sender == 'system' or message.get('type') in ('system', 'join', 'leave', 'status')
@@ -198,13 +222,13 @@ class _ConversationControl(UIControl):
         clock = clip_cells(label_text(message.get('time', '')), max(0, min(12, width - 6)))
         clock = '  ' + clock if clock else ''
         header = clip_cells(marker + ' ' + name, max(1, width - get_cwidth(clock)))
-        yield [(style, header), ('class:muted', clock)]
+        yield [(style, header), ('class:chat.time', clock)]
         gutter = '' if self.view.selecting_text else clip_cells('│ ', max(0, width - 1))
         content_width = max(1, width - get_cwidth(gutter))
 
         def body_lines(text, text_style=''):
             for line in _wrap(text, content_width):
-                yield [('class:muted', gutter), (text_style, line)]
+                yield [('class:chat.gutter', gutter), (text_style, line)]
 
         yield from body_lines(message.get('text', ''), 'class:muted' if system else '')
         for attachment in message.get('attachments', []):
@@ -341,6 +365,34 @@ class ContextualCompleter(Completer):
 
     def __init__(self, view):
         self.view = view
+        self._context = self._context_key()
+
+    def _session_handles(self):
+        agents = (self.view.controller.workspace or {}).get('agents', [])
+        handles = []
+        for agent in agents:
+            if not isinstance(agent, dict) or not isinstance(agent.get('agent_id'), str) or not agent['agent_id']:
+                continue
+            handle = agent.get('registry_name') or agent['agent_id']
+            if isinstance(handle, str):
+                handles.append(handle)
+        return tuple(dict.fromkeys(handles))
+
+    def _context_key(self):
+        controller, client = self.view.controller, self.view.client
+        if controller.plain_channel:
+            names = tuple(dict.fromkeys(name for name in client.agent_names
+                                        if isinstance(name, str) and name))
+            return ('channel', client.channel, names)
+        return ('session', (controller.workspace or {}).get('id'), self._session_handles())
+
+    def refresh_context(self):
+        context = self._context_key()
+        if context != self._context:
+            self._context = context
+            # A pending result also observes this cleared state. Preserve text
+            # and cursor, including any mention the user already inserted.
+            self.view.composer.buffer.complete_state = None
 
     def get_completions(self, document, complete_event):
         client, controller = self.view.client, self.view.controller
@@ -349,20 +401,12 @@ class ContextualCompleter(Completer):
         prior = before[:-len(word)] if word else before
         parts = prior.split()
         commands = self._commands()
-        agents = (controller.workspace or {}).get('agents', [])
-        handles = []
-        for agent in agents:
-            if not isinstance(agent, dict) or not isinstance(agent.get('agent_id'), str) or not agent['agent_id']:
-                continue
-            handle = agent.get('registry_name') or agent['agent_id']
-            if isinstance(handle, str):
-                handles.append(handle)
+        handles = self._session_handles()
         candidates = {}
         if not parts and word.startswith('/'):
             candidates = commands
         elif word.startswith('@'):
-            candidates = {'@' + name: 'Mention agent' for name in
-                          dict.fromkeys([*client.agent_names, *handles])}
+            candidates = {'@' + name: 'Mention agent' for name in self._context_key()[2]}
         elif parts and parts[0] in commands:
             command = parts[0]
             if controller.plain_channel and command == '/join' and len(parts) == 1:
@@ -611,30 +655,7 @@ class ComposerActions:
 class TuiView:
     """Build controls once. Callbacks own application actions and all I/O."""
 
-    style = Style.from_dict({
-        'frame.border': 'ansibrightblack', 'frame.label': 'ansibrightblack',
-        'focused frame.border': 'ansicyan', 'focused frame.label': 'ansicyan bold',
-        'selected': 'ansicyan bold',
-        'mode.normal': 'ansicyan reverse bold',
-        'mode.insert': 'ansigreen reverse bold',
-        'mode.copy': 'ansiyellow reverse bold',
-        'status.running': 'ansigreen', 'status.starting': 'ansiyellow',
-        'status.failed': 'ansired', 'muted': 'ansibrightblack',
-        'chat.you': 'ansicyan bold', 'chat.agent': 'ansigreen bold',
-        'chat.attachment': 'ansicyan underline', 'chat.choices': 'ansiyellow',
-        'composer.mention': 'ansibrightcyan bold',
-        'agent.ready': 'ansigreen', 'agent.working': 'ansicyan',
-        'agent.input': 'ansiyellow bold', 'agent.starting': 'ansiyellow',
-        'agent.stopped': 'ansibrightblack', 'agent.error': 'ansired bold',
-        'agent.unread': 'ansicyan bold',
-        'dialog.choice.selected': 'ansicyan bold',
-        'dialog.error': 'ansibrightred bold',
-        'session.current': 'ansicyan bold',
-        'session.selected': 'bg:ansicyan fg:ansiblack bold',
-        'button': 'bg:default fg:default', 'button.focused': 'bg:default ansicyan bold',
-        'agent.review button': 'bg:ansiyellow fg:ansiblack bold',
-        'agent.review button.focused': 'bg:ansibrightyellow fg:ansiblack bold underline',
-    })
+    style = TUI_STYLE
 
     def __init__(self, client, controller, state, dialogs, callbacks):
         self.client, self.controller = client, controller
@@ -658,6 +679,7 @@ class TuiView:
         self._activity_max_line = 0
         self._activity_focus = None
         self.composer = TextArea(multiline=True, height=self._composer_height, wrap_lines=True,
+                                 focus_on_click=True,
                                  read_only=Condition(lambda: self.screen_mode == 'small'
                                                      or self.selecting_text
                                                      or self.composer_mode == 'NORMAL'),
@@ -673,47 +695,52 @@ class TuiView:
         self.conversation_window = Window(self.conversation, wrap_lines=False)
         self.navigation_window = Window(self.navigation, wrap_lines=False)
         self.agents_window = Window(self.agents, height=lambda: None if self.screen_mode == 'wide' and not self.inspecting else
-                                    8 if self.inspecting else
+                                    7 if self.inspecting else
                                     1 if self.screen_mode == 'compact' else 3, wrap_lines=False,
                                     scroll_offsets=ScrollOffsets(bottom=lambda: int(
                                         self.screen_mode == 'wide' and not self.inspecting)))
-        framed_conversation = self._frame(self.conversation_window, self._conversation_title, 'conversation')
+        framed_conversation = self._frame(Box(self.conversation_window, padding=0,
+            padding_left=2, padding_right=2), self._conversation_title, 'conversation')
         conversation = DynamicContainer(lambda: self.conversation_window if self.selecting_text
                                          else framed_conversation)
-        self.agent_actions = Button('Actions', width=12, handler=lambda:
+        self.agent_actions = _PaneButton('Actions', symbol='≡', handler=lambda:
             self._app().create_background_task(self.callbacks['run_action'](
                 'agents', target_id=self.state.selected_agent_id)))
-        self.agent_review = Button('Review input', width=16, handler=self._review_input)
+        self.agent_review = _PaneButton('Review input', symbol='!', handler=self._review_input)
         review = ConditionalContainer(HSplit([self.agent_review], style='class:agent.review'),
                                       filter=Condition(lambda: self._input_agent() is not None))
-        self.agent_attach = Button('Attach', width=16, handler=self._direct_attach)
+        self.agent_attach = _PaneButton('Attach', symbol='↗', handler=self._direct_attach)
         attach = ConditionalContainer(self.agent_attach, filter=Condition(self._show_attach))
-        self.agent_add = Button('Add agent', width=12, handler=self._add_agent)
-        action_buttons = HSplit([self.agent_actions, ConditionalContainer(
-            self.agent_add, filter=Condition(self._show_add_agent))])
-        agent_contents = VSplit([self.agents_window, review, attach, action_buttons], padding=1)
+        self.agent_add = _PaneButton('Add agent', symbol='+', handler=self._add_agent)
+        add = ConditionalContainer(self.agent_add, filter=Condition(self._show_add_agent))
+        agent_contents = HSplit([self.agents_window,
+            VSplit([review, attach, self.agent_actions, add], padding=1)])
         framed_agents = self._frame(agent_contents, lambda: 'Agent details · Esc Message' if self.inspecting
                                     else 'Agents · Enter Actions · F3 Choose · Esc Message', 'agents')
         agent_area = ConditionalContainer(DynamicContainer(lambda: agent_contents
             if self.screen_mode == 'compact' and not self.inspecting else framed_agents),
             filter=Condition(lambda: not self.controller.plain_channel
                              and (self.screen_mode != 'wide' or self.inspecting)))
-        rail_agent_controls = HSplit([review, attach, action_buttons],
-            height=lambda: 1 + int(self._show_add_agent()) + int(
+        rail_agent_controls = HSplit([Window(height=1), review, attach, self.agent_actions, add],
+            height=lambda: 2 + int(self._show_add_agent()) + int(
                 self._input_agent() is not None or self._show_attach()))
         rail_agents = self._frame(HSplit([self.agents_window, rail_agent_controls],
                                         width=Dimension.exact(20)),
             lambda: 'Agent details' if self.inspecting else 'Agents', 'agents')
-        self.clear_draft = Button('Clear draft', width=15, handler=lambda:
+        self.clear_draft = _PaneButton('Clear draft', width=15, handler=lambda:
             self._app().create_background_task(self.callbacks['run_action']('clear_draft')))
+        self.restart_server = _PaneButton('Restart server', symbol='↻', width=18, handler=lambda:
+            self._app().create_background_task(self.callbacks['run_action']('restart_server')))
         composer_area = FloatContainer(
-            content=self._frame(self.composer, self._composer_title, 'composer'),
-            floats=[Float(top=0, right=1, content=self.clear_draft)])
+            content=self._frame(Box(self.composer, padding=0, padding_left=1,
+                                   padding_right=1), self._composer_title, 'composer'),
+            floats=[Float(top=0, right=1, content=self.clear_draft),
+                    Float(bottom=0, right=1, content=self.restart_server)])
         activity_area = self._frame(Window(self.activity), lambda:
             f'Activity · {self.state.notices.omitted} omitted · Esc Back', 'activity')
         main = HSplit([DynamicContainer(lambda: activity_area if self.activity_visible else conversation),
                        agent_area, composer_area])
-        self.new_session = Button('New session', width=20, handler=lambda:
+        self.new_session = _PaneButton('New session', symbol='+', handler=lambda:
             self._app().create_background_task(self.callbacks['run_action']('new_session'))
             if self.screen_mode == 'wide' and not self.controller.plain_channel else None)
         navigation_area = HSplit([self.navigation_window, ConditionalContainer(
@@ -738,21 +765,24 @@ class TuiView:
         wide = VSplit([sidebar, main])
         resize_notice = HSplit([Window(FormattedTextControl(
             'Resize terminal to at least 80 × 18.\nDraft and focus are preserved.'))])
-        footer = Window(FormattedTextControl(self._footer), height=1)
+        appbar = ConditionalContainer(Window(FormattedTextControl(self._appbar), height=1,
+            style='class:appbar'), filter=Condition(self._show_appbar))
+        footer = Window(FormattedTextControl(self._footer), height=1, style='class:footer')
         notice_strip = ConditionalContainer(Window(FormattedTextControl(self._notice_text), height=1),
             filter=Condition(lambda: self.screen_mode != 'small' and bool(self.state.notices.lines)))
         self.global_key_bindings = KeyBindings()
         self.key_bindings = self._bindings()
-        self.root = FloatContainer(content=HSplit([
+        self.root = FloatContainer(content=HSplit([appbar,
             DynamicContainer(lambda: resize_notice if self.screen_mode == 'small'
-                             else wide if self.screen_mode == 'wide' else main), notice_strip, footer]),
+                             else wide if self.screen_mode == 'wide' else main),
+            notice_strip, footer]),
             floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=6,
                         extra_filter=has_focus(self.composer) & Condition(lambda:
                             self.screen_mode != 'small' and self.dialogs.future is None))),
                     Float(content=DynamicContainer(lambda: self.dialogs.body)),
                     Float(content=ConditionalContainer(self._help_container(),
                         filter=Condition(lambda: self.help_visible)))],
-            key_bindings=self.key_bindings)
+            key_bindings=self.key_bindings, style='class:app')
         self.refresh()
 
     def _help_container(self):
@@ -788,7 +818,8 @@ class TuiView:
             height=lambda: max(3, min(20, self._app().output.get_size().rows - 4)),
             width=lambda: max(10, min(90, self._app().output.get_size().columns - 4))),
             title='gigagent Help · F1/Esc Back · PgUp/PgDn Scroll')
-        return FloatContainer(content=content, floats=[], modal=True, key_bindings=bindings)
+        return FloatContainer(content=content, floats=[], modal=True, key_bindings=bindings,
+                              style='class:dialog.body')
 
     def show_help(self, text):
         if self.help_visible:
@@ -849,7 +880,7 @@ class TuiView:
 
     def _composer_height(self):
         width = max(1, self._app().output.get_size().columns -
-                    (22 if self.screen_mode == 'wide' else 0) - 2)
+                    (22 if self.screen_mode == 'wide' else 0) - 4)
         lines = sum(max(1, (get_cwidth(line) + width - 1) // width)
                     for line in body_text(self.composer.text).split('\n'))
         return min(6, max(3, lines))
@@ -861,8 +892,9 @@ class TuiView:
             return get_app()
 
     def _frame(self, body, title, name, width=None):
+        focus = self._focus_style(name)
         return HSplit([Frame(body, title=title)], width=width,
-                      style=self._focus_style(name))
+                      style=lambda: 'class:pane.' + name + ' ' + focus())
 
     @property
     def screen_mode(self):
@@ -885,7 +917,7 @@ class TuiView:
         return style
 
     def focus_named(self, name):
-        if name not in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'agent_review', 'agent_attach', 'agent_add', 'pending_inputs', 'clear_draft'):
+        if name not in ('composer', 'conversation', 'navigation', 'agents', 'new_session', 'activity', 'agent_actions', 'agent_review', 'agent_attach', 'agent_add', 'pending_inputs', 'clear_draft', 'restart_server'):
             raise ValueError('Unknown focus target: ' + name)
         target = getattr(self, name)
         control = getattr(target, 'control', target)
@@ -919,6 +951,9 @@ class TuiView:
                 yield message
 
     def refresh(self, event=None):
+        completer = self.composer.buffer.completer
+        if isinstance(completer, ContextualCompleter):
+            completer.refresh_context()
         if (self._app().layout.current_control is self.agent_review.control
                 and self._input_agent() is None or
                 self._app().layout.current_control is self.agent_attach.control and not self._show_attach() or
@@ -967,7 +1002,7 @@ class TuiView:
 
     def _notice_text(self):
         latest = self.state.notices.lines[-1] if self.state.notices.lines else ''
-        return [('class:muted', clip_cells('Notice: ' + body_text(latest),
+        return [('class:notice', clip_cells('Notice: ' + body_text(latest),
                                          self._app().output.get_size().columns))]
 
     def show_activity(self):
@@ -975,7 +1010,8 @@ class TuiView:
         if self.activity_visible or self.screen_mode == 'small' or self.dialogs.future is not None:
             return False
         current = self._app().layout.current_control
-        name = next((name for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session')
+        name = next((name for name in ('composer', 'conversation', 'navigation', 'agents', 'new_session',
+                                       'restart_server')
                      if current is getattr(getattr(self, name), 'control', getattr(self, name))),
                     self.state.focus_name)
         self._activity_focus = (current, name)
@@ -1076,7 +1112,9 @@ class TuiView:
         workspace = self.controller.workspace
         agent = self._selected_agent()
         choices = [('help', 'Help', 'Keyboard and command help'),
+                   ('restart_server', 'Restart server', 'Restart connected local server; keep agents and drafts'),
                    ('loop_guard', 'Loop guard', 'Set the agent-to-agent hop limit for all sessions'),
+                   ('stop_all', 'Stop all agents', 'Stop agents across every session; keep history for Resume'),
                    ('activity', 'Activity', 'Read diagnostics; F5 opens Activity, Esc returns'),
                    ('clear_draft', 'Clear draft', 'Clear the current unsent message')]
         if self.controller.plain_channel:
@@ -1084,11 +1122,15 @@ class TuiView:
                         ('switch_channel', 'Switch channel', 'Choose a chat channel'),
                         ('history', 'History', 'Show channel history')]
         else:
+            orchestrator = workspace.get('orchestrator', {}) if workspace else {}
+            orchestrator_label = 'Resume orchestrator' if orchestrator.get('agent_id') else 'Enable orchestrator'
             choices += [('new_session', 'New session', 'Create a session'),
                         ('switch_session', 'Switch session', 'Choose another session'),
                         ('rename_session', 'Rename session', 'Rename the active session'),
                         ('archive_session', 'Archive session', 'Archive the active session'),
                         ('refresh', 'Refresh', 'Fetch the latest session list'),
+                        ('enable_orchestrator', orchestrator_label,
+                         'Configure or resume this session orchestrator'),
                         ('new_agent', 'Add agent', 'Start an agent in this session'),
                         ('attach', 'Attach', 'Open the selected agent terminal'),
                         ('resume', 'Resume agent', 'Resume the selected stopped agent'),
@@ -1100,10 +1142,13 @@ class TuiView:
                         ('inspect_agent', 'Inspect agent', 'Show full status and recovery details')]
         choices.append(('quit', 'Quit', 'Disconnect' if self.controller.plain_channel else 'Checkpoint and disconnect'))
         agent_actions = {'attach', 'resume', 'stop', 'remove', 'unread', 'retry', 'inspect_agent'}
-        session_actions = agent_actions | {'rename_session', 'archive_session', 'new_agent', 'history'}
+        session_actions = agent_actions | {'rename_session', 'archive_session', 'new_agent', 'history',
+                                           'enable_orchestrator'}
         result = []
         for ident, label, description in choices:
             reason = ''
+            if ident == 'stop_all' and sys.platform == 'win32':
+                reason = WINDOWS_TMUX_ERROR
             if not self.controller.plain_channel:
                 if ident in session_actions and workspace is None:
                     reason = 'Select a session first'
@@ -1117,6 +1162,8 @@ class TuiView:
                     reason = 'Agent is already running'
                 if ident == 'new_agent' and workspace is not None and not self.controller.providers:
                     reason = 'No providers configured'
+                if ident == 'enable_orchestrator' and orchestrator.get('enabled'):
+                    reason = 'Orchestrator is already enabled'
                 if ident in {'new_agent', 'attach', 'resume', 'stop', 'remove'} and sys.platform == 'win32':
                     reason = WINDOWS_TMUX_ERROR
             if self.controller.selection_pending and ident not in {'help', 'activity', 'quit'}:
@@ -1223,8 +1270,7 @@ class TuiView:
         if self.screen_mode == 'wide' and not self.inspecting:
             return 20
         return max(1, self._app().output.get_size().columns -
-                   (22 if self.screen_mode == 'wide' else 0) - 15 -
-                   (17 if self._input_agent() is not None or self._show_attach() else 0))
+                   (22 if self.screen_mode == 'wide' else 0) - (2 if self.inspecting else 0))
 
     def _agent_fragments(self):
         if self.inspecting:
@@ -1249,6 +1295,11 @@ class TuiView:
                     self.state.selected_agent_id = ident
                     self.focus_named('agents')
             kind, badge = self._agent_badge(agent)
+            profile = agent.get('profile') if isinstance(agent.get('profile'), dict) else {}
+            label = ('orchestrator' if agent.get('kind') == 'orchestrator'
+                     else profile.get('role'))
+            if label:
+                badge += ' · ' + label_text(label)
             count = agent.get('unread_count')
             unread = '  ✉ ' + ('99+' if count > 99 else str(count)) if isinstance(count, int) and count > 0 else ''
             if self.screen_mode == 'wide':
@@ -1279,10 +1330,26 @@ class TuiView:
     def _conversation_title(self):
         workspace = self.controller.workspace
         name = (workspace.get('name') or workspace['id']) if workspace else '#' + self.client.channel
-        title = 'gigagent · ' + label_text(name) + ' · ' + label_text(self.client.connection_state).capitalize()
+        title = ('Conversation' if self._show_appbar() else
+                 label_text(name) + ' · ' + label_text(self.client.connection_state).capitalize())
         if self.state.viewport.new_ids:
             title += f' · {len(self.state.viewport.new_ids)} new'
         return clip_cells(title, max(1, self._app().output.get_size().columns - 30))
+
+    def _show_appbar(self):
+        return self._app().output.get_size().rows >= 24 and not self.selecting_text
+
+    def _appbar(self):
+        workspace = self.controller.workspace
+        name = (workspace.get('name') or workspace['id']) if workspace else '#' + self.client.channel
+        connected = self.client.connection_state == 'connected'
+        status = ('● ' if connected else '○ ') + label_text(self.client.connection_state).capitalize() + '  '
+        brand = '  gigagent  '
+        width = self._app().output.get_size().columns
+        session = clip_cells('  ' + label_text(name), max(0, width - len(brand) - get_cwidth(status) - 2))
+        gap = ' ' * max(1, width - len(brand) - get_cwidth(session) - get_cwidth(status))
+        return [('class:appbar.brand', brand), ('class:appbar.session', session), ('', gap),
+                ('class:appbar.connected' if connected else 'class:appbar.connecting', status)]
 
     def _footer(self):
         if self.selecting_text:
@@ -1291,14 +1358,15 @@ class TuiView:
         if self.screen_mode == 'small':
             return [('class:muted', 'F1 Help · Ctrl+Q Quit')]
         mode = [('class:mode.' + self.composer_mode.lower(), ' ' + self.composer_mode + ' '), ('', '  ')]
-        if self.screen_mode == 'compact':
-            return mode + [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
-                     '  F3 Agents  F4 Menu  F5 ' +
-                     ('Chat' if self.activity_visible else 'Log') +
-                     '  F7 Copy  F1 Help  Ctrl+Q Quit')]
-        return mode + [('class:muted', 'F2 ' + ('Channels' if self.controller.plain_channel else 'Sessions') +
-                 '  F3 Agents  F4 Commands  F5 ' + ('Back to chat' if self.activity_visible else 'Activity') +
-                 '  F7 Copy  F1 Help  Ctrl+Q Quit')]
+        compact = self.screen_mode == 'compact'
+        shortcuts = [('F2', 'Channels' if self.controller.plain_channel else 'Sessions'),
+                     ('F3', 'Agents'), ('F4', 'Menu' if compact else 'Commands'),
+                     ('F5', ('Chat' if compact else 'Back to chat') if self.activity_visible else
+                            ('Log' if compact else 'Activity')),
+                     ('F7', 'Copy'), ('F1', 'Help'), ('Ctrl+Q', 'Quit')]
+        for key, label in shortcuts:
+            mode.extend([('class:footer.key', key), ('', ' ' + label + '  ')])
+        return mode
 
     def _cancel_overlay(self):
         if self.screen_mode == 'small':
@@ -1320,16 +1388,21 @@ class TuiView:
             # Native copying owns these keys until F7 restores editor input.
             pass
 
-        composer_focused = has_focus(self.composer) & Condition(lambda:
+        editing_allowed = Condition(lambda:
             self.screen_mode != 'small' and self.dialogs.future is None
             and not self.help_visible and not self.selecting_text)
+        composer_focused = has_focus(self.composer) & editing_allowed
         normal = composer_focused & Condition(lambda: self.composer_mode == 'NORMAL')
+        insert_entry = editing_allowed & (~has_focus(self.composer) |
+                                         Condition(lambda: self.composer_mode == 'NORMAL'))
 
-        @bindings.add('i', filter=normal)
-        @bindings.add('I', filter=normal)
-        @bindings.add('a', filter=normal)
-        @bindings.add('A', filter=normal)
+        @bindings.add('i', filter=insert_entry)
+        @bindings.add('I', filter=insert_entry)
+        @bindings.add('a', filter=insert_entry)
+        @bindings.add('A', filter=insert_entry)
         def insert(event):
+            if not self.focus_named('composer'):
+                return
             buffer = self.composer.buffer
             key = event.data
             if key == 'I':
@@ -1417,8 +1490,9 @@ class TuiView:
         def focus(event):
             if self.screen_mode == 'small':
                 return
-            names = ['navigation', 'new_session', 'conversation', 'agents', 'agent_actions', 'composer', 'clear_draft'] if self.screen_mode == 'wide' else [
-                'conversation', 'agents', 'agent_actions', 'composer', 'clear_draft']
+            names = ['navigation', 'new_session', 'conversation', 'agents', 'agent_actions', 'composer',
+                     'clear_draft', 'restart_server'] if self.screen_mode == 'wide' else [
+                'conversation', 'agents', 'agent_actions', 'composer', 'clear_draft', 'restart_server']
             if self.screen_mode == 'wide' and not self.controller.plain_channel:
                 names.insert(names.index('conversation'), 'pending_inputs')
             if self._input_agent() is not None:
