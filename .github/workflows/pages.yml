@@ -6,6 +6,7 @@ on:
     paths:
       - "site/**"
       - "llms.txt"
+      - "install.sh"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -23,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # llms.txt lives at the repo root; publish the same file on the site.
-      - run: cp llms.txt site/llms.txt
+      # llms.txt and install.sh live at the repo root; publish the same files on the site.
+      - run: cp llms.txt install.sh site/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
