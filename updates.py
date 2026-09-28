@@ -22,6 +22,9 @@ CHECK_TTL = 6 * 3600
 FAILURE_TTL = 3600
 CHECK_TIMEOUT = 5
 APPLY_TIMEOUT = 600
+PROBE_TIMEOUT = 60
+# Two install commands plus the probe; an update lock younger than this is still live.
+LOCK_STALE_AFTER = 2 * APPLY_TIMEOUT + 120
 RELAUNCH_MAX_AGE = 600
 CACHE_FILE = 'update_check.json'
 LOCK_FILE = 'update.lock'
@@ -175,7 +178,7 @@ def _acquire_lock(path, now):
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             try:
-                if now() - path.stat().st_mtime > APPLY_TIMEOUT + 60:
+                if now() - path.stat().st_mtime > LOCK_STALE_AFTER:
                     path.unlink()  # A crashed update left it behind.
                     continue
             except OSError:
@@ -198,13 +201,17 @@ def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess
         return {'ok': False, 'state': 'unsupported', 'version': '',
                 'message': manual_instructions(method)}
     archive = environ.get('YAPP_UPDATE_ARCHIVE') or release['archive_url']
+    # Upgrade in place, then force this package's files over whatever was there.
+    # For pipx, `pipx install --force` could delete the venv on failure and would
+    # rewrite pipx's recorded package spec, so pip runs inside the existing venv.
     if method == 'installer':
-        commands = [[python, '-m', 'pip', 'install', '-q', '--upgrade', archive],
-                    [python, '-m', 'pip', 'install', '-q', '--force-reinstall', '--no-deps', archive]]
+        pip = [python, '-m', 'pip']
         manual = f'Update manually with: {INSTALLER_COMMAND}'
     else:
-        commands = [[which('pipx') or 'pipx', 'install', '--force', archive]]
-        manual = f'Update manually with: pipx install --force {archive}'
+        pip = [which('pipx') or 'pipx', 'runpip', 'yapp']
+        manual = f'Update manually with: pipx runpip yapp install --upgrade {archive}'
+    commands = [pip + ['install', '-q', '--upgrade', archive],
+                pip + ['install', '-q', '--force-reinstall', '--no-deps', archive]]
 
     def failed(message):
         return {'ok': False, 'state': 'failed', 'version': '', 'message': f'{message} {manual}'}
@@ -219,13 +226,18 @@ def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess
     try:
         for command in commands:
             try:
-                result = runner(command, capture_output=True, text=True, timeout=APPLY_TIMEOUT)
+                # A new session keeps terminal Ctrl-C (sent to the TUI's process group)
+                # away from pip, so quitting never interrupts an install halfway.
+                result = runner(command, capture_output=True, text=True, timeout=APPLY_TIMEOUT,
+                                start_new_session=True)
             except (OSError, subprocess.SubprocessError) as error:
                 return failed(f'{type(error).__name__} while installing yapp {release["latest"]}.')
             if result.returncode:
                 return failed(f'Install failed: {_tail(result.stderr or result.stdout)}.')
         try:
-            probe = runner([python, '-c', _VERSION_PROBE], capture_output=True, text=True, timeout=60)
+            # -I: an unrelated yapp in the cwd or PYTHONPATH must not answer for this install.
+            probe = runner([python, '-I', '-c', _VERSION_PROBE], capture_output=True, text=True,
+                           timeout=PROBE_TIMEOUT, start_new_session=True)
             version = probe.stdout.strip() if probe.returncode == 0 else ''
         except (OSError, subprocess.SubprocessError):
             version = ''

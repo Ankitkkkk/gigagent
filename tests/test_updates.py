@@ -194,6 +194,7 @@ class ApplyTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.data = Path(self.tmp.name)
         self.calls = []
+        self.kwargs = []
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -201,10 +202,11 @@ class ApplyTests(unittest.TestCase):
     def runner(self, version='0.6.0', fail_at=None):
         def run(command, **kwargs):
             self.calls.append(command)
+            self.kwargs.append(kwargs)
             self.assertNotIn('shell', kwargs)
             if fail_at is not None and len(self.calls) - 1 == fail_at:
                 return SimpleNamespace(returncode=1, stdout='', stderr='line1\nERROR: no space left')
-            out = version + '\n' if command[1:3] == ['-c', updates._VERSION_PROBE] else ''
+            out = version + '\n' if command[1:4] == ['-I', '-c', updates._VERSION_PROBE] else ''
             return SimpleNamespace(returncode=0, stdout=out, stderr='')
         return run
 
@@ -220,12 +222,41 @@ class ApplyTests(unittest.TestCase):
             ['/venv/bin/python', '-m', 'pip', 'install', '-q', '--force-reinstall', '--no-deps', archive]])
         self.assertFalse((self.data / updates.LOCK_FILE).exists())
 
+    def test_version_probe_is_isolated_from_the_working_directory(self):
+        updates.apply(CHECKED, method='installer', data_dir=self.data,
+                      python='/venv/bin/python', runner=self.runner(), environ={})
+        self.assertEqual(self.calls[2], ['/venv/bin/python', '-I', '-c', updates._VERSION_PROBE])
+
+    def test_install_commands_run_in_their_own_session(self):
+        # Ctrl-C in the terminal must not reach pip halfway through an install.
+        for method in ('installer', 'pipx'):
+            with self.subTest(method=method):
+                self.calls, self.kwargs = [], []
+                updates.apply(CHECKED, method=method, data_dir=self.data, python='/venv/bin/python',
+                              runner=self.runner(), which=lambda _: '/usr/bin/pipx', environ={})
+                for kwargs in self.kwargs[:2]:
+                    self.assertIs(kwargs.get('start_new_session'), True)
+
     def test_pipx_command_and_archive_override(self):
         result = updates.apply(CHECKED, method='pipx', data_dir=self.data, python='/p/bin/python',
                                runner=self.runner(), which=lambda _: '/usr/bin/pipx',
                                environ={'YAPP_UPDATE_ARCHIVE': '/tmp/yapp.zip'})
         self.assertTrue(result['ok'])
-        self.assertEqual(self.calls[0], ['/usr/bin/pipx', 'install', '--force', '/tmp/yapp.zip'])
+        # Upgrade in place like the installer: never `pipx install --force`, which can
+        # delete the venv on failure and rewrites pipx's recorded package spec.
+        self.assertEqual(self.calls[:2], [
+            ['/usr/bin/pipx', 'runpip', 'yapp', 'install', '-q', '--upgrade', '/tmp/yapp.zip'],
+            ['/usr/bin/pipx', 'runpip', 'yapp', 'install', '-q', '--force-reinstall', '--no-deps',
+             '/tmp/yapp.zip']])
+        self.assertEqual(self.calls[2], ['/p/bin/python', '-I', '-c', updates._VERSION_PROBE])
+
+    def test_pipx_failure_names_the_in_place_manual_command(self):
+        result = updates.apply(CHECKED, method='pipx', data_dir=self.data, python='/p/bin/python',
+                               runner=self.runner(fail_at=0), which=lambda _: '/usr/bin/pipx',
+                               environ={})
+        self.assertEqual(result['state'], 'failed')
+        self.assertIn(f"pipx runpip yapp install --upgrade {CHECKED['archive_url']}", result['message'])
+        self.assertNotIn('install --force', result['message'])
 
     def test_failure_reports_tail_and_manual_command(self):
         result = updates.apply(CHECKED, method='installer', data_dir=self.data,
@@ -261,7 +292,14 @@ class ApplyTests(unittest.TestCase):
                                runner=self.runner(), environ={})
         self.assertEqual(result['state'], 'locked')
         self.assertEqual(self.calls, [])
-        old = lock.stat().st_mtime - updates.APPLY_TIMEOUT - 120
+        # A lock younger than the whole apply (two installs plus the probe) is still live.
+        live = lock.stat().st_mtime - updates.APPLY_TIMEOUT - 120
+        os.utime(lock, (live, live))
+        result = updates.apply(CHECKED, method='installer', data_dir=self.data,
+                               runner=self.runner(), environ={})
+        self.assertEqual(result['state'], 'locked')
+        self.assertEqual(self.calls, [])
+        old = lock.stat().st_mtime - 2 * updates.APPLY_TIMEOUT - 180
         os.utime(lock, (old, old))
         result = updates.apply(CHECKED, method='installer', data_dir=self.data,
                                runner=self.runner(), environ={})

@@ -1,8 +1,11 @@
 """Automatic update orchestration inside the TUI, with a fake host."""
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 
+import updates
 from cli_tui_update import AutoUpdater
 
 AVAILABLE = {'state': 'update_available', 'current': '0.5.0', 'latest': '0.6.0', 'tag': 'v0.6.0',
@@ -54,10 +57,10 @@ class Clock:
 
 
 def updater(host, *, result=AVAILABLE, applied=INSTALLED, method='installer', config=None,
-            installed=lambda: '0.5.0', clock=None):
+            installed=lambda: '0.5.0', clock=None, data_dir='/tmp/d'):
     check = Mock(return_value=result)
     apply = Mock(return_value=applied)
-    auto = AutoUpdater(host, data_dir='/tmp/d', config=config or {}, check=check, apply=apply,
+    auto = AutoUpdater(host, data_dir=data_dir, config=config or {}, check=check, apply=apply,
                        install_method=lambda: method, installed_version=installed,
                        running_version='0.5.0', sleep=clock or Clock(limit=3),
                        check_interval=100, poll_interval=10, idle_interval=1)
@@ -180,6 +183,57 @@ class AutoUpdaterTests(unittest.IsolatedAsyncioTestCase):
         await run_until_cancelled(auto)
         apply.assert_not_called()
         self.assertEqual(host.relaunched, [('0.6.0', None)])
+
+    async def test_external_relaunch_waits_while_the_update_lock_is_held(self):
+        # Between the installer's two pip commands the tree is half-installed.
+        with tempfile.TemporaryDirectory() as data:
+            lock = Path(data) / updates.LOCK_FILE
+            lock.write_text('123')
+            seen = []
+            def tick(n):
+                seen.append(list(host.relaunched))
+                if n == 3:
+                    lock.unlink()
+            host = FakeHost()
+            clock = Clock(hook=tick, limit=10)
+            auto, _, apply = updater(host, result=dict(AVAILABLE, state='current'),
+                                     installed=lambda: '0.6.0', clock=clock, data_dir=data)
+            await run_until_cancelled(auto)
+            apply.assert_not_called()
+            self.assertEqual(seen[:3], [[], [], []])
+            self.assertEqual(host.relaunched, [('0.6.0', None)])
+
+    async def test_external_relaunch_is_skipped_while_this_window_installs(self):
+        host = FakeHost()
+        auto, _, _ = updater(host, installed=lambda: '0.6.0')
+        auto._busy = True
+        await auto._relaunch_if_installed_elsewhere()
+        self.assertEqual(host.relaunched, [])
+        auto._busy = False
+        await auto._relaunch_if_installed_elsewhere()
+        self.assertEqual(host.relaunched, [('0.6.0', None)])
+
+    async def test_source_checkout_does_not_relaunch_when_version_changes(self):
+        for method in ('checkout', 'unknown'):
+            with self.subTest(method=method):
+                host = FakeHost()
+                auto, _, _ = updater(host, result=dict(AVAILABLE, state='current'), method=method,
+                                     installed=lambda: '0.6.0')
+                await run_until_cancelled(auto)
+                self.assertEqual(host.relaunched, [])
+
+    async def test_installing_is_true_only_while_apply_runs(self):
+        host = FakeHost()
+        auto, _, apply = updater(host)
+        seen = []
+        def install(*args, **kwargs):
+            seen.append(auto.installing)
+            return INSTALLED
+        apply.side_effect = install
+        self.assertFalse(auto.installing)
+        await run_until_cancelled(auto)
+        self.assertEqual(seen, [True])
+        self.assertFalse(auto.installing)
 
     async def test_check_errors_never_escape(self):
         host = FakeHost()

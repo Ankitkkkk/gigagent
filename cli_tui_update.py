@@ -6,6 +6,7 @@ async confirm(text, default=, escape=) -> bool, async restart_server_for_update(
 """
 
 import asyncio
+from pathlib import Path
 
 import updates
 from cli_view_contracts import ActionOutcome
@@ -24,8 +25,14 @@ class AutoUpdater:
         self.check_interval, self.poll_interval, self.idle_interval = check_interval, poll_interval, idle_interval
         self._announced, self._failed = set(), set()
         self._busy = False
+        self._installing = False
         self._relaunching = False
         self._last_error = None
+
+    @property
+    def installing(self):
+        """True while install commands run; quitting then waits for them to finish."""
+        return self._installing
 
     async def run(self):
         """Check now and every check_interval; poll for installs by other processes."""
@@ -74,8 +81,12 @@ class AutoUpdater:
             if wait_safe:
                 await self._wait_safe()
             self.host.notice(f"Updating yapp to {result['latest']}… (agents keep running)")
-            outcome = await asyncio.to_thread(
-                self._apply, result, method=method, data_dir=self.data_dir)
+            self._installing = True
+            try:
+                outcome = await asyncio.to_thread(
+                    self._apply, result, method=method, data_dir=self.data_dir)
+            finally:
+                self._installing = False
             if outcome['state'] == 'locked':
                 self.host.notice(f"Another yapp window is installing {result['latest']}; "
                                  'this one reopens when it finishes.')
@@ -99,6 +110,11 @@ class AutoUpdater:
             self._busy = False
 
     async def _relaunch_if_installed_elsewhere(self):
+        # Only installed copies relaunch: a checkout's VERSION changes with git, not updates.
+        # Never exec into a tree another process (or this one) is still installing.
+        if (self._busy or self._install_method() not in ('installer', 'pipx')
+                or (Path(self.data_dir) / updates.LOCK_FILE).exists()):
+            return
         installed = self._installed_version()
         if installed and updates.compare(self.running_version, installed) == 'update_available':
             await self._wait_safe()

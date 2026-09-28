@@ -2,6 +2,7 @@
 
 import json
 import sys
+from pathlib import Path
 
 import updates
 from cli_api import CLIError, local_url
@@ -12,12 +13,24 @@ def _default_error_output(text):
     print(text, file=sys.stderr)
 
 
-def _restart_local_server(url, api_factory):
+def _same_data_dir(api, data_dir):
+    """True only when the server says it uses this install's data_dir (as ensure_server checks)."""
+    try:
+        running = api.status().get('data_dir')
+        return (isinstance(running, str) and bool(running)
+                and Path(running).resolve() == Path(data_dir).resolve())
+    except (CLIError, OSError, ValueError, AttributeError):
+        return False
+
+
+def _restart_local_server(url, api_factory, data_dir):
     try:
         api = api_factory(url)
         status = api.server_status()
     except (CLIError, OSError, ValueError):
         return 'No local server is running; the new version starts next time you run yapp.'
+    if not _same_data_dir(api, data_dir):
+        return f'A yapp server from a different install is running on {url}; not restarting it.'
     if not status.get('restart_supported') or status.get('state') != 'ready':
         return 'Restart the yapp server to finish the update (F4 → Restart server in yapp).'
     try:
@@ -90,6 +103,6 @@ def run_update(args, config, *, output=print, error_output=_default_error_output
         return finish(1)
     say(outcome['message'])
     url = args.url or f"http://127.0.0.1:{config.get('server', {}).get('port', 8300)}"
-    server = _restart_local_server(url, api_factory)
+    server = _restart_local_server(url, api_factory, data_dir)
     say(server)
     return finish(0)

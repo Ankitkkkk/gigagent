@@ -14,6 +14,7 @@ from fastapi.requests import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
+import updates  # Imported at startup: after an install the running server keeps its version.
 from store import MessageStore
 from rules import RuleStore
 from summaries import SummaryStore
@@ -3419,7 +3420,6 @@ def _auto_cast(roles: list[str], online_agents: list[str], started_by: str) -> d
 @app.get("/api/version_check")
 async def version_check():
     """Report whether a newer yapp release exists (cached; never blocks on errors)."""
-    import updates
     data_dir = config.get("server", {}).get("data_dir", "./data")
     result = await asyncio.to_thread(updates.check, data_dir=data_dir, config=config)
     return JSONResponse({key: result[key] for key in ("current", "latest", "state", "url")})

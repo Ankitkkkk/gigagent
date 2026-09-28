@@ -20,6 +20,11 @@ class VersionCheckApiTests(unittest.TestCase):
             'current': '0.5.0', 'latest': '0.6.0', 'state': 'update_available',
             'url': 'https://github.com/Ankitkkkk/yapp/releases/tag/v0.6.0'})
 
+    def test_updates_is_imported_once_at_module_level(self):
+        # A lazy import would load newly installed code into an old server after an update.
+        import updates
+        self.assertIs(getattr(app, 'updates', None), updates)
+
     def test_old_upstream_helpers_are_gone(self):
         for name in ('_detect_install_kind', '_fetch_latest_release', '_compare_versions'):
             self.assertFalse(hasattr(app, name), name)

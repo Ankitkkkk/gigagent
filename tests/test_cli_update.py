@@ -58,14 +58,38 @@ class UpdateCommandTests(unittest.TestCase):
         self.assertIn('--yes', self.lines[-1])
         self.apply.assert_not_called()
 
-    def test_yes_applies_and_restarts_ready_local_server(self):
+    def ready_api(self, data_dir=CONFIG['server']['data_dir']):
         api = Mock()
         api.server_status.return_value = {'instance_id': 'i1', 'state': 'ready',
                                           'restart_supported': True, 'reason': ''}
+        api.status.return_value = {'paused': False, 'data_dir': data_dir}
+        return api
+
+    def test_yes_applies_and_restarts_ready_local_server(self):
+        api = self.ready_api()
         self.assertEqual(self.run_update(args(yes=True), api=api), 0)
         self.apply.assert_called_once()
         api.restart_server.assert_called_once_with('i1')
         self.assertTrue(any('Installed yapp 0.6.0.' in line for line in self.lines))
+
+    def test_matching_data_dir_compares_resolved_paths(self):
+        api = self.ready_api(CONFIG['server']['data_dir'] + '/sub/..')
+        self.assertEqual(self.run_update(args(yes=True), api=api), 0)
+        api.restart_server.assert_called_once_with('i1')
+
+    def test_server_from_a_different_install_is_not_restarted(self):
+        expected = ('A yapp server from a different install is running on '
+                    'http://127.0.0.1:8300; not restarting it.')
+        for label, api in (('mismatch', self.ready_api('/somewhere/else/data')),
+                           ('missing', self.ready_api(None)),
+                           ('status error', self.ready_api())):
+            with self.subTest(label):
+                if label == 'status error':
+                    api.status.side_effect = CLIError('HTTP 500')
+                self.assertEqual(self.run_update(args(yes=True), api=api), 0)
+                self.apply.assert_called_once()
+                api.restart_server.assert_not_called()
+                self.assertEqual(self.lines[-1], expected)
 
     def test_no_server_running_is_fine(self):
         self.assertEqual(self.run_update(args(yes=True)), 0)
@@ -87,9 +111,7 @@ class UpdateCommandTests(unittest.TestCase):
         self.assertIn('up to date', self.lines[-1])
 
     def test_json_yes_success_emits_single_json_line_and_keeps_human_text_on_stderr(self):
-        api = Mock()
-        api.server_status.return_value = {'instance_id': 'i1', 'state': 'ready',
-                                          'restart_supported': True, 'reason': ''}
+        api = self.ready_api()
         code = self.run_update(args(yes=True, json=True), api=api)
         self.assertEqual(code, 0)
         self.assertEqual(len(self.lines), 1)

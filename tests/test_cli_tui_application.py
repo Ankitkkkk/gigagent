@@ -251,6 +251,29 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1], 'cancelled')
         self.assertFalse(ui.tui.relaunch_requested)
 
+    async def test_quitting_mid_install_says_the_update_is_finishing(self):
+        import contextlib
+        import io
+        from cli_view_contracts import ActionOutcome
+        class Updater:
+            installing = False
+            async def run(self):
+                await asyncio.Event().wait()
+            async def update_now(self):
+                return ActionOutcome('completed')
+        for installing in (True, False):
+            with self.subTest(installing=installing):
+                fake = Updater()
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    async with self.ui(selected=workspace(), data_dir='/tmp/data',
+                                       updater_factory=lambda host: fake) as ui:
+                        await self.connected(ui)
+                        await ui.wait_until(lambda: 'update' in ui.tui._tasks.values())
+                        fake.installing = installing
+                message = 'Finishing the yapp update… (do not close this terminal)'
+                self.assertEqual(message in stderr.getvalue(), installing)
+
     async def test_updater_failure_is_a_notice_not_a_tui_failure(self):
         class Broken:
             async def run(self):

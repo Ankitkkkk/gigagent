@@ -4,6 +4,7 @@ import asyncio
 from contextlib import contextmanager
 import signal as signals
 import subprocess
+import sys
 import threading
 
 from prompt_toolkit.application import Application, in_terminal
@@ -217,6 +218,10 @@ class TuiApplication:
 
     async def _stop_updater(self):
         task, self._update_task = self._update_task, None
+        if getattr(self.updater, 'installing', False):
+            # The terminal is restored by now; the install thread still has to finish
+            # before the process exits, so say why nothing happens for a while.
+            print('Finishing the yapp update… (do not close this terminal)', file=sys.stderr, flush=True)
         if task is not None and not task.done() and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
