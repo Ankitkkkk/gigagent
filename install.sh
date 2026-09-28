@@ -5,7 +5,7 @@
 #   curl -fsSL https://yapp.riggedcode.com/install.sh | sh
 #
 # Environment overrides:
-#   YAPP_SOURCE    what to pip-install (default: the main branch archive on GitHub)
+#   YAPP_SOURCE    what to pip-install (default: the latest release archive, or main if there is no release)
 #   YAPP_HOME      install location (default: ${XDG_DATA_HOME:-~/.local/share}/yapp)
 #   YAPP_BIN_DIR   where the commands go (default: ~/.local/bin)
 #   PYTHON         Python 3.11+ interpreter to use (default: python3)

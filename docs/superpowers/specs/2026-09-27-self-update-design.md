@@ -2,6 +2,7 @@
 
 Date: 2026-09-27
 Status: approved in conversation; spec awaiting review
+Revised during implementation: per-process relaunch state (several TUIs no longer share one file)
 
 ## Goal
 
@@ -113,20 +114,31 @@ When a check returns `update_available`, the install method is `installer` or
    `Automatic update to <latest> failed: <reason>. F4 → Update yapp to retry.`
    and do not retry automatically for this release during this TUI run (the
    old version keeps running).
-4. **Restart the server.** If the connected server is local and reports
-   `restart_supported`, restart it through the existing restart action and
-   wait for readiness. If that fails, continue; the relaunched TUI will show
-   `Restart the server to finish the update (F4 → Restart server).`
+4. **Restart the server.** Wait for a safe moment again first (installing can
+   take minutes, and the user may have started something new since step 1).
+   If the connected server is local and reports `restart_supported`, restart
+   it through the existing restart action and wait for readiness. If that
+   fails, continue; the relaunched TUI will show `Restart the server to
+   finish the update (F4 → Restart server).` Wait for a safe moment once more
+   before relaunching, in case a dialog was opened while installing.
 5. **Save drafts.** Write every unsent draft (destination, text, cursor) and
-   the selected session/channel to `<data_dir>/relaunch_state.json`
-   (mode 0600).
-6. **Relaunch.** Exit the TUI cleanly and `os.execv` the same command
-   (`sys.argv`). The relaunch happens in `cli.main` after the TUI returns a
-   "relaunch" result, never from inside the running event loop.
-7. **Restore.** On startup, if `relaunch_state.json` exists and is less than
-   10 minutes old, the TUI restores those drafts and the selection, shows
-   `Updated to yapp <version>.`, and deletes the file. Older or unreadable
-   files are deleted without restoring.
+   the selected session/channel to this process's own
+   `<data_dir>/relaunch_state.<pid>.json` (mode 0600). Each process writes
+   its own file, so several TUIs updating around the same time never share
+   or clobber one another's state.
+6. **Relaunch.** Set the `YAPP_RELAUNCH_STATE` environment variable to this
+   process's relaunch file path, exit the TUI cleanly, and `os.execv` the
+   same command (`sys.argv`); the relaunched process inherits the
+   environment and so finds its own state file regardless of pid reuse. The
+   relaunch happens in `cli.main` after the TUI returns a "relaunch" result,
+   never from inside the running event loop.
+7. **Restore.** On startup, `cli.main` reads and clears `YAPP_RELAUNCH_STATE`
+   before anything else runs. If it names a relaunch file inside `data_dir`
+   that exists and is less than 10 minutes old, the TUI restores those drafts
+   and the selection, shows `Updated to yapp <version>.`, and deletes the
+   file. Older or unreadable files are deleted without restoring. Stale
+   `relaunch_state.<pid>.json` leftovers from crashed or interrupted
+   relaunches (no matching env var) are swept up and deleted the same way.
 
 Before step 3, the TUI imports every module it needs for steps 4 to 6 so that
 files replaced by the install cannot change code mid-sequence.
@@ -179,8 +191,10 @@ says so.
   notice tells the user to restart the server (F4 → Restart server).
 - Concurrent updates: `apply()` holds a lock file in the data directory and
   refuses to run twice. If several TUIs are open, the first one to take the
-  lock updates; the others see the lock, wait for it to clear, then relaunch
-  themselves (steps 5 to 7) once the installed version has changed.
+  lock updates; the others see the lock, wait for it to clear, then each
+  relaunches itself (steps 5 to 7) once the installed version has changed,
+  saving its own drafts to its own `relaunch_state.<pid>.json` rather than a
+  file shared with the other TUIs.
 
 ## Testing
 
@@ -196,7 +210,7 @@ says so.
   dialog is open; a failed install leaves the TUI running with a notice and
   is not retried; `auto = false` only shows the notice; F4 lists Update yapp
   and a declined confirm does nothing; drafts and selection are restored from
-  `relaunch_state.json` and stale files are ignored.
+  `relaunch_state.<pid>.json` via `YAPP_RELAUNCH_STATE` and stale files are ignored.
 - `/api/version_check` returns the new shape.
 - Manual end-to-end: install with `install.sh` into a scratch home from a
   local archive, confirm the marker file, then run `yapp update` against a
