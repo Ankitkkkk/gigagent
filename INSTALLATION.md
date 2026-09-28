@@ -64,8 +64,10 @@ If the website is unreachable, use the same script from GitHub:
 The installer creates a private virtual environment in `~/.local/share/yapp/venv`,
 installs the latest `main`, and links `yapp` and `goon` into `~/.local/bin`. It
 never overwrites an existing command with those names, and it prints the exact
-uninstall command. Run it again at any time to update. If it reports that
-`~/.local/bin` is not on `PATH`, add it as shown and open a new terminal.
+uninstall command. yapp then keeps itself up to date (see the README's
+*Staying up to date*); running the installer again also updates it. If it
+reports that `~/.local/bin` is not on `PATH`, add it as shown and open a new
+terminal.
 
 `yapp` and `goon` are the same application; use whichever name you prefer.
 

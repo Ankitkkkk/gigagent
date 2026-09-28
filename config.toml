@@ -147,3 +147,9 @@ max_size_mb = 10
 #   # system_prompt = "You are ..."   # optional: custom system prompt
 #
 # Then run: python wrapper_api.py qwen
+
+# Updates: yapp checks GitHub Releases every 6 hours while the TUI is open and
+# installs new releases automatically (agents keep running; drafts are kept).
+# [updates]
+# auto = false    # only notify; update with F4 → Update yapp or `yapp update`
+# check = false   # never check in the background

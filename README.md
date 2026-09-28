@@ -62,6 +62,18 @@ Then run `yapp`. The installer keeps yapp in its own environment under
 `~/.local/share/yapp`, so it works on Ubuntu/Debian without touching system
 Python. Run it again to update.
 
+### Staying up to date
+
+yapp updates itself. While the TUI is open it checks for a new
+[release](https://github.com/Ankitkkkk/yapp/releases) every 6 hours; when one
+appears it installs it, restarts the server, and reopens, keeping your agents
+running and your unsent drafts. Update by hand with `yapp update` (or
+F4 → Update yapp); `yapp update --check` only reports. Turn automatic installs
+off with `[updates] auto = false` in `config.local.toml` (or
+`YAPP_NO_AUTO_UPDATE=1`), or stop checking with `[updates] check = false`
+(`YAPP_NO_UPDATE_CHECK=1`). Source checkouts are never updated automatically;
+use `git pull`.
+
 Prefer [pipx](https://pipx.pypa.io/)? Install pipx first (`sudo apt install pipx`
 or `brew install pipx`, then `pipx ensurepath`), then run
 `pipx install git+https://github.com/Ankitkkkk/yapp.git`. If your shell offers to
@@ -1202,6 +1214,14 @@ Report yapp issues and feature requests in
 [Ankitkkkk/yapp](https://github.com/Ankitkkkk/yapp/issues).
 The server and browser foundation is [Agentchattr](https://github.com/bcurts/agentchattr).
 Its upstream community is available on the [Agentchattr Discord](https://discord.gg/qzfn5YTT9a).
+
+### Publishing a release
+
+1. Bump `VERSION` (for example to `0.6.0`) and merge to `main`.
+2. Create a GitHub Release tagged `v0.6.0` with release notes.
+
+Installed copies pick it up within 6 hours. The tag must match `VERSION` on
+that commit, or yapp reports the wrong version after updating.
 
 ## License
 
