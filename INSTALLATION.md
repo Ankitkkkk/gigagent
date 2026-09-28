@@ -62,7 +62,7 @@ If the website is unreachable, use the same script from GitHub:
 `curl -fsSL https://raw.githubusercontent.com/Ankitkkkk/yapp/main/install.sh | sh`.
 
 The installer creates a private virtual environment in `~/.local/share/yapp/venv`,
-installs the latest `main`, and links `yapp` and `goon` into `~/.local/bin`. It
+installs the latest published release (or `main` if there is no release yet), and links `yapp` and `goon` into `~/.local/bin`. It
 never overwrites an existing command with those names, and it prints the exact
 uninstall command. yapp then keeps itself up to date (see the README's
 *Staying up to date*); running the installer again also updates it. If it
@@ -81,8 +81,10 @@ terminal.
 pipx install git+https://github.com/Ankitkkkk/yapp.git
 ```
 
-Update with `pipx upgrade yapp`, or `pipx reinstall yapp` when the version number
-has not changed. If the shell offers to correct `pipx` to `pip`, decline: plain
+A pipx install updates itself like the installer's does (see the README's
+*Staying up to date*). To update by hand, run `yapp update`; `pipx upgrade yapp`
+follows the `main` branch it was installed from rather than published releases.
+If the shell offers to correct `pipx` to `pip`, decline: plain
 `pip` on a system Python fails with `externally-managed-environment` (PEP 668).
 Never use `--break-system-packages` for yapp.
 

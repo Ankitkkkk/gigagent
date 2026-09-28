@@ -73,7 +73,7 @@ returns one of:
 | Method | How it is detected | How `apply(release)` updates |
 | --- | --- | --- |
 | `installer` | `sys.prefix/yapp-install.json` exists (written by `install.sh`) | `sys.executable -m pip install --upgrade <archive_url>`, then `--force-reinstall --no-deps <archive_url>` |
-| `pipx` | `sys.prefix` is inside a `pipx/venvs/yapp` directory and `pipx` is on `PATH` | `pipx install --force <archive_url>` (a zip URL, so `git` is not required) |
+| `pipx` | `sys.prefix` is inside a `pipx/venvs/yapp` directory and `pipx` is on `PATH` | `pipx runpip yapp install -q --upgrade <archive_url>` then `... --force-reinstall --no-deps <archive_url>`, in place like the installer (a zip URL, so `git` is not required) |
 | `checkout` | `pyproject.toml` sits next to `yapp.py` | none; message: `git pull`, then restart yapp |
 | `unknown` | anything else | none; message shows the installer command |
 

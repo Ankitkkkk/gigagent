@@ -725,7 +725,7 @@ Per-agent notification sounds play when a message arrives while the chat window 
 
 Unread indicators keep you oriented across the UI — channel tabs show unread counts when new messages arrive, the scroll-to-bottom arrow displays an unread badge when you're scrolled up, and the rules panel badge shows unseen proposals awaiting review.
 
-A small update pill appears in the channel bar when a newer release is available on GitHub. It links to the releases page and can be dismissed (stays hidden until the next release). Forks see "Upstream update available" instead. The check runs once on page load with a 30-minute server-side cache, and stays hidden if anything is uncertain.
+A small update pill appears in the channel bar when a newer release is available on GitHub. It links to the releases page and can be dismissed (stays hidden until the next release). It uses the same yapp release check as the TUI and `yapp update`: the server asks GitHub for the latest [yapp release](https://github.com/Ankitkkkk/yapp/releases), caches the answer for 6 hours, and the pill stays hidden if anything is uncertain.
 
 ### Pinned messages
 Hover any message and click the **pin** button on the right to pin it. Click again to mark it done, once more to unpin. The cycle: **not pinned → todo → done → cleared**. A colored strip on the left shows the state (purple = todo, green = done).
@@ -1220,8 +1220,10 @@ Its upstream community is available on the [Agentchattr Discord](https://discord
 1. Bump `VERSION` (for example to `0.6.0`) and merge to `main`.
 2. Create a GitHub Release tagged `v0.6.0` with release notes.
 
-Installed copies pick it up within 6 hours. The tag must match `VERSION` on
-that commit, or yapp reports the wrong version after updating.
+Installed copies pick it up within 6 hours. Keep the tag and `VERSION` in sync:
+after installing, yapp checks that the installed version equals the tag, so a
+tag that does not match `VERSION` on that commit makes every update fail
+verification, on every check, until a matching release is published.
 
 ## License
 
