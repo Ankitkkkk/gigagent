@@ -195,6 +195,13 @@ says so.
   relaunches itself (steps 5 to 7) once the installed version has changed,
   saving its own drafts to its own `relaunch_state.<pid>.json` rather than a
   file shared with the other TUIs.
+- Under that lock, `apply()` rechecks the installed version before installing.
+  Stale release checks cannot downgrade or reinstall a completed update.
+  An `update.incomplete` marker is written before installation and removed
+  only after both install commands and version verification succeed. Failed
+  or interrupted installations therefore block relaunch in all peer windows;
+  an equal-version retry repairs the installation instead of skipping it.
+  Peer windows recheck the lock and marker after waiting for the UI to be idle.
 
 ## Testing
 
@@ -203,6 +210,8 @@ says so.
   cache hit, cache expiry, opt-out via env and config); `install_method()`
   for each method using temporary directories; `apply()` command
   construction with a fake runner (no real installs); lock handling.
+- `tests/test_update_recovery.py`: stale release results, duplicate installs,
+  partial failures across windows, repair retries, and changes during idle waits.
 - CLI tests for `yapp update --check` exit codes, `--json`, and refusal
   without `--yes` when stdin is not a terminal.
 - TUI tests (existing harness): automatic update runs apply, restart, draft

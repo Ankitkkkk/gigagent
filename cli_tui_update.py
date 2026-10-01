@@ -109,16 +109,25 @@ class AutoUpdater:
         finally:
             self._busy = False
 
-    async def _relaunch_if_installed_elsewhere(self):
+    def _external_update_version(self):
         # Only installed copies relaunch: a checkout's VERSION changes with git, not updates.
         # Never exec into a tree another process (or this one) is still installing.
         if (self._busy or self._install_method() not in ('installer', 'pipx')
-                or (Path(self.data_dir) / updates.LOCK_FILE).exists()):
-            return
+                or (Path(self.data_dir) / updates.LOCK_FILE).exists()
+                or (Path(self.data_dir) / updates.INCOMPLETE_FILE).exists()):
+            return None
         installed = self._installed_version()
         if installed and updates.compare(self.running_version, installed) == 'update_available':
+            return installed
+        return None
+
+    async def _relaunch_if_installed_elsewhere(self):
+        if self._external_update_version():
             await self._wait_safe()
-            await self._relaunch(installed, None)
+            # Another install may have started or failed while this window waited.
+            installed = self._external_update_version()
+            if installed:
+                await self._relaunch(installed, None)
 
     async def _relaunch(self, version, problem):
         self._relaunching = True

@@ -28,6 +28,7 @@ LOCK_STALE_AFTER = 2 * APPLY_TIMEOUT + 120
 RELAUNCH_MAX_AGE = 600
 CACHE_FILE = 'update_check.json'
 LOCK_FILE = 'update.lock'
+INCOMPLETE_FILE = 'update.incomplete'
 RELAUNCH_FILE = 'relaunch_state.{pid}.json'
 RELAUNCH_ENV = 'YAPP_RELAUNCH_STATE'
 _RELAUNCH_NAME = re.compile(r'^relaunch_state\.\d+\.json$')
@@ -224,6 +225,25 @@ def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess
         return {'ok': False, 'state': 'locked', 'version': '',
                 'message': 'Another yapp update is already running.'}
     try:
+        # A window can wait for idle long after another window installed a release.
+        # Recheck under the lock so stale results cannot reinstall or downgrade it.
+        incomplete = Path(data_dir) / INCOMPLETE_FILE
+        installed = installed_version()
+        if compare(installed, release['latest']) == 'current':
+            if not incomplete.exists():
+                return {'ok': True, 'state': 'current', 'version': installed,
+                        'message': f'yapp {installed} is already installed.'}
+            if compare(release['latest'], installed) == 'update_available':
+                return failed(f'yapp {installed} has an incomplete update; '
+                              f'refusing to downgrade to {release["latest"]}.')
+            # An equal VERSION can come from the first pip of a failed update.
+            # Reinstall that release to repair it instead of claiming success.
+        try:
+            # Keep this marker on every failure, including process death. VERSION
+            # alone cannot tell peer windows that all install steps succeeded.
+            incomplete.write_text(release['latest'])
+        except OSError as error:
+            return failed(f'Could not record update progress: {error}.')
         for command in commands:
             try:
                 # A new session keeps terminal Ctrl-C (sent to the TUI's process group)
@@ -243,6 +263,10 @@ def apply(release, *, method, data_dir, python=sys.executable, runner=subprocess
             version = ''
         if compare(version, release['latest']) != 'current' or compare(release['latest'], version) != 'current':
             return failed(f'Installed version is {version or "unknown"}, expected {release["latest"]}.')
+        try:
+            incomplete.unlink()
+        except OSError as error:
+            return failed(f'Could not complete update progress: {error}.')
         return {'ok': True, 'state': 'installed', 'version': version,
                 'message': f'Installed yapp {version}.'}
     finally:
