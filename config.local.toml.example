@@ -1,6 +1,7 @@
 # config.local.toml — local API agents (gitignored)
 #
 # Copy this file to config.local.toml and uncomment/edit the sections below.
+# Use unused agent names; local entries cannot override built-in providers.
 # These agents connect to OpenAI-compatible endpoints (Ollama, llama-server,
 # LM Studio, vLLM, etc.) and participate in the chat room via @mentions.
 #
@@ -12,7 +13,7 @@
 #      (or use: windows/start_api_agent.bat NAME)
 
 # --- Example: Qwen via llama-server ---
-# [agents.qwen]
+# [agents.local_qwen]
 # type = "api"                              # required — marks this as an API agent
 # base_url = "http://localhost:8189/v1"     # OpenAI-compatible base URL
 # model = "qwen3-4b"                        # model name (sent in API request)
@@ -44,7 +45,7 @@
 # Available models: MiniMax-M3 (default), MiniMax-M2.7, MiniMax-M2.7-highspeed
 # China mainland users: change base_url to https://api.minimaxi.com/v1
 #
-# [agents.minimax]
+# [agents.minimax_custom]
 # type = "api"
 # base_url = "https://api.minimax.io/v1"
 # model = "MiniMax-M3"

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install yapp — AI coding agent setup guide</title>
+<meta name="description" content="Install yapp on Linux, macOS, or WSL2. Connect Claude Code and Codex, create a multi-agent session, learn terminal controls, and troubleshoot setup.">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<link rel="canonical" href="https://yapp.riggedcode.com/docs/">
+<meta name="theme-color" content="#6639c5">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/logo-192.png" type="image/png">
+<link rel="apple-touch-icon" href="/logo-192.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="yapp">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="Install yapp — AI coding agent setup guide">
+<meta property="og:description" content="Install yapp on Linux, macOS, or WSL2. Connect Claude Code and Codex, create a multi-agent session, learn terminal controls, and troubleshoot setup.">
+<meta property="og:url" content="https://yapp.riggedcode.com/docs/">
+<meta property="og:image" content="https://yapp.riggedcode.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="yapp: Claude and Codex coordinating in a shared terminal chat">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Install yapp — AI coding agent setup guide">
+<meta name="twitter:description" content="Install yapp on Linux, macOS, or WSL2. Connect Claude Code and Codex, create a multi-agent session, learn terminal controls, and troubleshoot setup.">
+<meta name="twitter:image" content="https://yapp.riggedcode.com/og.png">
+<meta name="twitter:image:alt" content="yapp: Claude and Codex coordinating in a shared terminal chat">
+<link rel="preload" href="/assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/site.css?v=20261001">
+<script defer src="/assets/site.js?v=20261001"></script>
+<script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebPage",
+      "@id": "https://yapp.riggedcode.com/docs/#page",
+      "url": "https://yapp.riggedcode.com/docs/",
+      "name": "Install yapp \u2014 AI coding agent setup guide",
+      "description": "Install yapp, connect coding agents, and manage your first terminal session.",
+      "inLanguage": "en",
+      "isPartOf": {
+        "@id": "https://yapp.riggedcode.com/#website"
+      }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        {
+          "@type": "ListItem",
+          "position": 1,
+          "name": "yapp",
+          "item": "https://yapp.riggedcode.com/"
+        },
+        {
+          "@type": "ListItem",
+          "position": 2,
+          "name": "Setup guide",
+          "item": "https://yapp.riggedcode.com/docs/"
+        }
+      ]
+    }
+  ]
+}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="wrap top">
+  <a class="brand" href="/" aria-label="yapp home"><img src="/logo-192.png" alt="" width="34" height="34">yapp</a>
+  <nav aria-label="Main navigation">
+    <a href="/#features">Features</a>
+    <a href="/#start">Get started</a>
+    <a href="/docs/" aria-current="page">Setup guide</a>
+    <a class="nav-source" href="https://github.com/Ankitkkkk/yapp">GitHub <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
+  </nav>
+</header>
+<main id="main" tabindex="-1">
+  <div class="wrap docs-top">
+    <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">yapp</a> / Setup guide</nav>
+    <h1>Get your agents talking.</h1>
+    <p>Install yapp, connect your coding CLIs, and create your first shared session. This guide covers the terminal workflow on Linux, macOS, and WSL2.</p>
+  </div>
+  <div class="wrap docs-layout">
+    <nav class="docs-nav" aria-label="On this page"><p>In this guide</p><a href="#install">Install yapp</a><a href="#first-session">Your first session</a><a href="#commands">Commands &amp; controls</a><a href="#providers">Provider support</a><a href="#updates">Updates &amp; data</a><a href="#troubleshooting">Troubleshooting</a></nav>
+    <div class="docs-content">
+      <section id="install"><h2>Install yapp</h2>
+        <p>You need <strong>Python 3.11+</strong> with venv and pip, <strong>tmux</strong>, and <strong>curl</strong>. Use a terminal at least 80 columns by 18 rows. Install and authenticate the coding CLI you want to use separately.</p>
+        <h3>Check your prerequisites</h3>
+        <div class="command"><pre><code>python3 --version
+tmux -V
+curl --version</code></pre></div>
+        <p>On Ubuntu or Debian:</p>
+        <div class="command"><pre><code>sudo apt-get update
+sudo apt-get install python3 python3-venv python3-pip tmux curl git</code></pre></div>
+        <p>Confirm Python is 3.11 or newer afterward. On macOS, with Homebrew installed, use <code>brew install python tmux git</code>; macOS includes curl. On Windows, run the Linux instructions inside WSL2.</p>
+        <h3>Run the installer</h3>
+        <div class="command">
+  <div class="command-bar"><span>Linux · macOS · WSL2</span><button class="copy" type="button" data-copy="install-command" aria-label="Copy install command" hidden>Copy</button></div>
+  <pre><code id="install-command">curl -fsSL https://yapp.riggedcode.com/install.sh | sh</code></pre>
+</div>
+<p class="status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p><a href="/install.sh">Inspect the script</a> before running it if you prefer. It installs the latest published release, or <code>main</code> when no release is available, into a private virtual environment. It creates <code>yapp</code> and <code>goon</code> commands in <code>~/.local/bin</code>.</p>
+        <div class="command"><pre><code>yapp --help
+goon --help</code></pre></div>
+        <p>These help commands do not start the server or agents. If your shell cannot find them, follow the installer's PATH instructions and open a new terminal.</p>
+        <h3>Prefer pipx or a source checkout?</h3>
+        <p>With pipx and Git already installed, run:</p>
+        <div class="command"><pre><code>pipx install git+https://github.com/Ankitkkkk/yapp.git</code></pre></div>
+        <p>For editable installs, manual server startup, or detailed platform notes, use the <a href="https://github.com/Ankitkkkk/yapp/blob/main/INSTALLATION.md">full installation checklist</a>. Older release ZIP bundles built by <code>build_release.py</code> do not include the complete TUI.</p>
+      </section>
+      <section id="first-session"><h2>Create your first session</h2>
+        <ol>
+          <li><strong>Run <code>yapp</code> in your terminal.</strong> Without an explicit server URL, it can start the local server in tmux.</li>
+          <li><strong>Create a session.</strong> Name it, then select an orchestrator provider and an absolute project directory such as <code>/home/you/projects/app</code>. Submitting starts the provider CLI you selected.</li>
+          <li><strong>Add a worker.</strong> Press <kbd>F3</kbd>, choose Add agent, and set its provider, name, and project directory. For example, choose Codex and name it <code>reviewer</code>.</li>
+          <li><strong>Send a task.</strong> Enter INSERT mode with <kbd>i</kbd>, type <code>@reviewer review the latest changes</code>, then press <kbd>Escape</kbd> followed by <kbd>Enter</kbd> to send. Unaddressed requests go to the enabled orchestrator.</li>
+          <li><strong>Handle provider prompts.</strong> Press <kbd>F6</kbd>, choose the agent, and accept any trust or approval prompt in its own terminal.</li>
+        </ol>
+        <div class="note"><p><strong>Keep the agent running when you return.</strong> From an attached terminal outside tmux, press <kbd>Ctrl+B</kbd>, then <kbd>D</kbd> to detach. Inside tmux, use <code>tmux switch-client -l</code> to return to the previous session. Ctrl+C may stop the provider.</p></div>
+        <p>Waiting indicators are advisory. The provider's terminal is the place to inspect and resolve approval prompts.</p>
+      </section>
+      <section id="commands"><h2>Commands &amp; controls</h2>
+        <h3>Check state without starting agents</h3>
+        <p>With the yapp server already running, these commands read state. Shell commands do not auto-start the server.</p>
+        <div class="command"><pre><code>yapp status --json
+yapp sessions --json
+yapp read --session billing --limit 20 --json</code></pre></div>
+        <p>Replace <code>billing</code> with an existing session name or ID. <code>--json</code> controls output format; it does not make a command read-only. Interactive <code>chat</code> and <code>attach</code> do not support JSON output.</p>
+        <h3>Create a session from a script</h3>
+        <p>The following commands create a session, start a real provider, and send it a message. Replace the project path with your own absolute directory.</p>
+        <div class="command"><pre><code>yapp new billing --json
+yapp spawn codex --session billing \
+  --cwd /absolute/project --agent-name reviewer
+yapp send --session billing "@reviewer review the latest changes"</code></pre></div>
+        <p>A plain <code>yapp new</code> creates the session without an orchestrator. To start one, use <code>yapp new billing --orchestrator-provider claude --cwd /absolute/project --json</code> instead of the first command.</p>
+        <h3>Everyday keyboard controls</h3>
+        <div class="table-scroll"><table><thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead><tbody>
+          <tr><td><kbd>F1</kbd></td><td>Open Help</td></tr><tr><td><kbd>F2</kbd></td><td>Switch sessions (or channels in channel-only chat)</td></tr><tr><td><kbd>F3</kbd></td><td>Choose or add an agent</td></tr><tr><td><kbd>F4</kbd></td><td>Open commands, including Loop guard and Update yapp</td></tr><tr><td><kbd>F5</kbd></td><td>Open Activity diagnostics</td></tr><tr><td><kbd>F6</kbd></td><td>Choose an agent terminal to attach</td></tr><tr><td><kbd>F7</kbd></td><td>Toggle terminal text selection</td></tr><tr><td><kbd>Ctrl+Q</kbd></td><td>Quit the TUI; server and agents keep running</td></tr>
+        </tbody></table></div>
+        <p>Use <code>yapp --plain</code> for the scrolling terminal client. See the <a href="https://github.com/Ankitkkkk/yapp/blob/main/README.md#keyboard-controls">full keyboard reference</a> for editing and navigation.</p>
+      </section>
+      <section id="providers"><h2>Provider support</h2>
+        <p>yapp connects existing tools; it does not install provider CLIs, log in for you, or include their subscriptions.</p>
+        <ul><li><strong>Terminal agents:</strong> Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Antigravity, Kimi, Qwen Code, Kilo CLI, and CodeBuddy are configured CLI providers.</li><li><strong>Conversation resume:</strong> built-in native-session adapters are provided for Claude and Codex. Other CLI providers can start fresh; restoring a native conversation requires an adapter that supports it.</li><li><strong>API agents:</strong> MiniMax and OpenAI-compatible servers such as Ollama or LM Studio use <code>wrapper_api.py</code> with separate configuration. They are not the same as tmux agents added through the terminal session picker.</li></ul>
+        <p>See the <a href="https://github.com/Ankitkkkk/yapp/blob/main/README.md#api-agents-local-models">API-agent setup</a> and <a href="https://github.com/Ankitkkkk/yapp/blob/main/config.local.toml.example">local configuration example</a>. Add local agents under a new, unused name; local configuration does not replace existing provider definitions.</p>
+        <div class="note"><p><strong>Local chat, provider-dependent processing.</strong> yapp stores chat and sessions locally and listens on localhost by default. Cloud agents still send prompts and context to their providers. Provider fees and data policies apply separately.</p></div>
+      </section>
+      <section id="updates"><h2>Updates &amp; data</h2>
+        <p>Package installs check for published releases every six hours while the TUI is open. Automatic installs are enabled by default. To check or update manually:</p>
+        <div class="command"><pre><code>yapp update --check
+yapp update</code></pre></div>
+        <p>Set <code>YAPP_NO_AUTO_UPDATE=1</code> to disable automatic installation, or <code>YAPP_NO_UPDATE_CHECK=1</code> to disable checks. You can also set <code>auto = false</code> or <code>check = false</code> under <code>[updates]</code> in <code>config.local.toml</code>.</p>
+        <p>Source checkouts are not automatically updated. Inspect local changes before pulling, update dependencies, and restart affected processes after accounting for active work.</p>
+        <p>Package state lives under <code>~/.local/share/yapp/</code> by default (or <code>$XDG_DATA_HOME/yapp</code>). Source checkouts use <code>data/</code> and <code>uploads/</code>. Preserve those directories and your private configuration when upgrading.</p>
+      </section>
+      <section id="troubleshooting"><h2>Troubleshooting</h2>
+        <h3>“Externally managed environment”</h3><p>Use the installer or pipx, which isolate Python dependencies. Do not replace <code>pipx</code> with system <code>pip</code> or use <code>--break-system-packages</code>.</p>
+        <h3>Server connection failed</h3><p>Open <code>yapp</code> in a terminal to auto-start the local server. From a source checkout, run <code>.venv/bin/python run.py</code> manually. The default web/API address is <code>http://127.0.0.1:8300</code>; MCP uses <code>http://127.0.0.1:8200/mcp</code>. Shell status checks alone do not start it.</p>
+        <h3>An agent looks stuck</h3><p>Check that its CLI is installed and authenticated and its project directory exists. Use <kbd>F5</kbd> for Activity and <kbd>F6</kbd> to inspect its terminal for trust or approval prompts. An orchestrator needs to be running, ready, and enabled before it can route work.</p>
+        <h3>Copy or function keys behave differently</h3><p>Some keyboards need Fn with function keys. Use <kbd>F7</kbd> to release mouse capture before selecting text. Inside tmux, Shift-drag or tmux copy mode may be needed. Copy behavior depends on your terminal.</p>
+        <p>For more cases, use the <a href="https://github.com/Ankitkkkk/yapp/blob/main/INSTALLATION.md#troubleshooting-and-agent-handoff">installation troubleshooting checklist</a>. Include your OS, Python version, and command when <a href="https://github.com/Ankitkkkk/yapp/issues">reporting a problem</a>; remove tokens and private chat data from logs.</p>
+      </section>
+    </div>
+  </div>
+</main>
+<footer class="footer">
+  <div class="wrap">
+    <p>Open source under MIT. Built on <a href="https://github.com/bcurts/agentchattr">Agentchattr</a> by Ben Curtis.</p>
+    <nav aria-label="Footer"><a href="/docs/">Setup guide</a><a href="/llms.txt">For AI agents</a><a href="https://github.com/Ankitkkkk/yapp/issues">Report an issue</a><a href="https://github.com/Ankitkkkk/yapp">Source code</a></nav>
+  </div>
+</footer>
+</body>
+</html>

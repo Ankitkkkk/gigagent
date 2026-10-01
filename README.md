@@ -25,7 +25,7 @@ yapp builds on [Agentchattr](https://github.com/bcurts/agentchattr), retaining
 its local server, MCP communication, and optional browser interface, and adds
 the terminal workflow described below.
 
-[Website](https://yapp.riggedcode.com/) · [Install yapp](INSTALLATION.md) · [For AI agents](#for-ai-agents) · [FAQ](#faq) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
+[Website](https://yapp.riggedcode.com/) · [Setup guide](https://yapp.riggedcode.com/docs/) · [Install yapp](INSTALLATION.md) · [For AI agents](#for-ai-agents) · [FAQ](#faq) · [TUI guide](#tui-guide) · [Keyboard controls](#keyboard-controls) · [Browser and server features](#browser-and-server-features)
 
 ## What the TUI provides
 
@@ -43,11 +43,13 @@ the terminal workflow described below.
 | Text copying | Press F7 to release mouse capture, select text, and copy with your terminal. |
 | Shell commands | Script session management and chat with JSON output, alongside the interactive TUI. |
 
-Provider support includes **Claude Code**, **Codex**, **Gemini CLI**,
-**GitHub Copilot CLI**, **Kimi**, **Qwen**, **Kilo CLI**, **CodeBuddy**, and
-**MiniMax** through the underlying adapters. Install and authenticate the
-providers you use separately. Waiting indicators are advisory; approvals are
-resolved in the provider's own terminal.
+Terminal providers include **Claude Code**, **Codex**, **Gemini CLI**,
+**Antigravity**, **GitHub Copilot CLI**, **Kimi**, **Qwen**, **Kilo CLI**, and
+**CodeBuddy**. Native conversation resume has built-in adapters for Claude and
+Codex; other providers need a compatible adapter or a fresh launch. **MiniMax**
+and local OpenAI-compatible models use the separate [API wrapper](#api-agents-local-models).
+Install and authenticate providers separately. Waiting indicators are advisory;
+approvals are resolved in the provider's own terminal.
 
 ## Quick start
 
@@ -83,8 +85,10 @@ fails with `externally-managed-environment`.
 The package installs two equivalent commands, `yapp` and `goon`; use either.
 
 Interactive startup can start the local server automatically when tmux is
-available. Select or create a session, choose **Add agent**, and enter the
-provider, name, and project directory. Use **F1** for Help.
+available. Creating a session in the TUI asks for a name, then an orchestrator
+provider and absolute project directory; submitting starts that provider. Add
+workers with **F3 → Add agent**, entering their provider, name, and directory.
+Use **F1** for Help.
 
 See [INSTALLATION.md](INSTALLATION.md) for system dependencies, installing from a
 source checkout, manual server startup, Windows limitations, and instructions an
@@ -107,14 +111,19 @@ yapp status --json
 yapp sessions --json
 ```
 
-5. Script sessions and agents non-interactively (all accept `--json`):
+5. With user authorization, create a session, start an agent, and send work
+   (these commands change state; `--json` only selects the output format):
 
 ```sh
-yapp new billing --cwd /absolute/project --json
+yapp new billing --json
 yapp spawn claude --session billing --cwd /absolute/project --agent-name reviewer
-yapp send --channel general --name Pat "@reviewer please review the latest changes"
-yapp read --channel general --limit 20 --json
+yapp send --session billing --name Pat "@reviewer please review the latest changes"
+yapp read --session billing --limit 20 --json
 ```
+
+A plain `yapp new` creates no orchestrator. Add
+`--orchestrator-provider claude --cwd /absolute/project` to start one during
+creation. Interactive `chat` and `attach` do not support `--json`.
 
 Once registered, agents talk through the MCP tools `chat_send`, `chat_read`, and
 `chat_join` on the `yapp` MCP server (`http://127.0.0.1:8200/mcp`). Always use
@@ -1025,16 +1034,18 @@ With several instances open at once, set **Settings → This server** to give ea
 
 ### API agents (local models)
 
-Connect any local model with an OpenAI-compatible API (Ollama, llama-server, LM Studio, vLLM, etc.) to the chat room. API agents get status pills, activity indicators, @mention routing, and multi-instance support — just like the CLI agents.
+From a source checkout, connect a local model with an OpenAI-compatible API (Ollama, llama-server, LM Studio, vLLM, etc.) to the chat room. API agents get status pills, activity indicators, @mention routing, and multi-instance support — just like the CLI agents.
 
-1. Copy the example config:
+1. If `config.local.toml` does not already exist, copy the example config.
+   Otherwise, preserve it and add the new section to the existing file:
    ```bash
    cp config.local.toml.example config.local.toml
    ```
 
-2. Edit `config.local.toml` with your model's endpoint:
+2. Edit `config.local.toml` with your model's endpoint. Use a new agent name:
+   local entries cannot replace built-in names such as `qwen` or `minimax`.
    ```toml
-   [agents.qwen]
+   [agents.local_qwen]
    type = "api"
    base_url = "http://localhost:8189/v1"
    model = "qwen3-4b"
@@ -1042,19 +1053,25 @@ Connect any local model with an OpenAI-compatible API (Ollama, llama-server, LM 
    label = "Qwen"
    ```
 
-3. Start the wrapper:
+3. Start the server with `.venv/bin/python run.py` after saving the configuration.
+   If it is already running, restart it after accounting for active work so it
+   registers the new provider name. The wrapper alone cannot add it to a
+   server that loaded the old configuration.
+
+4. Start the wrapper:
    ```bash
    # Windows
-   windows\start_api_agent.bat qwen
+   windows\start_api_agent.bat local_qwen
 
    # Mac/Linux
-   ./macos-linux/start_api_agent.sh qwen
+   sh macos-linux/start_api_agent.sh local_qwen
 
    # Or directly
-   python wrapper_api.py qwen
+   .venv/bin/python wrapper_api.py local_qwen
    ```
 
-The wrapper registers with the server, watches for @mentions, reads recent chat context, calls your model's `/v1/chat/completions` endpoint, and posts the response back. `config.local.toml` is gitignored so your local endpoints stay out of the repo.
+API agents participate in chat but are not tmux-backed terminal agents in the
+TUI Add agent flow. The wrapper registers with the server, watches for @mentions, reads recent chat context, calls your model's `/v1/chat/completions` endpoint, and posts the response back. `config.local.toml` is gitignored so your local endpoints stay out of the repo.
 
 ### MiniMax (cloud API)
 
@@ -1187,12 +1204,14 @@ Kimi, Qwen Code, Kilo CLI, CodeBuddy, MiniMax, and OpenAI-compatible local model
 (for example Ollama or LM Studio) through [API agents](#api-agents-local-models).
 
 ### Is yapp free and open source?
-Yes. yapp is MIT licensed. It runs entirely on your machine; the server binds to
-localhost and your chats stay in local files.
+Yes. yapp is MIT licensed and stores chats locally; the server binds to
+localhost by default. Provider subscriptions and API usage are separate. Cloud
+agents still send prompts and relevant context to their providers.
 
 ### Does it work on Windows or macOS?
-Linux and macOS are fully supported. On Windows, use WSL2 for the terminal UI;
-native Windows can use the browser chat and wrapper launchers.
+Use Linux, macOS, or WSL2 for the tmux-backed terminal workflow. Native Windows
+can use browser chat and wrapper launchers, but this CLI's terminal lifecycle
+actions require tmux. Native Windows full-screen behavior is not validated end to end.
 
 ### What is the `goon` command?
 An alias. Installing yapp creates both `yapp` and `goon`, and they run the same app.

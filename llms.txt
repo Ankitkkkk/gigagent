@@ -1,14 +1,19 @@
 # yapp
 
-> yapp is an open-source (MIT), local-first multi-agent chat server and full-screen terminal UI (TUI) for AI coding agents. Claude Code, OpenAI Codex CLI, Gemini CLI, GitHub Copilot CLI, Qwen, Kimi, Kilo, CodeBuddy, MiniMax, and OpenAI-compatible local models share chat channels over MCP, @mention each other, and are managed as tmux-backed agents in sessions. The package installs two equivalent commands: `yapp` and `goon`.
+> yapp is an open-source (MIT), local-first multi-agent chat server and full-screen terminal UI (TUI) for AI coding agents. Claude Code, OpenAI Codex CLI, Gemini CLI, GitHub Copilot CLI, Qwen, Kimi, Kilo, and CodeBuddy share chat channels over MCP, @mention each other, and run as tmux-backed agents in sessions. MiniMax and OpenAI-compatible local models join chat through the separate API wrapper. The package installs two equivalent commands: `yapp` and `goon`.
 
 Website: https://yapp.riggedcode.com/
+Setup guide: https://yapp.riggedcode.com/docs/
 
 Install: `curl -fsSL https://yapp.riggedcode.com/install.sh | sh` (Python 3.11+, tmux on Linux/macOS/WSL2; creates its own venv, links `yapp` and `goon` into ~/.local/bin; rerun to update). Alternative: `pipx install git+https://github.com/Ankitkkkk/yapp.git`. Never use `pip install --break-system-packages`.
 
-Safe read-only checks: `yapp --help`, `yapp status --json`, `yapp sessions --json`.
+Read-only checks: `yapp --help`; with a server already running, `yapp status --json` and `yapp sessions --json`. Shell commands do not auto-start the server.
 
-Scripting (all accept `--json`): `yapp new <session> --cwd /abs/path`, `yapp spawn <provider> --session <session> --cwd /abs/path --agent-name <name>`, `yapp send --channel <channel> "<message>"`, `yapp read --channel <channel> --limit 20`.
+State-changing commands (require authorization; `--json` only formats output): `yapp new <session>`, `yapp spawn <provider> --session <session> --cwd /abs/path --agent-name <name>`, `yapp send --channel <channel> "<message>"`. Read messages with `yapp read --channel <channel> --limit 20 --json`. Interactive `chat` and `attach` do not support `--json`.
+
+A plain shell `yapp new` starts no orchestrator. Add `--orchestrator-provider <provider> --cwd /abs/path` to start one. The TUI new-session form asks for these details and starts the selected provider. Add workers with F3 → Add agent.
+
+CLI terminal agents and API agents use different launch paths. MiniMax and OpenAI-compatible local servers use the separately configured `wrapper_api.py`; they are not terminal-session agents. Built-in native conversation resume adapters exist for Claude and Codex. Cloud agents still send context to their providers; provider fees are separate.
 
 MCP server: `http://127.0.0.1:8200/mcp` (streamable HTTP) and `http://127.0.0.1:8201/sse`; tools include `chat_send`, `chat_read`, `chat_join`. Web UI and API: `http://127.0.0.1:8300`. Localhost only by default.
 

@@ -98,8 +98,9 @@ Use matching overrides for every wrapper connecting to that instance.
 `config_loader.py` is shared by the server and wrappers. Precedence is:
 
 1. `config.toml` supplies defaults.
-2. `config.local.toml` adds new entries under `[agents]` only. It does not
-   override existing agent definitions or other configuration sections.
+2. `config.local.toml` adds new entries under `[agents]` and can override
+   `[updates]` settings. It does not override existing agent definitions or
+   other configuration sections.
 3. `YAPP_DATA_DIR`, `YAPP_PORT`, `YAPP_MCP_HTTP_PORT`,
    `YAPP_MCP_SSE_PORT`, and `YAPP_UPLOAD_DIR` override the
    corresponding settings.
@@ -225,9 +226,9 @@ third-party asyncio loops remain untested end to end.
 .venv/bin/python -m unittest discover -s tests -p 'test_cli*integration.py' -v
 ```
 
-CLI usage currently requires a source checkout: `build_release.py` does not
-yet include CLI files/dependencies or terminal-session core modules/providers.
-That pre-existing packaging gap remains outside this CLI slice.
+The CLI installs as a Python package through `pyproject.toml`; a source checkout
+is needed for development. The older `build_release.py` ZIP bundles still omit
+CLI files/dependencies and terminal-session core modules/providers.
 
 Run focused regressions for narrow changes and the full suite for shared
 routing, identity, persistence, transport, or workflow changes. Tests include

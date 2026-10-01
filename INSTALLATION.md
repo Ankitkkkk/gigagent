@@ -4,7 +4,8 @@ yapp is a terminal UI and shell client for AI coding agents. It connects to a
 local yapp server and manages chat sessions and terminal agents through that
 server.
 
-This guide is intended for both people and AI agents helping with installation.
+For a shorter walkthrough, see the [website setup guide](https://yapp.riggedcode.com/docs/).
+This checklist is intended for both people and AI agents helping with installation.
 yapp installs as a Python package straight from GitHub and provides two
 equivalent commands, `yapp` and `goon`. A source checkout is only needed for
 development. The older release ZIP builder does not include all CLI modules.
@@ -38,7 +39,7 @@ On Ubuntu/Debian, missing system dependencies can be installed with:
 
 ```sh
 sudo apt-get update
-sudo apt-get install python3 python3-venv python3-pip git tmux
+sudo apt-get install python3 python3-venv python3-pip git tmux curl
 ```
 
 Confirm Python is still at least 3.11 afterward; older distributions may need
@@ -155,8 +156,9 @@ Starting only `uvicorn app:app` omits the shared server/MCP initialization.
 
 If ports are occupied, identify the existing service first. Do not kill another
 installation. Custom ports and data locations use `config.toml` or matching
-`YAPP_*` environment overrides; `config.local.toml` adds agent definitions
-only and does not override server settings. See `config_loader.py` for the exact
+`YAPP_*` environment overrides; `config.local.toml` adds new agent definitions
+and may override `[updates]` settings; it does not override server settings or
+existing agent definitions. See `config_loader.py` for the exact
 supported overrides. Never expose the server publicly as an installation shortcut.
 
 ## 5. Add the user's first agent
@@ -168,11 +170,16 @@ yapp; login should use the provider's normal interactive flow.
 
 In yapp:
 
-1. Create or select a session.
-2. Use **Add agent**, or **F3 → Add agent**.
+1. Create or select a session. Creating one in the TUI asks for its name,
+   then an orchestrator provider and absolute working directory. Submitting
+   starts that provider; install and authenticate it first. A shell
+   `yapp new NAME` creates a session without an orchestrator unless
+   `--orchestrator-provider PROVIDER --cwd /absolute/project` is supplied.
+2. Use **Add agent**, or **F3 → Add agent**, to add a worker.
 3. Select the provider, enter an agent name and an absolute project directory.
 4. Set optional provider flags and history mode, then submit.
-5. Send a message mentioning that agent by its session name.
+5. Send a message mentioning the agent name, such as `@reviewer`. In the TUI,
+   press **i** to compose, then **Escape** followed by **Enter** to send.
 
 `--agent-name` names an agent; `--name` names the human sender. `@all` or `@both`
 addresses the running agents in the selected session. `@everyone` is not an alias.
@@ -191,6 +198,8 @@ choices. Do not run this example as a smoke test: it starts a real provider.
 
 When an agent needs approval, use **F6**, choose it, and resolve the prompt in its
 terminal. **Ctrl+B, then D** detaches from tmux while leaving the agent running.
+When already inside tmux, use `tmux switch-client -l` to return to the previous
+session.
 Ctrl+C can stop the provider; use Resume to restore it. Resume keeps the saved
 directory and provider flags by default. Waiting indicators aid discovery, but
 the provider's own approval prompt remains authoritative.
@@ -207,7 +216,8 @@ the provider's own approval prompt remains authoritative.
 | F6 | Choose an agent to attach |
 | F7 | Release mouse capture for terminal text selection; press again to return |
 | Escape | Close the current overlay while preserving the message draft |
-| Alt+Enter | Insert a newline |
+| Enter in INSERT mode | Accept a completion if selected; otherwise insert a newline |
+| Escape, then Enter | Return to NORMAL mode and send |
 | Ctrl+Q | Quit the TUI |
 
 For copying, press F7, drag over text, and use the terminal's Copy shortcut

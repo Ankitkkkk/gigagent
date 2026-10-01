@@ -117,7 +117,7 @@ max_size_mb = 10
 #   "proxy_flag"    — start a local proxy, pass URL via CLI flag template
 #
 # Example: Qwen Code CLI
-#   [agents.qwen]
+#   [agents.myqwen]
 #   command = "qwen"
 #   cwd = ".."
 #   color = "#8b5cf6"
@@ -137,7 +137,7 @@ max_size_mb = 10
 # Add local model agents in config.local.toml (gitignored).
 # Example config.local.toml:
 #
-#   [agents.qwen]
+#   [agents.local_qwen]
 #   type = "api"
 #   base_url = "http://localhost:8189/v1"
 #   model = "qwen3-4b"
@@ -146,7 +146,7 @@ max_size_mb = 10
 #   # api_key_env = "MY_API_KEY"     # optional: env var name for API key
 #   # system_prompt = "You are ..."   # optional: custom system prompt
 #
-# Then run: python wrapper_api.py qwen
+# Then run: python wrapper_api.py local_qwen
 
 # Updates: yapp checks GitHub Releases every 6 hours while the TUI is open and
 # installs new releases automatically (agents keep running; drafts are kept).
