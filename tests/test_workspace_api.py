@@ -420,6 +420,9 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
         record["routing_high_water"] = 3
 
         class Launcher:
+            def tmux_name(self, agent):
+                return f"yapp-{agent['agent_id']}"
+
             def unread_for(self, ws_id, agent_id, *, routing=None):
                 if ws_id == ws["id"] and agent_id == agent["agent_id"]:
                     return [{"id": 4}, {"id": 5}]
@@ -440,6 +443,9 @@ class WorkspaceHistoryRouteTests(unittest.TestCase):
 
         class Launcher:
             _lifecycle_lock = threading.RLock()
+
+            def tmux_name(self, agent):
+                return f"yapp-{agent['agent_id']}"
 
             def checkpoint(self, ws_id):
                 started.set()

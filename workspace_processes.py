@@ -7,7 +7,8 @@ import subprocess
 import sys
 
 
-def stop_wrapper_process(pid, root: Path, identity: Path, tmux_name: str, *, owned_process=None):
+def stop_wrapper_process(pid, root: Path, identity: Path, tmux_name: str | tuple[str, ...],
+                         *, owned_process=None):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
         return
     if owned_process is not None and owned_process.pid == pid:
@@ -58,9 +59,10 @@ def stop_wrapper_process(pid, root: Path, identity: Path, tmux_name: str, *, own
                 return args[index + 1] == os.fsencode(str(value))
             except (ValueError, IndexError):
                 return False
+        names = (tmux_name,) if isinstance(tmux_name, str) else tmux_name
         if (len(args) < 2 or args[1] != expected
                 or not argument('--identity-file', identity)
-                or not argument('--tmux-name', tmux_name)):
+                or not any(argument('--tmux-name', name) for name in names)):
             return  # gone/zombie or an unrelated reused PID
         for sig, timeout in ((signal.SIGTERM, 3000), (signal.SIGKILL, 2000)):
             try:

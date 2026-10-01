@@ -86,7 +86,7 @@ class TmuxOps:
 
     def kill_session(self, name: str) -> None:
         try:
-            subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True, timeout=5)
+            subprocess.run(["tmux", "kill-session", "-t", '=' + name], capture_output=True, timeout=5)
         except Exception:
             pass
 
@@ -125,8 +125,15 @@ class WorkspaceLauncher:
         self._processes: dict[str, subprocess.Popen] = {}
         self.on_startup_ready = None
 
+    @staticmethod
+    def tmux_names(agent: dict) -> tuple[str, str]:
+        """Only exact names derived from this stable ID belong to this agent."""
+        return (f"yapp-{agent['agent_id']}", f"agentchattr-{agent['agent_id']}")
+
     def tmux_name(self, agent: dict) -> str:
-        return f"yapp-{agent['agent_id']}"
+        """Use a surviving terminal's name without renaming it under its wrapper."""
+        names = self.tmux_names(agent)
+        return next((name for name in names if self._tmux.has_session(name)), names[0])
 
     def _adapter(self, provider: str):
         return self._adapters(provider, self.config.get("agents", {}).get(provider, {}))
@@ -193,7 +200,7 @@ class WorkspaceLauncher:
             self._python, str(self.root / "wrapper.py"), agent["provider"],
             "--no-attach", "--no-restart", "--cwd", agent["cwd"],
             "--identity-file", str(self.store.identity_path(agent["agent_id"])),
-            "--tmux-name", self.tmux_name(agent), "--data-dir", str(self.data_dir),
+            "--tmux-name", self.tmux_names(agent)[0], "--data-dir", str(self.data_dir),
             "--port", str(server.get("port", 8300)),
             "--mcp-http-port", str(mcp.get("http_port", 8200)),
             "--mcp-sse-port", str(mcp.get("sse_port", 8201)),
@@ -622,7 +629,7 @@ class WorkspaceLauncher:
             # command errors as absent, so it is unsuitable for supervision.
             probe = getattr(self._tmux, "session_absent", None)
             try:
-                if probe is None or not probe(self.tmux_name(agent)):
+                if probe is None or not all(probe(name) for name in self.tmux_names(agent)):
                     continue
                 process = self._processes.get(agent["agent_id"])
                 if process is not None:
@@ -656,7 +663,8 @@ class WorkspaceLauncher:
         # undo a deliberate stop or timeout, even if killing tmux fails.
         self.store.update_agent(ws_id, agent['agent_id'],
                                 last_launch=dict(agent.get('last_launch') or {}, terminated=True))
-        self._tmux.kill_session(self.tmux_name(agent))
+        for name in self.tmux_names(agent):
+            self._tmux.kill_session(name)
         pid = self._wrapper_pid(agent)
         if pid:
             try:
@@ -706,10 +714,11 @@ class WorkspaceLauncher:
                 process = self._processes.get(agent_id)
             pid = process.pid if process is not None else self._wrapper_pid(agent)
             stop_wrapper_process(pid, self.root,
-                                 self.store.identity_path(agent_id), self.tmux_name(agent),
+                                 self.store.identity_path(agent_id), self.tmux_names(agent),
                                  owned_process=process)
             # Saved "exited" state cannot prove absence of leftover processes.
-            self._tmux.remove_session(self.tmux_name(agent))
+            for name in self.tmux_names(agent):
+                self._tmux.remove_session(name)
             token = (identity or {}).get('token')
             owned = self.registry.resolve_token(token) if token else None
             if owned and owned['name'] == agent['registry_name']:
@@ -742,9 +751,10 @@ class WorkspaceLauncher:
                 with self._lock:
                     proc = self._processes.get(agent_id)
                 stop_wrapper_process(self._wrapper_pid(agent), self.root,
-                                     self.store.identity_path(agent_id), self.tmux_name(agent),
+                                     self.store.identity_path(agent_id), self.tmux_names(agent),
                                      owned_process=proc)
-                self._tmux.remove_session(self.tmux_name(agent))
+                for terminal in self.tmux_names(agent):
+                    self._tmux.remove_session(terminal)
                 # A stopped saved name might now be used by an unrelated runtime
                 # agent. Its token and queue must not be revoked by this removal.
                 token = (identity or {}).get('token')

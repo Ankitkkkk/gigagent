@@ -1388,7 +1388,7 @@ def _on_workspace_change(ws_id: str | None = None):
                     ws = workspace_store.get(ws_id)
                     workspaces = [ws] if ws is not None else []
                 for ws in workspaces:
-                    await _broadcast(json.dumps({"type": "workspace", "data": _ws_view(ws)}))
+                    await _broadcast(json.dumps({"type": "workspace", "data": await _ws_view_async(ws)}))
             except Exception:
                 log.exception("workspace broadcast failed")
         asyncio.run_coroutine_threadsafe(_send(), _event_loop)
@@ -3087,7 +3087,8 @@ def _ws_view(ws: dict) -> dict:
     for a in out["agents"]:
         a["unread_count"] = len(workspace_launcher.unread_for(
             ws["id"], a["agent_id"], routing=routing)) if workspace_launcher else 0
-        a["tmux_session"] = f"yapp-{a['agent_id']}"
+        a["tmux_session"] = (workspace_launcher.tmux_name(a) if workspace_launcher
+                             else f"yapp-{a['agent_id']}")
         a['waiting_for_input'] = (a.get('last_state') in ('running', 'starting')
                                   and is_waiting_for_input(a.get('registry_name', '')))
     for key in ("routing", "routing_done", "routing_high_water", "routing_assignments"):
@@ -3102,9 +3103,15 @@ def _ws_or_404(ws_id: str):
     return ws, None
 
 
+async def _ws_view_async(ws: dict) -> dict:
+    # Terminal-name resolution may wait for tmux. Heartbeats and other requests
+    # must keep running while HTTP responses or live workspace events are built.
+    return await asyncio.to_thread(_ws_view, ws)
+
+
 @app.get("/api/workspaces")
 async def list_workspaces(include_archived: int = 0):
-    items = [_ws_view(w) for w in workspace_store.list(include_archived=bool(include_archived))]
+    items = [await _ws_view_async(w) for w in workspace_store.list(include_archived=bool(include_archived))]
     body = {"workspaces": items}
     if workspace_store.warning:
         body["warning"] = workspace_store.warning
@@ -3146,7 +3153,7 @@ async def create_workspace(request: Request):
             ws = workspace_store.get(ws['id'])
             ws['orchestration_error'] = str(error)
     await broadcast_settings()
-    return _ws_view(ws)
+    return await _ws_view_async(ws)
 
 
 def _orchestrator_options(body):
@@ -3169,7 +3176,7 @@ async def configure_workspace_orchestrator(ws_id: str, request: Request):
     try:
         options = _orchestrator_options(await _json_body(request))
         ws = await asyncio.to_thread(workspace_launcher.configure_orchestrator, ws_id, **options)
-        return _ws_view(ws)
+        return await _ws_view_async(ws)
     except (ValueError, LaunchError) as error:
         return JSONResponse({'error': str(error)}, status_code=getattr(error, 'status', 400))
 
@@ -3177,14 +3184,14 @@ async def configure_workspace_orchestrator(ws_id: str, request: Request):
 @app.get("/api/workspaces/{ws_id}")
 async def get_workspace(ws_id: str):
     ws, err = _ws_or_404(ws_id)
-    return err or _ws_view(ws)
+    return err or await _ws_view_async(ws)
 
 
 @app.patch("/api/workspaces/{ws_id}")
 async def rename_workspace(ws_id: str, request: Request):
     body = await _json_body(request)
     ws = workspace_store.rename(ws_id, str(body.get("name", "")))
-    return JSONResponse({"error": "session not found"}, status_code=404) if ws is None else _ws_view(ws)
+    return JSONResponse({"error": "session not found"}, status_code=404) if ws is None else await _ws_view_async(ws)
 
 
 @app.post("/api/workspaces/{ws_id}/archive")
@@ -3205,16 +3212,16 @@ async def archive_workspace(ws_id: str):
                 return workspace_store.set_archived(ws_id, True)
         from workspace_launcher import LaunchError
         try:
-            return _ws_view(await asyncio.to_thread(_archive_agents))
+            return await _ws_view_async(await asyncio.to_thread(_archive_agents))
         except LaunchError as error:
             return JSONResponse({'error': str(error)}, status_code=error.status)
-    return _ws_view(workspace_store.set_archived(ws_id, True))
+    return await _ws_view_async(workspace_store.set_archived(ws_id, True))
 
 
 @app.post("/api/workspaces/{ws_id}/unarchive")
 async def unarchive_workspace(ws_id: str):
     ws = workspace_store.set_archived(ws_id, False)
-    return JSONResponse({"error": "session not found"}, status_code=404) if ws is None else _ws_view(ws)
+    return JSONResponse({"error": "session not found"}, status_code=404) if ws is None else await _ws_view_async(ws)
 
 
 @app.post("/api/workspaces/{ws_id}/checkpoint")
@@ -3323,7 +3330,7 @@ async def remove_workspace_agent(ws_id: str, agent_id: str):
         import mcp_bridge
         mcp_bridge.purge_identity(agent['registry_name'])
     await broadcast_status()
-    return _ws_view(ws)
+    return await _ws_view_async(ws)
 
 
 @app.post("/api/workspaces/{ws_id}/agents/{agent_id}/history")

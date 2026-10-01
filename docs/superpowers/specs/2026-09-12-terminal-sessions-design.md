@@ -105,6 +105,10 @@ the picker warns and resume is blocked until the user re-points it.
 The five identifiers stay separate: workspace `id`, display `name`,
 `registry_name`, tmux session name (`yapp-<agent_id>`, derived from
 the stable id so renames never strand `/attach`), and `native_session_id`.
+Existing `agentchattr-<agent_id>` terminals from before the project rename are
+also recognized without renaming them under their live wrappers. The server
+returns the existing exact name for Attach, uses both names when confirming
+absence or cleaning up, and starts new launches as `yapp-<agent_id>`.
 
 **Floor.** see "Visibility policy" below.
 
