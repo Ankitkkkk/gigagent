@@ -5,7 +5,7 @@
 Website: https://yapp.riggedcode.com/
 Setup guide: https://yapp.riggedcode.com/docs/
 
-Install: `curl -fsSL https://yapp.riggedcode.com/install.sh | sh` (Python 3.11+, tmux on Linux/macOS/WSL2; creates its own venv, links `yapp` and `goon` into ~/.local/bin; rerun to update). Alternative: `pipx install git+https://github.com/Ankitkkkk/yapp.git`. Never use `pip install --break-system-packages`.
+Install: `curl -fsSL https://yapp.riggedcode.com/install.sh | sh` (curl and tmux on Linux/macOS/WSL2; uses Python 3.11+ or downloads private Python 3.13 when system Python is older/missing; creates its own venv, links `yapp` and `goon` into ~/.local/bin; rerun to update). Alternative: `pipx install git+https://github.com/Ankitkkkk/yapp.git`. Never use `pip install --break-system-packages`.
 
 Read-only checks: `yapp --help`; with a server already running, `yapp status --json` and `yapp sessions --json`. Shell commands do not auto-start the server.
 

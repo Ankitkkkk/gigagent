@@ -93,7 +93,7 @@
       <h1 id="hero-title">Your AI coding agents.<br>One shared workspace.</h1>
       <p class="lead">Bring Claude Code, Codex, and Gemini CLI into one conversation. Share context, hand off work, and review their progress from your terminal.</p>
       <div class="actions"><a class="button" href="#start">Install yapp</a><a class="button secondary" href="/docs/">Read the setup guide</a></div>
-      <p class="small">Free under MIT · Python 3.11+ · Linux, macOS &amp; WSL2</p>
+      <p class="small">Free under MIT · Linux, macOS &amp; WSL2</p>
     </div>
     <figure class="workspace">
       <div class="window">
@@ -143,7 +143,7 @@
   <section class="wrap" id="start" aria-labelledby="start-title">
     <div class="setup">
       <div><h2 id="start-title">From install to first conversation.</h2><p class="intro">Use your own provider accounts. yapp connects the tools you already run.</p>
-        <ul class="requirements"><li>Python 3.11+ with venv and pip</li><li>tmux and curl on Linux, macOS, or WSL2</li><li>An installed, authenticated coding CLI</li></ul>
+        <ul class="requirements"><li>Python selected or installed automatically</li><li>tmux and curl on Linux, macOS, or WSL2</li><li>An installed, authenticated coding CLI</li></ul>
         <p><a class="text-link" href="/docs/#install">Prerequisites and other install methods</a></p>
       </div>
       <ol class="steps">
@@ -151,7 +151,7 @@
   <div class="command-bar"><span>Linux · macOS · WSL2</span><button class="copy" type="button" data-copy="install-command" aria-label="Copy install command" hidden>Copy</button></div>
   <pre><code id="install-command">curl -fsSL https://yapp.riggedcode.com/install.sh | sh</code></pre>
 </div>
-<p class="status" role="status" aria-live="polite" aria-atomic="true"></p><p>The installer uses its own Python environment. <a href="/install.sh">Read the install script</a>.</p></li>
+<p class="status" role="status" aria-live="polite" aria-atomic="true"></p><p>The installer uses a private environment and downloads compatible Python if needed. <a href="/install.sh">Read the install script</a>.</p></li>
         <li><h3>Open yapp and create a session</h3><p>Run <code>yapp</code>. Name your session, then choose an orchestrator provider and an absolute project directory. This starts that provider.</p></li>
         <li><h3>Add a worker and send a task</h3><p>Press F3 → Add agent. Pick a provider, name, and project directory. @mention the worker, or let your orchestrator route the request.</p><a class="text-link" href="/docs/#first-session">Follow the first-session walkthrough</a></li>
       </ol>

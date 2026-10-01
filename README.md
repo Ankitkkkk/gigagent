@@ -53,8 +53,7 @@ approvals are resolved in the provider's own terminal.
 
 ## Quick start
 
-Use Python 3.11+ and tmux on Linux, macOS, or WSL2. Install with
-one command:
+Use Linux, macOS, or WSL2 with curl and tmux. Install with one command:
 
 ```sh
 curl -fsSL https://yapp.riggedcode.com/install.sh | sh
@@ -62,7 +61,10 @@ curl -fsSL https://yapp.riggedcode.com/install.sh | sh
 
 Then run `yapp`. The installer keeps yapp in its own environment under
 `~/.local/share/yapp`, so it works on Ubuntu/Debian without touching system
-Python. Run it again to update.
+Python. It reuses Python 3.11+ when available; with only Python 3.10 (or no
+Python), it downloads a private Python 3.13 through uv under the yapp install
+directory. Your system Python and shell profiles are unchanged. Run it again
+to update.
 
 ### Staying up to date
 
@@ -101,7 +103,8 @@ If you are an AI coding agent asked to install or use yapp, follow these steps.
 A condensed summary is in [`llms.txt`](llms.txt); the full checklist is
 [INSTALLATION.md](INSTALLATION.md).
 
-1. Check prerequisites: `python3 --version` (3.11+) and `tmux -V`.
+1. Check `curl --version` and `tmux -V`. The recommended installer selects or
+   downloads a compatible Python; pipx and source installs still require Python 3.11+.
 2. Install: `curl -fsSL https://yapp.riggedcode.com/install.sh | sh` (or `pipx install git+https://github.com/Ankitkkkk/yapp.git` if pipx is present). Never use `pip install --break-system-packages`.
 3. Verify without starting anything: `yapp --help`.
 4. With a server running, read state as JSON (no side effects):

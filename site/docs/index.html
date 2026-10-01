@@ -84,7 +84,7 @@
     <nav class="docs-nav" aria-label="On this page"><p>In this guide</p><a href="#install">Install yapp</a><a href="#first-session">Your first session</a><a href="#commands">Commands &amp; controls</a><a href="#providers">Provider support</a><a href="#updates">Updates &amp; data</a><a href="#troubleshooting">Troubleshooting</a></nav>
     <div class="docs-content">
       <section id="install"><h2>Install yapp</h2>
-        <p>You need <strong>Python 3.11+</strong> with venv and pip, <strong>tmux</strong>, and <strong>curl</strong>. Use a terminal at least 80 columns by 18 rows. Install and authenticate the coding CLI you want to use separately.</p>
+        <p>You need <strong>tmux</strong> and <strong>curl</strong>. The installer uses Python 3.11+ if available, or downloads a private Python 3.13 when your system has only Python 3.10 or no Python. Use a terminal at least 80 columns by 18 rows. Install and authenticate the coding CLI you want to use separately.</p>
         <h3>Check your prerequisites</h3>
         <div class="command"><pre><code>python3 --version
 tmux -V
@@ -92,14 +92,14 @@ curl --version</code></pre></div>
         <p>On Ubuntu or Debian:</p>
         <div class="command"><pre><code>sudo apt-get update
 sudo apt-get install python3 python3-venv python3-pip tmux curl git</code></pre></div>
-        <p>Confirm Python is 3.11 or newer afterward. On macOS, with Homebrew installed, use <code>brew install python tmux git</code>; macOS includes curl. On Windows, run the Linux instructions inside WSL2.</p>
+        <p>For pipx or source installs, confirm Python is 3.11 or newer. The recommended installer handles older or missing system Python automatically. On macOS, with Homebrew installed, use <code>brew install python tmux git</code>; macOS includes curl. On Windows, run the Linux instructions inside WSL2.</p>
         <h3>Run the installer</h3>
         <div class="command">
   <div class="command-bar"><span>Linux · macOS · WSL2</span><button class="copy" type="button" data-copy="install-command" aria-label="Copy install command" hidden>Copy</button></div>
   <pre><code id="install-command">curl -fsSL https://yapp.riggedcode.com/install.sh | sh</code></pre>
 </div>
 <p class="status" role="status" aria-live="polite" aria-atomic="true"></p>
-        <p><a href="/install.sh">Inspect the script</a> before running it if you prefer. It installs the latest published release, or <code>main</code> when no release is available, into a private virtual environment. It creates <code>yapp</code> and <code>goon</code> commands in <code>~/.local/bin</code>.</p>
+        <p><a href="/install.sh">Inspect the script</a> before running it if you prefer. It installs the latest published release, or <code>main</code> when no release is available, into a private virtual environment. It creates <code>yapp</code> and <code>goon</code> commands in <code>~/.local/bin</code>. Any downloaded Python and uv tool stay under the yapp install directory; system Python and shell profiles are unchanged.</p>
         <div class="command"><pre><code>yapp --help
 goon --help</code></pre></div>
         <p>These help commands do not start the server or agents. If your shell cannot find them, follow the installer's PATH instructions and open a new terminal.</p>
@@ -155,6 +155,7 @@ yapp update</code></pre></div>
       </section>
       <section id="troubleshooting"><h2>Troubleshooting</h2>
         <h3>“Externally managed environment”</h3><p>Use the installer or pipx, which isolate Python dependencies. Do not replace <code>pipx</code> with system <code>pip</code> or use <code>--break-system-packages</code>.</p>
+        <h3>Python is too old or missing</h3><p>Rerun the current installer; it downloads a private compatible runtime automatically. If you explicitly set <code>PYTHON</code>, point it to a Python 3.11+ executable or unset it to allow automatic selection. Check network access to Astral and GitHub if a runtime download fails.</p>
         <h3>Server connection failed</h3><p>Open <code>yapp</code> in a terminal to auto-start the local server. From a source checkout, run <code>.venv/bin/python run.py</code> manually. The default web/API address is <code>http://127.0.0.1:8300</code>; MCP uses <code>http://127.0.0.1:8200/mcp</code>. Shell status checks alone do not start it.</p>
         <h3>An agent looks stuck</h3><p>Check that its CLI is installed and authenticated and its project directory exists. Use <kbd>F5</kbd> for Activity and <kbd>F6</kbd> to inspect its terminal for trust or approval prompts. An orchestrator needs to be running, ready, and enabled before it can route work.</p>
         <h3>Copy or function keys behave differently</h3><p>Some keyboards need Fn with function keys. Use <kbd>F7</kbd> to release mouse capture before selecting text. Inside tmux, Shift-drag or tmux copy mode may be needed. Copy behavior depends on your terminal.</p>

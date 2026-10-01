@@ -14,7 +14,10 @@ development. The older release ZIP builder does not include all CLI modules.
 
 For the full experience, use Linux or macOS with:
 
-- Python **3.11 or newer**, including `venv` and `pip`.
+- Runtime: Python **3.11 or newer**, including `venv` and `pip`. The recommended
+  installer downloads a private compatible Python when your system has only
+  Python 3.10 or no Python. Pipx and source installs require a compatible Python
+  to be installed separately.
 - Git and **tmux**. tmux is required for server auto-start and terminal-agent
   spawn, resume, stop, and attach.
 - An interactive terminal at least **80 columns × 18 rows**. A wider terminal
@@ -27,7 +30,8 @@ and follow the Linux instructions inside WSL. Native Windows can use chat with a
 manually started server, but this CLI's tmux lifecycle actions are unavailable.
 Native Windows full-screen behavior is not validated end to end.
 
-Run these checks before installing anything:
+Check your tools before installing. An older or missing `python3` is fine for
+the recommended installer; it obtains a compatible runtime automatically:
 
 ```sh
 python3 --version
@@ -42,8 +46,9 @@ sudo apt-get update
 sudo apt-get install python3 python3-venv python3-pip git tmux curl
 ```
 
-Confirm Python is still at least 3.11 afterward; older distributions may need
-a newer Python interpreter. On macOS, with Homebrew already installed:
+For pipx or source installs, confirm Python is at least 3.11 afterward. The
+recommended installer handles older system versions. On macOS, with Homebrew
+already installed:
 
 ```sh
 brew install python git tmux
@@ -51,7 +56,8 @@ brew install python git tmux
 
 ## 2. Install the package (recommended)
 
-Run the installer. It needs only Python 3.11+ with `venv` support and `curl`:
+Run the installer with curl. It uses an existing Python 3.11+ or downloads a
+private Python 3.13 through uv when needed:
 
 ```sh
 curl -fsSL https://yapp.riggedcode.com/install.sh | sh
@@ -69,6 +75,25 @@ uninstall command. yapp then keeps itself up to date (see the README's
 *Staying up to date*); running the installer again also updates it. If it
 reports that `~/.local/bin` is not on `PATH`, add it as shown and open a new
 terminal.
+
+Downloaded Python lives under `<install directory>/python`; a private uv tool,
+when needed, lives under `<install directory>/tools`. The installer does not
+replace system Python or modify shell profiles. Runtime downloads need internet
+access. To choose an installed interpreter explicitly, set `PYTHON` on the shell
+that runs the script:
+
+```sh
+curl -fsSL https://yapp.riggedcode.com/install.sh | PYTHON=/usr/bin/python3.12 sh
+```
+
+That override applies when creating a new environment. Updates reuse the
+existing environment's interpreter. An incompatible or incomplete existing
+environment is preserved and reported rather than silently deleted.
+
+The printed uninstall command removes the virtual environment and command
+links. If Python was downloaded, you can also remove `python`, `tools`, and
+`cache/uv` under the install directory. Keep application data and uploads if you
+want to retain your history.
 
 `yapp` and `goon` are the same application; use whichever name you prefer.
 
@@ -234,6 +259,8 @@ Saving a higher limit does not unpause an already paused conversation. Send
 | --- | --- |
 | `yapp` / `goon`: command not found | Add `~/.local/bin` to `PATH` (or run `pipx ensurepath`) and open a new terminal, or use `.venv/bin/yapp` from a checkout. |
 | `error: externally-managed-environment` | Plain `pip` ran against system Python (often a `pipx` → `pip` shell correction). Use the installer or install pipx first; never `--break-system-packages`. |
+| Installer cannot download Python | Check network access to Astral and GitHub, or set `PYTHON` to an installed Python 3.11+ executable. |
+| Installer rejects an explicit `PYTHON` | Use a Python 3.11+ executable, or unset `PYTHON` to select/download one automatically. |
 | Installer: could not create a virtual environment | Install venv support (`sudo apt install python3-venv`, or `python3.X-venv` for your version) and rerun. |
 | Missing Python modules | Rerun the installer (or `pipx reinstall yapp`, or `pip install -e .` in a checkout) and run `pip check`. |
 | Interactive chat requires a terminal | Launch in a real terminal; use `read`, `status`, or other shell commands for scripts. |
